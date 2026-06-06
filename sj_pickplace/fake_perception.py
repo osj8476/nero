@@ -9,7 +9,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 FAKE_OBJECTS = [
     {"label": "cup",      "center_3d": {"x": 0.25, "y": - 0.20, "z": 0.00}},
     {"label": "bottle",   "center_3d": {"x": -0.32, "y": -0.10, "z": 0.00}},
-    {"label": "book", "center_3d": {"x": 0.15, "y":  0.20, "z": 0.00}},
+    {"label": "book", "center_3d": {"x": 0.20, "y": -0.25, "z": 0.00}},
 ]
 
 ORIGINAL_POSITIONS = {obj["label"]: dict(obj["center_3d"]) for obj in FAKE_OBJECTS}
