@@ -19,7 +19,7 @@ class FakePerception(Node):
         super().__init__("fake_perception")
 
         qos = QoSProfile(
-            reliability=ReliabilityPolicy.BEST_EFFORT,
+            reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST, depth=1)
 
         self.pub = self.create_publisher(String, "/detected_objects", qos)
