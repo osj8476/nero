@@ -23,6 +23,11 @@ APPROACH_Z  = 0.13
 DESCEND_Z   = 0.03
 LIFT_Z      = 0.23
 
+# 홈 자세 좌표 (base_link 기준, 팔이 안전하게 올라가는 위치)
+HOME_X = 0.0
+HOME_Y = 0.0
+HOME_Z = 0.35
+
 MOVE_DELAY    = 6.0
 GRIPPER_DELAY = 4.0
 
@@ -107,6 +112,7 @@ class PlanningNode(Node):
             return
 
         action = cmd.get('action', 'pick')
+
         if action == 'pick':
             label = cmd.get('target_label')
             pos = self._find_object(label)
@@ -126,6 +132,27 @@ class PlanningNode(Node):
                 return
             self.get_logger().info(f'PLACE 시작 @ {pos}')
             threading.Thread(target=self._place_sequence, args=(pos,), daemon=True).start()
+
+        # ── 추가: move ──────────────────────────────────────────────
+        elif action == 'move':
+            pos = cmd.get('target_pos')
+            if pos is None:
+                self.get_logger().warn("'move' 명령에 target_pos 없음.")
+                with self.lock:
+                    self.busy = False
+                return
+            self.get_logger().info(f'MOVE 시작 @ {pos}')
+            threading.Thread(target=self._move_sequence, args=(pos,), daemon=True).start()
+
+        # ── 추가: home ──────────────────────────────────────────────
+        elif action == 'home':
+            self.get_logger().info('HOME 시작')
+            threading.Thread(target=self._home_sequence, daemon=True).start()
+
+        else:
+            self.get_logger().warn(f"알 수 없는 action: '{action}'")
+            with self.lock:
+                self.busy = False
 
     def _find_object(self, label):
         for obj in self.latest_objects:
@@ -178,6 +205,42 @@ class PlanningNode(Node):
             self._publish_result('success', 'place_complete')
         except Exception as e:
             self.get_logger().error(f'PLACE 오류: {e}')
+            self._publish_result('failed', str(e))
+        finally:
+            with self.lock:
+                self.busy = False
+
+    # ── 추가: _move_sequence ────────────────────────────────────────
+    def _move_sequence(self, pos):
+        try:
+            self.get_logger().info(f"1/1: 이동 → ({pos['x']:.3f}, {pos['y']:.3f}, {pos['z']:.3f})")
+            self._move(pos['x'], pos['y'], pos['z'])
+            time.sleep(MOVE_DELAY)
+
+            self.get_logger().info('✅ MOVE 완료')
+            self._publish_result('success', 'move_complete')
+        except Exception as e:
+            self.get_logger().error(f'MOVE 오류: {e}')
+            self._publish_result('failed', str(e))
+        finally:
+            with self.lock:
+                self.busy = False
+
+    # ── 추가: _home_sequence ────────────────────────────────────────
+    def _home_sequence(self):
+        try:
+            self.get_logger().info(f'1/2: 홈 위치로 이동 ({HOME_X}, {HOME_Y}, {HOME_Z})')
+            self._move(HOME_X, HOME_Y, HOME_Z)
+            time.sleep(MOVE_DELAY)
+
+            self.get_logger().info('2/2: 그리퍼 열기')
+            self._gripper(SIM_GRIPPER_OPEN, GRIPPER_OPEN)
+            time.sleep(GRIPPER_DELAY)
+
+            self.get_logger().info('✅ HOME 완료')
+            self._publish_result('success', 'home_complete')
+        except Exception as e:
+            self.get_logger().error(f'HOME 오류: {e}')
             self._publish_result('failed', str(e))
         finally:
             with self.lock:
