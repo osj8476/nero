@@ -191,15 +191,17 @@ def list_detected_objects() -> str:
 
 
 @mcp.tool()
-def pick_object(target_label: str) -> str:
+def pick_object(target_label: str, grasp_dir: str = "auto") -> str:
     """지정한 물체를 로봇 팔로 집어 올린다. pick 완료까지 블로킹.
 
-    planning_node 의 5단계 시퀀스(Approach→Open→Descend→Close→Lift)가
-    완료되거나 실패할 때까지 기다린 뒤 실제 결과를 반환한다.
-
     Args:
-        target_label: 집을 물체 라벨. list_detected_objects() 결과 중 하나.
-                      (예: "cup", "bottle"). 영어 소문자.
+        target_label: 집을 물체 라벨 (예: "cup", "bottle"). 영어 소문자.
+        grasp_dir: 파지 방향.
+            "auto"        : 물체 위치·라벨 기반 자동 선택 (기본값)
+            "top"         : 위에서 아래로 (컵, 박스 등 평평한 물체)
+            "side"        : 앞에서 수평으로 (병, 책 등 세워진 물체)
+            "side_left"   : 왼쪽에서 수평으로
+            "side_right"  : 오른쪽에서 수평으로
 
     Returns:
         성공: {"status": "success", "reason": "pick_complete", "target_label": "..."}
@@ -217,22 +219,25 @@ def pick_object(target_label: str) -> str:
                       f"인식된 물체: {sorted(available)}",
         }, ensure_ascii=False)
 
-    _ros_node.publish_command({"action": "pick", "target_label": target_label})
+    payload = {"action": "pick", "target_label": target_label}
+    if grasp_dir and grasp_dir != "auto":
+        payload["grasp_dir"] = grasp_dir
+    _ros_node.publish_command(payload)
     result = _ros_node.wait_for_result(timeout=TIMEOUT_PICK)
     result["target_label"] = target_label
     return json.dumps(result, ensure_ascii=False)
 
 
 @mcp.tool()
-def place_object(x: float, y: float, z: float) -> str:
+def place_object(x: float, y: float, z: float, grasp_dir: str = "auto") -> str:
     """집은 물체를 지정한 좌표(base_link 기준, 미터)에 내려놓는다. place 완료까지 블로킹.
-
-    pick_object() 성공 이후에 호출해야 한다.
 
     Args:
         x: 전방 거리 (양수 = 로봇 앞, 단위: 미터)
         y: 좌우 거리 (양수 = 왼쪽, 단위: 미터)
         z: 높이 (테이블 위 ≈ 0.0, 단위: 미터)
+        grasp_dir: 내려놓을 때 자세. pick_object 와 동일한 값 사용 권장.
+            "auto"|"top"|"side"|"side_left"|"side_right"
 
     Returns:
         성공: {"status": "success", "reason": "place_complete", "place_pos": {...}}
@@ -240,14 +245,17 @@ def place_object(x: float, y: float, z: float) -> str:
     """
     _ensure_ros()
     place_pos = {"x": x, "y": y, "z": z}
-    _ros_node.publish_command({"action": "place", "place_pos": place_pos})
+    payload = {"action": "place", "place_pos": place_pos}
+    if grasp_dir and grasp_dir != "auto":
+        payload["grasp_dir"] = grasp_dir
+    _ros_node.publish_command(payload)
     result = _ros_node.wait_for_result(timeout=TIMEOUT_PLACE)
     result["place_pos"] = place_pos
     return json.dumps(result, ensure_ascii=False)
 
 
 @mcp.tool()
-def pick_and_place(target_label: str, x: float, y: float, z: float) -> str:
+def pick_and_place(target_label: str, x: float, y: float, z: float, grasp_dir: str = "auto") -> str:
     """물체를 집은 뒤 지정 좌표에 내려놓는다. 전체 완료까지 블로킹.
 
     pick 완료를 확인한 뒤 place 를 발행하므로,
@@ -278,7 +286,10 @@ def pick_and_place(target_label: str, x: float, y: float, z: float) -> str:
         }, ensure_ascii=False)
 
     # ── 2) pick 발행 → 완료 대기 ────────────────────────────────
-    _ros_node.publish_command({"action": "pick", "target_label": target_label})
+    pick_cmd = {"action": "pick", "target_label": target_label}
+    if grasp_dir and grasp_dir != "auto":
+        pick_cmd["grasp_dir"] = grasp_dir
+    _ros_node.publish_command(pick_cmd)
     pick_result = _ros_node.wait_for_result(timeout=TIMEOUT_PICK)
 
     if pick_result.get("status") != "success":
@@ -287,7 +298,10 @@ def pick_and_place(target_label: str, x: float, y: float, z: float) -> str:
         return json.dumps(pick_result, ensure_ascii=False)
 
     # ── 3) pick 성공 → place 발행 → 완료 대기 ──────────────────
-    _ros_node.publish_command({"action": "place", "place_pos": place_pos})
+    place_cmd = {"action": "place", "place_pos": place_pos}
+    if grasp_dir and grasp_dir != "auto":
+        place_cmd["grasp_dir"] = grasp_dir
+    _ros_node.publish_command(place_cmd)
     place_result = _ros_node.wait_for_result(timeout=TIMEOUT_PLACE)
 
     if place_result.get("status") != "success":
