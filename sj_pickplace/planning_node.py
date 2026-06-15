@@ -102,7 +102,7 @@ def _auto_grasp_quat(pos: dict, label: str) -> list:
 
     우선순위:
       1. 라벨 힌트 (LABEL_GRASP_HINT)
-      2. 물체가 로봇 옆(|y| > |x|)이면 side_left/right
+      2. 물체가 로봇 왼쪽/오른쪽에 있으면 회전된 top_down
       3. 기본 top_down
     """
     # 1) 라벨 힌트
@@ -110,10 +110,10 @@ def _auto_grasp_quat(pos: dict, label: str) -> list:
     if hint:
         return GRASP_DIR_MAP[hint]
 
-    # 2) 위치 기반: 물체가 로봇 옆에 있으면 측면 파지
+    # 2) 위치 기반: y 방향에 따라 top_down 회전 변형
     x, y = pos.get('x', 0.0), pos.get('y', 0.0)
-    if abs(y) > abs(x) * 1.5:  # y가 x보다 1.5배 이상 크면 측면
-        return QUAT_SIDE_LEFT if y > 0 else QUAT_SIDE_RIGHT
+    if abs(y) > abs(x) * 1.5:
+        return QUAT_TOP_DOWN_L if y > 0 else QUAT_TOP_DOWN_RR
 
     # 3) 기본: top_down
     return QUAT_TOP_DOWN
@@ -358,7 +358,7 @@ class PlanningNode(Node):
             self.moveit2.move_to_pose(
                 position=[x, y, z],
                 quat_xyzw=quat,
-                cartesian=False,
+                cartesian=True,
             )
             self.get_logger().info(
                 f'[sim] move → {x:.3f} {y:.3f} {z:.3f} | quat={quat}')
