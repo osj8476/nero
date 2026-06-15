@@ -46,33 +46,40 @@ MOVE_DELAY    = 6.0
 GRIPPER_DELAY = 4.0
 
 # ── 사전 정의 쿼터니언 (xyzw, base_link 기준) ─────────────────────────────────
-# top-down : 그리퍼가 수직 아래를 향함 (pitch 90°)
-QUAT_TOP_DOWN   = [0.0,  0.7071, 0.0, 0.7071]
-# side     : 그리퍼가 수평 앞을 향함 (pitch 0°, 기본 자세)
-QUAT_SIDE       = [0.0,  0.0,    0.0, 1.0   ]
-# side_left: 그리퍼가 왼쪽을 향함 (yaw 90°)
-QUAT_SIDE_LEFT  = [0.0,  0.0,    0.7071, 0.7071]
-# side_right: 그리퍼가 오른쪽을 향함 (yaw -90°)
-QUAT_SIDE_RIGHT = [0.0,  0.0,   -0.7071, 0.7071]
+# Nero URDF 분석 결과:
+#   홈자세(all joints=0)에서 gripper_flange z축 = [0,0,+1] (위쪽)
+#   → 파지 방향은 gripper z축이 가리키는 방향으로 결정
+#
+# top_down  : gripper z → [0,0,-1]  (위에서 아래로, pitch 180°)
+QUAT_TOP_DOWN   = [0.0,  1.0,    0.0,    0.0   ]
+# side_front: gripper z → [+1,0,0]  (앞에서 뒤로, y축 90°)
+QUAT_SIDE_FRONT = [0.0,  0.7071, 0.0,    0.7071]
+# side_back : gripper z → [-1,0,0]  (뒤에서 앞으로, y축 -90°)
+QUAT_SIDE_BACK  = [0.0, -0.7071, 0.0,    0.7071]
+# side_left : gripper z → [0,-1,0]  (왼쪽에서 오른쪽으로, x축 90°)
+QUAT_SIDE_LEFT  = [0.7071, 0.0,  0.0,    0.7071]
+# side_right: gripper z → [0,+1,0]  (오른쪽에서 왼쪽으로, x축 -90°)
+QUAT_SIDE_RIGHT = [-0.7071, 0.0, 0.0,    0.7071]
 
 GRASP_DIR_MAP = {
     'top':        QUAT_TOP_DOWN,
     'top_down':   QUAT_TOP_DOWN,
-    'side':       QUAT_SIDE,
-    'side_front': QUAT_SIDE,
+    'side':       QUAT_SIDE_FRONT,
+    'side_front': QUAT_SIDE_FRONT,
+    'side_back':  QUAT_SIDE_BACK,
     'side_left':  QUAT_SIDE_LEFT,
     'side_right': QUAT_SIDE_RIGHT,
 }
 
 # 물체 라벨별 기본 파지 방향 힌트
 LABEL_GRASP_HINT = {
-    'bottle':  'side',       # 세워진 병 → 옆에서 잡기
-    'cup':     'top',        # 컵 → 위에서
-    'book':    'side',       # 책 → 옆에서
-    'box':     'top',        # 박스 → 위에서
-    'ball':    'top',        # 공 → 위에서
-    'scissors':'side',       # 가위 → 옆에서
-    'remote':  'top',        # 리모컨 → 위에서
+    'bottle':  'side_front',  # 세워진 병 → 앞에서 수평
+    'cup':     'top_down',    # 컵 → 위에서 아래로
+    'book':    'side_front',  # 책 → 앞에서 수평
+    'box':     'top_down',    # 박스 → 위에서 아래로
+    'ball':    'top_down',    # 공 → 위에서 아래로
+    'scissors':'side_front',  # 가위 → 앞에서 수평
+    'remote':  'top_down',    # 리모컨 → 위에서 아래로
 }
 
 
@@ -102,12 +109,12 @@ def _auto_grasp_quat(pos: dict, label: str) -> list:
     if hint:
         return GRASP_DIR_MAP[hint]
 
-    # 2) 위치 기반
+    # 2) 위치 기반: 물체가 로봇 옆에 있으면 측면 파지
     x, y = pos.get('x', 0.0), pos.get('y', 0.0)
-    if abs(y) > abs(x):
+    if abs(y) > abs(x) * 1.5:  # y가 x보다 1.5배 이상 크면 측면
         return QUAT_SIDE_LEFT if y > 0 else QUAT_SIDE_RIGHT
 
-    # 3) 기본
+    # 3) 기본: top_down
     return QUAT_TOP_DOWN
 
 
