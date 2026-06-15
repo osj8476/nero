@@ -39,36 +39,37 @@ DESCEND_Z  = 0.03
 LIFT_Z     = 0.23
 
 # ── 홈 자세 ───────────────────────────────────────────────────────────────────
-HOME_X, HOME_Y, HOME_Z = 0.0, 0.0, 0.35
+HOME_X, HOME_Y, HOME_Z = 0.2, 0.0, 0.35   # 정면 위쪽 (singularity 회피)
 
 # ── 타이밍 ────────────────────────────────────────────────────────────────────
 MOVE_DELAY    = 6.0
 GRIPPER_DELAY = 4.0
 
 # ── 사전 정의 쿼터니언 (xyzw, base_link 기준) ─────────────────────────────────
-# Nero URDF 분석 결과:
-#   홈자세(all joints=0)에서 gripper_flange z축 = [0,0,+1] (위쪽)
-#   → 파지 방향은 gripper z축이 가리키는 방향으로 결정
+# RViz tf2_echo 실측값 기반 (IK 검증 완료)
 #
-# top_down  : gripper z → [0,0,-1]  (위에서 아래로, pitch 180°)
-QUAT_TOP_DOWN   = [0.0,  1.0,    0.0,    0.0   ]
-# side_front: gripper z → [+1,0,0]  (앞에서 뒤로, y축 90°)
-QUAT_SIDE_FRONT = [0.0,  0.7071, 0.0,    0.7071]
-# side_back : gripper z → [-1,0,0]  (뒤에서 앞으로, y축 -90°)
-QUAT_SIDE_BACK  = [0.0, -0.7071, 0.0,    0.7071]
-# side_left : gripper z → [0,-1,0]  (왼쪽에서 오른쪽으로, x축 90°)
-QUAT_SIDE_LEFT  = [0.7071, 0.0,  0.0,    0.7071]
-# side_right: gripper z → [0,+1,0]  (오른쪽에서 왼쪽으로, x축 -90°)
-QUAT_SIDE_RIGHT = [-0.7071, 0.0, 0.0,    0.7071]
+# top_down  : gripper z → [0,0,-1]  위에서 아래로 파지
+#             실측: 컵 근처에서 IK 성공 확인
+QUAT_TOP_DOWN   = [0.008,  0.999,  0.023,  0.037]
+# top_down yaw+180: 같은 top-down이지만 gripper 회전 방향 반대
+QUAT_TOP_DOWN_R = [0.999, -0.008, -0.037,  0.023]
+# top_down yaw-90: top-down + 90도 회전 (y 음수 방향 물체)
+QUAT_TOP_DOWN_L = [0.708,  0.697, -0.010,  0.043]
+# top_down yaw+90: top-down + -90도 회전
+QUAT_TOP_DOWN_RR= [-0.643, 0.653,  0.041,  0.011]
+# home: 홈 대기 자세 (gripper 위를 향함)
+QUAT_HOME       = [0.073,  0.028, -0.055,  0.995]
 
 GRASP_DIR_MAP = {
-    'top':        QUAT_TOP_DOWN,
-    'top_down':   QUAT_TOP_DOWN,
-    'side':       QUAT_SIDE_FRONT,
-    'side_front': QUAT_SIDE_FRONT,
-    'side_back':  QUAT_SIDE_BACK,
-    'side_left':  QUAT_SIDE_LEFT,
-    'side_right': QUAT_SIDE_RIGHT,
+    'top':         QUAT_TOP_DOWN,
+    'top_down':    QUAT_TOP_DOWN,
+    'top_down_r':  QUAT_TOP_DOWN_R,
+    'top_down_l':  QUAT_TOP_DOWN_L,
+    'top_down_rr': QUAT_TOP_DOWN_RR,
+    'side':        QUAT_TOP_DOWN,    # side 요청도 일단 top_down으로 (실측 전까지)
+    'side_front':  QUAT_TOP_DOWN,
+    'side_left':   QUAT_TOP_DOWN_L,
+    'side_right':  QUAT_TOP_DOWN_RR,
 }
 
 # 물체 라벨별 기본 파지 방향 힌트
@@ -334,7 +335,7 @@ class PlanningNode(Node):
     def _home_sequence(self):
         try:
             self.get_logger().info(f'1/2: 홈 위치로 이동')
-            self._move(HOME_X, HOME_Y, HOME_Z, QUAT_TOP_DOWN)
+            self._move(HOME_X, HOME_Y, HOME_Z, QUAT_HOME)
             time.sleep(MOVE_DELAY)
 
             self.get_logger().info('2/2: 그리퍼 열기')
