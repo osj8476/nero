@@ -49,16 +49,17 @@ GRIPPER_DELAY = 4.0
 # RViz tf2_echo 실측값 기반 (IK 검증 완료)
 #
 # top_down  : gripper z → [0,0,-1]  위에서 아래로 파지
-#             실측: 컵 근처에서 IK 성공 확인
 QUAT_TOP_DOWN   = [0.008,  0.999,  0.023,  0.037]
-# top_down yaw+180: 같은 top-down이지만 gripper 회전 방향 반대
+# top_down yaw+180
 QUAT_TOP_DOWN_R = [0.999, -0.008, -0.037,  0.023]
-# top_down yaw-90: top-down + 90도 회전 (y 음수 방향 물체)
+# top_down yaw-90
 QUAT_TOP_DOWN_L = [0.708,  0.697, -0.010,  0.043]
-# top_down yaw+90: top-down + -90도 회전
+# top_down yaw+90
 QUAT_TOP_DOWN_RR= [-0.643, 0.653,  0.041,  0.011]
 # home: 홈 대기 자세 (gripper 위를 향함)
 QUAT_HOME       = [0.073,  0.028, -0.055,  0.995]
+# ★ side_front: 앞에서 수평으로 파지 (RViz 실측값 2025-06-15)
+QUAT_SIDE_FRONT = [0.481, -0.527,  0.427,  0.556]
 
 GRASP_DIR_MAP = {
     'top':         QUAT_TOP_DOWN,
@@ -66,8 +67,8 @@ GRASP_DIR_MAP = {
     'top_down_r':  QUAT_TOP_DOWN_R,
     'top_down_l':  QUAT_TOP_DOWN_L,
     'top_down_rr': QUAT_TOP_DOWN_RR,
-    'side':        QUAT_TOP_DOWN,    # side 요청도 일단 top_down으로 (실측 전까지)
-    'side_front':  QUAT_TOP_DOWN,
+    'side':        QUAT_SIDE_FRONT,   # ★ 실측값으로 교체
+    'side_front':  QUAT_SIDE_FRONT,   # ★ 실측값으로 교체
     'side_left':   QUAT_TOP_DOWN_L,
     'side_right':  QUAT_TOP_DOWN_RR,
 }
@@ -98,24 +99,13 @@ def _euler_to_quat(roll: float, pitch: float, yaw: float) -> list:
 
 
 def _auto_grasp_quat(pos: dict, label: str) -> list:
-    """물체 위치·라벨로 파지 자세 자동 선택.
-
-    우선순위:
-      1. 라벨 힌트 (LABEL_GRASP_HINT)
-      2. 물체가 로봇 왼쪽/오른쪽에 있으면 회전된 top_down
-      3. 기본 top_down
-    """
-    # 1) 라벨 힌트
+    """물체 위치·라벨로 파지 자세 자동 선택."""
     hint = LABEL_GRASP_HINT.get(label, None)
     if hint:
         return GRASP_DIR_MAP[hint]
-
-    # 2) 위치 기반: y 방향에 따라 top_down 회전 변형
     x, y = pos.get('x', 0.0), pos.get('y', 0.0)
     if abs(y) > abs(x) * 1.5:
         return QUAT_TOP_DOWN_L if y > 0 else QUAT_TOP_DOWN_RR
-
-    # 3) 기본: top_down
     return QUAT_TOP_DOWN
 
 
@@ -177,14 +167,12 @@ class PlanningNode(Node):
         self.lock = threading.Lock()
         self.get_logger().info('PlanningNode 준비 완료')
 
-    # ── 인식 결과 캐시 ──────────────────────────────────────────────
     def on_objects(self, msg):
         try:
             self.latest_objects = json.loads(msg.data).get('objects', [])
         except Exception:
             pass
 
-    # ── 명령 수신 ───────────────────────────────────────────────────
     def on_command(self, msg):
         self.get_logger().info(f'[CMD] 수신: {msg.data[:80]}')
         with self.lock:
@@ -210,7 +198,6 @@ class PlanningNode(Node):
                 with self.lock:
                     self.busy = False
                 return
-            # grasp_dir : MCP가 명시하면 우선, 없으면 자동 선택
             grasp_dir = cmd.get('grasp_dir', None)
             quat = (GRASP_DIR_MAP.get(grasp_dir, None)
                     if grasp_dir else _auto_grasp_quat(pos, label))
@@ -255,14 +242,12 @@ class PlanningNode(Node):
             with self.lock:
                 self.busy = False
 
-    # ── 객체 탐색 ───────────────────────────────────────────────────
     def _find_object(self, label):
         for obj in self.latest_objects:
             if obj.get('label') == label:
                 return obj.get('center_3d')
         return None
 
-    # ── pick 시퀀스 ─────────────────────────────────────────────────
     def _pick_sequence(self, pos, quat):
         try:
             self.get_logger().info('1/5: 접근')
@@ -294,7 +279,6 @@ class PlanningNode(Node):
             with self.lock:
                 self.busy = False
 
-    # ── place 시퀀스 ────────────────────────────────────────────────
     def _place_sequence(self, pos, quat):
         try:
             self.get_logger().info('1/2: place 이동')
@@ -314,7 +298,6 @@ class PlanningNode(Node):
             with self.lock:
                 self.busy = False
 
-    # ── move 시퀀스 ─────────────────────────────────────────────────
     def _move_sequence(self, pos, quat):
         try:
             self.get_logger().info(
@@ -331,7 +314,6 @@ class PlanningNode(Node):
             with self.lock:
                 self.busy = False
 
-    # ── home 시퀀스 ─────────────────────────────────────────────────
     def _home_sequence(self):
         try:
             self.get_logger().info(f'1/2: 홈 위치로 이동')
@@ -351,14 +333,14 @@ class PlanningNode(Node):
             with self.lock:
                 self.busy = False
 
-    # ── 하드웨어 헬퍼 ───────────────────────────────────────────────
     def _move(self, x: float, y: float, z: float, quat: list):
-        """end-effector 를 (x,y,z) + quat 자세로 이동."""
         if self.use_moveit2:
             self.moveit2.move_to_pose(
                 position=[x, y, z],
                 quat_xyzw=quat,
-                cartesian=True,
+                cartesian=False,
+                tolerance_position=0.01,
+                tolerance_orientation=0.05,
             )
             self.get_logger().info(
                 f'[sim] move → {x:.3f} {y:.3f} {z:.3f} | quat={quat}')
