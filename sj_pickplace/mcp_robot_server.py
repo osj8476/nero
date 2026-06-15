@@ -338,6 +338,52 @@ def move_to_position(x: float, y: float, z: float) -> str:
 
 
 @mcp.tool()
+def move_joints(
+    j1: float = None, j2: float = None, j3: float = None,
+    j4: float = None, j5: float = None, j6: float = None, j7: float = None
+) -> str:
+    """로봇 팔의 각 관절(joint)을 직접 제어한다. 완료까지 블로킹.
+
+    joint space 제어로 IK 없이 직접 각도를 지정한다.
+    지정하지 않은 joint는 현재 각도 유지 (None으로 두면 됨).
+
+    Args:
+        j1: joint1 각도 (라디안). 범위: -2.705 ~ 2.705
+        j2: joint2 각도 (라디안). 범위: -1.74 ~ 1.74
+        j3: joint3 각도 (라디안). 범위: -2.75 ~ 2.75
+        j4: joint4 각도 (라디안). 범위: -1.01 ~ 2.14
+        j5: joint5 각도 (라디안). 범위: -2.75 ~ 2.75
+        j6: joint6 각도 (라디안). 범위: -0.73 ~ 0.95
+        j7: joint7 각도 (라디안). 범위: -1.5708 ~ 1.5708
+
+    Returns:
+        성공: {"status": "success", "reason": "joint_move_complete", "joints": {...}}
+        실패: {"status": "failed"|"timeout", "reason": "..."}
+
+    Examples:
+        move_joints(j1=0.0, j2=0.5, j3=-0.3)  # j1,j2,j3만 이동
+        move_joints(j1=1.57)                    # j1만 90도 회전
+    """
+    _ensure_ros()
+    joints = {}
+    if j1 is not None: joints["j1"] = j1
+    if j2 is not None: joints["j2"] = j2
+    if j3 is not None: joints["j3"] = j3
+    if j4 is not None: joints["j4"] = j4
+    if j5 is not None: joints["j5"] = j5
+    if j6 is not None: joints["j6"] = j6
+    if j7 is not None: joints["j7"] = j7
+
+    if not joints:
+        return json.dumps({"status": "rejected", "reason": "joint 값을 하나 이상 지정해야 합니다."})
+
+    _ros_node.publish_command({"action": "move_joints", "joints": joints})
+    result = _ros_node.wait_for_result(timeout=TIMEOUT_MOVE)
+    result["joints"] = joints
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
 def go_home() -> str:
     """로봇 팔을 홈 자세로 복귀시키고 그리퍼를 연다. 완료까지 블로킹.
 

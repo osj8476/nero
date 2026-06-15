@@ -39,7 +39,7 @@ DESCEND_Z  = 0.03
 LIFT_Z     = 0.23
 
 # ── 홈 자세 ───────────────────────────────────────────────────────────────────
-HOME_X, HOME_Y, HOME_Z = 0.2, 0.0, 0.35   # 정면 위쪽 (singularity 회피)
+HOME_X, HOME_Y, HOME_Z = 0.0, 0.0, 0.75   # 실측 홈 좌표
 
 # ── 타이밍 ────────────────────────────────────────────────────────────────────
 MOVE_DELAY    = 6.0
@@ -57,7 +57,7 @@ QUAT_TOP_DOWN_L = [0.708,  0.697, -0.010,  0.043]
 # top_down yaw+90
 QUAT_TOP_DOWN_RR= [-0.643, 0.653,  0.041,  0.011]
 # home: 홈 대기 자세 (gripper 위를 향함)
-QUAT_HOME       = [0.073,  0.028, -0.055,  0.995]
+QUAT_HOME       = [0.0, 0.0, 0.0, 1.0]  # 실측 홈 자세
 # ★ side_front: 앞에서 수평으로 파지 (RViz 실측값 2025-06-15)
 QUAT_SIDE_FRONT = [0.481, -0.527,  0.427,  0.556]
 
@@ -148,7 +148,7 @@ class PlanningNode(Node):
                 group_name='arm',
                 callback_group=cb_arm,
                 use_move_group_action=True,
-                ignore_new_calls_while_executing=False,
+                ignore_new_calls_while_executing=True,
             )
             self.moveit2_gripper = MoveIt2(
                 node=self,
@@ -165,6 +165,10 @@ class PlanningNode(Node):
         self.latest_objects = []
         self.busy = False
         self.lock = threading.Lock()
+        # action server 준비 대기
+        if self.use_moveit2:
+            import time as _t
+            _t.sleep(3.0)
         self.get_logger().info('PlanningNode 준비 완료')
 
     def on_objects(self, msg):
@@ -203,8 +207,9 @@ class PlanningNode(Node):
                     if grasp_dir else _auto_grasp_quat(pos, label))
             self.get_logger().info(
                 f'PICK 시작: {label} @ {pos} | 자세: {grasp_dir or "auto"} {quat}')
-            threading.Thread(
-                target=self._pick_sequence, args=(pos, quat), daemon=True).start()
+            t = threading.Thread(target=self._pick_sequence, args=(pos, quat))
+            t.daemon = False
+            t.start()
 
         elif action == 'place':
             pos = cmd.get('place_pos')
@@ -227,11 +232,24 @@ class PlanningNode(Node):
                     self.busy = False
                 return
             grasp_dir = cmd.get('grasp_dir', None)
-            quat = (GRASP_DIR_MAP.get(grasp_dir, None)
-                    if grasp_dir else QUAT_TOP_DOWN)
+            # grasp_dir 없으면 현재 자세 유지 (QUAT_HOME 기본)
+            quat = (GRASP_DIR_MAP.get(grasp_dir, QUAT_HOME)
+                    if grasp_dir else QUAT_HOME)
             self.get_logger().info(f'MOVE 시작 @ {pos} | 자세: {quat}')
             threading.Thread(
                 target=self._move_sequence, args=(pos, quat), daemon=True).start()
+
+        elif action == 'move_joints':
+            joints = cmd.get('joints', {})
+            if not joints:
+                self.get_logger().warn("'move_joints' 명령에 joints 없음.")
+                with self.lock:
+                    self.busy = False
+                return
+            self.get_logger().info(f'MOVE_JOINTS 시작: {joints}')
+            t = threading.Thread(target=self._move_joints_sequence, args=(joints,))
+            t.daemon = False
+            t.start()
 
         elif action == 'home':
             self.get_logger().info('HOME 시작')
@@ -252,7 +270,6 @@ class PlanningNode(Node):
         try:
             self.get_logger().info('1/5: 접근')
             self._move(pos['x'], pos['y'], pos['z'] + APPROACH_Z, quat)
-            time.sleep(MOVE_DELAY)
 
             self.get_logger().info('2/5: 그리퍼 열기')
             self._gripper(SIM_GRIPPER_OPEN, GRIPPER_OPEN)
@@ -260,7 +277,6 @@ class PlanningNode(Node):
 
             self.get_logger().info('3/5: 내려가기')
             self._move(pos['x'], pos['y'], pos['z'] + DESCEND_Z, quat)
-            time.sleep(MOVE_DELAY)
 
             self.get_logger().info('4/5: 그리퍼 닫기')
             self._gripper(SIM_GRIPPER_CLOSE, GRIPPER_CLOSE)
@@ -268,7 +284,6 @@ class PlanningNode(Node):
 
             self.get_logger().info('5/5: 들어올리기')
             self._move(pos['x'], pos['y'], pos['z'] + LIFT_Z, quat)
-            time.sleep(MOVE_DELAY)
 
             self.get_logger().info('✅ PICK 완료')
             self._publish_result('success', 'pick_complete')
@@ -283,7 +298,6 @@ class PlanningNode(Node):
         try:
             self.get_logger().info('1/2: place 이동')
             self._move(pos['x'], pos['y'], pos['z'] + APPROACH_Z, quat)
-            time.sleep(MOVE_DELAY)
 
             self.get_logger().info('2/2: 그리퍼 열기')
             self._gripper(SIM_GRIPPER_OPEN, GRIPPER_OPEN)
@@ -303,7 +317,6 @@ class PlanningNode(Node):
             self.get_logger().info(
                 f"1/1: 이동 → ({pos['x']:.3f}, {pos['y']:.3f}, {pos['z']:.3f})")
             self._move(pos['x'], pos['y'], pos['z'], quat)
-            time.sleep(MOVE_DELAY)
 
             self.get_logger().info('✅ MOVE 완료')
             self._publish_result('success', 'move_complete')
@@ -314,11 +327,84 @@ class PlanningNode(Node):
             with self.lock:
                 self.busy = False
 
+    def _move_joints_sequence(self, joints: dict):
+        try:
+            joint_names = ['joint1','joint2','joint3','joint4','joint5','joint6','joint7']
+            key_map = {'j1':'joint1','j2':'joint2','j3':'joint3','j4':'joint4',
+                       'j5':'joint5','j6':'joint6','j7':'joint7'}
+            # 현재 joint_state에서 기본값 가져오기
+            # joint_state에서 arm joint 7개만 추출 (gripper 제외)
+            if self.moveit2.joint_state:
+                js = self.moveit2.joint_state
+                name_to_pos = dict(zip(js.name, js.position))
+                positions = [float(name_to_pos.get(jn, 0.0)) for jn in joint_names]
+            else:
+                positions = [0.0] * 7
+            for k, v in joints.items():
+                jname = key_map.get(k, k)
+                if jname in joint_names:
+                    idx = joint_names.index(jname)
+                    positions[idx] = float(v)
+            self.get_logger().info(f'joint positions: {[round(p,3) for p in positions]}')
+            self.moveit2.move_to_configuration(positions)
+            import time as _t
+            _t.sleep(0.5)
+            deadline = _t.time() + 30.0
+            while _t.time() < deadline:
+                if not self.moveit2._MoveIt2__is_motion_requested and \
+                   not self.moveit2._MoveIt2__is_executing:
+                    break
+                _t.sleep(0.1)
+            self.get_logger().info('✅ MOVE_JOINTS 완료')
+            self._publish_result('success', 'joint_move_complete')
+        except Exception as e:
+            self.get_logger().error(f'MOVE_JOINTS 오류: {e}')
+            self._publish_result('failed', str(e))
+        finally:
+            with self.lock:
+                self.busy = False
+
+    def _move_joints_sequence(self, joints: dict):
+        try:
+            joint_names = ['joint1','joint2','joint3','joint4','joint5','joint6','joint7']
+            key_map = {'j1':'joint1','j2':'joint2','j3':'joint3','j4':'joint4',
+                       'j5':'joint5','j6':'joint6','j7':'joint7'}
+            # 현재 joint_state에서 기본값 가져오기
+            # joint_state에서 arm joint 7개만 추출 (gripper 제외)
+            if self.moveit2.joint_state:
+                js = self.moveit2.joint_state
+                name_to_pos = dict(zip(js.name, js.position))
+                positions = [float(name_to_pos.get(jn, 0.0)) for jn in joint_names]
+            else:
+                positions = [0.0] * 7
+            for k, v in joints.items():
+                jname = key_map.get(k, k)
+                if jname in joint_names:
+                    idx = joint_names.index(jname)
+                    positions[idx] = float(v)
+            self.get_logger().info(f'joint positions: {[round(p,3) for p in positions]}')
+            self.moveit2.move_to_configuration(positions)
+            import time as _t
+            _t.sleep(0.5)
+            deadline = _t.time() + 30.0
+            while _t.time() < deadline:
+                if not self.moveit2._MoveIt2__is_motion_requested and \
+                   not self.moveit2._MoveIt2__is_executing:
+                    break
+                _t.sleep(0.1)
+            self.get_logger().info('✅ MOVE_JOINTS 완료')
+            self._publish_result('success', 'joint_move_complete')
+        except Exception as e:
+            self.get_logger().error(f'MOVE_JOINTS 오류: {e}')
+            self._publish_result('failed', str(e))
+        finally:
+            with self.lock:
+                self.busy = False
+
     def _home_sequence(self):
         try:
             self.get_logger().info(f'1/2: 홈 위치로 이동')
             self._move(HOME_X, HOME_Y, HOME_Z, QUAT_HOME)
-            time.sleep(MOVE_DELAY)
 
             self.get_logger().info('2/2: 그리퍼 열기')
             self._gripper(SIM_GRIPPER_OPEN, GRIPPER_OPEN)
@@ -335,13 +421,34 @@ class PlanningNode(Node):
 
     def _move(self, x: float, y: float, z: float, quat: list):
         if self.use_moveit2:
+            # 이전 상태 리셋
+            self.moveit2.force_reset_executing_state()
+            # action server 준비 확인
+            import time as _t
+            ready = self.moveit2._MoveIt2__move_action_client.server_is_ready()
+            self.get_logger().info(f'action server ready: {ready}')
+            self.get_logger().info(f'mutex locked: {self.moveit2._MoveIt2__execution_mutex.locked()}')
             self.moveit2.move_to_pose(
                 position=[x, y, z],
                 quat_xyzw=quat,
-                cartesian=False,
                 tolerance_position=0.01,
                 tolerance_orientation=0.05,
+                cartesian=False,
             )
+            self.get_logger().info(f'move_to_pose 반환됨')
+            # executor가 별도 스레드에서 spin 중이므로 단순 sleep으로 완료 대기
+            import time as _t
+            _t.sleep(0.5)
+            deadline = _t.time() + 30.0
+            while _t.time() < deadline:
+                req = self.moveit2._MoveIt2__is_motion_requested
+                exe = self.moveit2._MoveIt2__is_executing
+                if not req and not exe:
+                    self.get_logger().info(f'move 완료: ({x:.3f},{y:.3f},{z:.3f})')
+                    break
+                _t.sleep(0.2)
+            else:
+                self.get_logger().warn(f'move 타임아웃: ({x:.3f},{y:.3f},{z:.3f})')
             self.get_logger().info(
                 f'[sim] move → {x:.3f} {y:.3f} {z:.3f} | quat={quat}')
         else:
@@ -359,6 +466,8 @@ class PlanningNode(Node):
 
     def _gripper(self, sim_joints, real_width):
         if self.use_moveit2:
+            g_goal = self.moveit2_gripper._MoveIt2__move_action_goal
+            self.get_logger().info(f'GRIPPER group_name: [{g_goal.request.group_name}]')
             self.moveit2_gripper.move_to_configuration(sim_joints)
             self.get_logger().info(f'[sim] gripper {sim_joints}')
         else:
@@ -381,8 +490,11 @@ def main():
     node = PlanningNode()
     executor = MultiThreadedExecutor(num_threads=16)
     executor.add_node(node)
+    # executor를 별도 스레드에서 spin (테스트 스크립트와 동일한 방식)
+    spin_thread = threading.Thread(target=executor.spin, daemon=True)
+    spin_thread.start()
     try:
-        executor.spin()
+        spin_thread.join()
     except KeyboardInterrupt:
         pass
     finally:
