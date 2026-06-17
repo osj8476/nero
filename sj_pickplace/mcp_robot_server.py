@@ -30,6 +30,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from std_msgs.msg import String
+from sensor_msgs.msg import JointState
 
 from mcp.server.fastmcp import FastMCP
 
@@ -39,6 +40,22 @@ TIMEOUT_PICK  = 31.0
 TIMEOUT_PLACE = 16.0   # MOVE_DELAY + GRIPPER_DELAY + 여유
 TIMEOUT_MOVE  = 11.0   # MOVE_DELAY + 여유
 TIMEOUT_HOME  = 16.0   # MOVE_DELAY + GRIPPER_DELAY + 여유
+
+POSES_FILE = os.path.expanduser("~/sj/saved_poses.json")
+
+def _load_poses() -> dict:
+    if not os.path.exists(POSES_FILE):
+        return {}
+    try:
+        with open(POSES_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_poses(poses: dict):
+    os.makedirs(os.path.dirname(POSES_FILE), exist_ok=True)
+    with open(POSES_FILE, "w", encoding="utf-8") as f:
+        json.dump(poses, f, ensure_ascii=False, indent=2)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -65,9 +82,17 @@ class RosBridgeNode(Node):
         self.sub_result = self.create_subscription(
             String, '/pick_result', self._on_result, qos)
 
+        # ★ 현재 관절 상태 구독
+        self.sub_joints = self.create_subscription(
+            JointState, '/feedback/joint_states', self._on_joint_state, qos)
+
         self._objects_lock = threading.Lock()
         self._latest_objects: list = []
         self._last_obj_stamp: float = 0.0
+
+        self._joint_lock = threading.Lock()
+        self._latest_joint_state = None
+        self._last_joint_stamp: float = 0.0
 
         # 결과 대기용 — 도구 함수가 Event 를 등록하고 wait()
         self._result_lock   = threading.Lock()
@@ -91,6 +116,16 @@ class RosBridgeNode(Node):
     def get_objects(self) -> tuple[list, float]:
         with self._objects_lock:
             return list(self._latest_objects), self._last_obj_stamp
+
+    def _on_joint_state(self, msg: JointState):
+        with self._joint_lock:
+            self._latest_joint_state = dict(zip(msg.name, msg.position))
+            self._last_joint_stamp = time.time()
+
+    def get_joint_state(self):
+        with self._joint_lock:
+            state = dict(self._latest_joint_state) if self._latest_joint_state else None
+            return state, self._last_joint_stamp
 
     # ── /pick_result 수신 (폐루프 핵심) ────────────────────────────
     def _on_result(self, msg: String):
@@ -162,6 +197,7 @@ def _ensure_ros():
         _ros_ready.wait(timeout=10.0)
         if _ros_node is None:
             raise RuntimeError("ROS2 bridge 노드 초기화 실패")
+        time.sleep(3.0)  # DDS peer discovery 대기
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -188,6 +224,102 @@ def list_detected_objects() -> str:
     slim = [{"label": o.get("label", "?"), "center_3d": o.get("center_3d", {})}
             for o in objects]
     return json.dumps({"objects": slim, "age_sec": age}, ensure_ascii=False)
+
+
+@mcp.tool()
+def get_joint_positions() -> str:
+    """현재 로봇 팔의 각 관절(joint) 각도와 그리퍼 위치를 조회한다.
+
+    move_joints로 상대적인 움직임을 만들려면, 먼저 이 도구로
+    현재 각도를 확인한 뒤 원하는 만큼 더하거나 뺀 값을 절대각도로 넘겨라.
+
+    Returns:
+        {"joints": {"joint1": 0.0, ..., "joint7": 0.0, "gripper": 0.08},
+         "age_sec": 0.05}
+        joints가 null이면 아직 피드백을 받지 못한 상태다.
+    """
+    _ensure_ros()
+    joints, stamp = _ros_node.get_joint_state()
+    age = round(time.time() - stamp, 2) if stamp > 0 else -1.0
+    return json.dumps({"joints": joints, "age_sec": age}, ensure_ascii=False)
+
+
+@mcp.tool()
+def save_pose(name: str) -> str:
+    """현재 로봇 팔의 관절 자세를 이름을 붙여 저장한다.
+
+    티칭 모드(웹 UI)에서 손으로 자세를 잡은 뒤 호출하면,
+    그 순간의 모든 관절 각도와 그리퍼 위치를 기억해둔다.
+
+    Args:
+        name: 저장할 자세 이름 (예: "grasp_cup_1")
+
+    Returns:
+        성공: {"status": "success", "name": "...", "joints": {...}}
+        실패: {"status": "failed", "reason": "..."}
+    """
+    _ensure_ros()
+    joints, stamp = _ros_node.get_joint_state()
+    if not joints:
+        return json.dumps({"status": "failed", "reason": "아직 관절 피드백을 받지 못했습니다."}, ensure_ascii=False)
+    age = round(time.time() - stamp, 2) if stamp > 0 else -1.0
+    if age > 2.0:
+        return json.dumps({
+            "status": "failed",
+            "reason": f"관절 피드백이 {age}초 전 값이라 오래됐습니다. 로봇 연결을 확인하세요.",
+        }, ensure_ascii=False)
+
+    poses = _load_poses()
+    poses[name] = {"joints": joints, "saved_at": time.time()}
+    _save_poses(poses)
+    return json.dumps({"status": "success", "name": name, "joints": joints}, ensure_ascii=False)
+
+
+@mcp.tool()
+def list_saved_poses() -> str:
+    """저장된 모든 자세 이름과 관절 값을 조회한다.
+
+    Returns:
+        {"poses": {"grasp_cup_1": {"joint1": 0.1, ...}, ...}}
+    """
+    poses = _load_poses()
+    slim = {name: data.get("joints", {}) for name, data in poses.items()}
+    return json.dumps({"poses": slim}, ensure_ascii=False)
+
+
+@mcp.tool()
+def move_to_saved_pose(name: str) -> str:
+    """저장된 자세 이름으로 로봇 팔(관절 1~7)을 이동시킨다. 완료까지 블로킹.
+
+    그리퍼 위치는 복원하지 않는다 (필요하면 별도로 열거나 닫아라).
+
+    Args:
+        name: save_pose 로 저장했던 자세 이름
+
+    Returns:
+        성공: {"status": "success", "reason": "joint_move_complete", "joints": {...}}
+        실패: {"status": "failed"|"rejected"|"timeout", "reason": "..."}
+    """
+    _ensure_ros()
+    poses = _load_poses()
+    if name not in poses:
+        return json.dumps({
+            "status": "rejected",
+            "reason": f"'{name}' 이라는 자세가 없습니다. 저장된 이름: {sorted(poses.keys())}",
+        }, ensure_ascii=False)
+
+    joints = poses[name].get("joints", {})
+    key_map = {"joint1": "j1", "joint2": "j2", "joint3": "j3", "joint4": "j4",
+               "joint5": "j5", "joint6": "j6", "joint7": "j7"}
+    move_joints = {key_map[k]: v for k, v in joints.items() if k in key_map}
+
+    if not move_joints:
+        return json.dumps({"status": "rejected", "reason": "저장된 자세에 팔 관절 값이 없습니다."}, ensure_ascii=False)
+
+    _ros_node.publish_command({"action": "move_joints", "joints": move_joints})
+    result = _ros_node.wait_for_result(timeout=TIMEOUT_MOVE)
+    result["joints"] = move_joints
+    return json.dumps(result, ensure_ascii=False)
 
 
 @mcp.tool()
@@ -380,6 +512,42 @@ def move_joints(
     _ros_node.publish_command({"action": "move_joints", "joints": joints})
     result = _ros_node.wait_for_result(timeout=TIMEOUT_MOVE)
     result["joints"] = joints
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+def move_joints_relative(j1: float = 0.0, j2: float = 0.0, j3: float = 0.0,
+                          j4: float = 0.0, j5: float = 0.0, j6: float = 0.0,
+                          j7: float = 0.0) -> str:
+    """현재 관절 위치에서 상대적으로 이동한다 (라디안 단위).
+
+    예: j1=1.0 이면 joint1을 현재 위치에서 1라디안 더 회전.
+    지정하지 않은 관절은 현재 위치 유지.
+
+    Args:
+        j1~j7: 각 관절의 상대 이동량 (라디안, 기본값 0.0)
+    """
+    _ensure_ros()
+    joints, stamp = _ros_node.get_joint_state()
+    if not joints:
+        return json.dumps({"status": "failed", "reason": "관절 피드백 없음"}, ensure_ascii=False)
+
+    key_map = {"j1": "joint1", "j2": "joint2", "j3": "joint3", "j4": "joint4",
+               "j5": "joint5", "j6": "joint6", "j7": "joint7"}
+    deltas = {"j1": j1, "j2": j2, "j3": j3, "j4": j4, "j5": j5, "j6": j6, "j7": j7}
+
+    move_joints = {}
+    for k, delta in deltas.items():
+        if delta != 0.0:
+            jname = key_map[k]
+            current = joints.get(jname, 0.0)
+            move_joints[k] = round(current + delta, 6)
+
+    if not move_joints:
+        return json.dumps({"status": "rejected", "reason": "모든 delta가 0"}, ensure_ascii=False)
+
+    _ros_node.publish_command({"action": "move_joints", "joints": move_joints})
+    result = _ros_node.wait_for_result(timeout=TIMEOUT_MOVE)
     return json.dumps(result, ensure_ascii=False)
 
 

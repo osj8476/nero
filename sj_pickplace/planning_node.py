@@ -30,8 +30,8 @@ from sensor_msgs.msg import JointState
 GRIPPER_OPEN  = 0.08
 GRIPPER_CLOSE = 0.01
 GRIPPER_FORCE = 1.5
-SIM_GRIPPER_OPEN  = [0.05, -0.05]
-SIM_GRIPPER_CLOSE = [0.01, -0.01]
+SIM_GRIPPER_OPEN  = [0.08]
+SIM_GRIPPER_CLOSE = [0.01]
 
 # ── 시퀀스 오프셋 (미터) ──────────────────────────────────────────────────────
 APPROACH_Z = 0.13
@@ -124,6 +124,12 @@ class PlanningNode(Node):
 
         self._cb = ReentrantCallbackGroup()
 
+        from sensor_msgs.msg import JointState as _JointState
+        self.latest_joint_state = None
+        self.create_subscription(
+            _JointState, '/feedback/joint_states',
+            lambda msg: setattr(self, 'latest_joint_state', msg), 10)
+
         self.sub_obj = self.create_subscription(
             String, '/detected_objects', self.on_objects,
             qos_best_effort, callback_group=self._cb)
@@ -152,7 +158,7 @@ class PlanningNode(Node):
             )
             self.moveit2_gripper = MoveIt2(
                 node=self,
-                joint_names=['gripper_joint1', 'gripper_joint2'],
+                joint_names=['gripper'],
                 base_link_name='base_link',
                 end_effector_name='gripper_flange',
                 group_name='gripper',
@@ -334,11 +340,12 @@ class PlanningNode(Node):
                        'j5':'joint5','j6':'joint6','j7':'joint7'}
             # 현재 joint_state에서 기본값 가져오기
             # joint_state에서 arm joint 7개만 추출 (gripper 제외)
-            if self.moveit2.joint_state:
-                js = self.moveit2.joint_state
-                name_to_pos = dict(zip(js.name, js.position))
+            from sensor_msgs.msg import JointState as _JS
+            try:
+                js_msg = self.latest_joint_state
+                name_to_pos = dict(zip(js_msg.name, js_msg.position))
                 positions = [float(name_to_pos.get(jn, 0.0)) for jn in joint_names]
-            else:
+            except Exception:
                 positions = [0.0] * 7
             for k, v in joints.items():
                 jname = key_map.get(k, k)
@@ -371,11 +378,12 @@ class PlanningNode(Node):
                        'j5':'joint5','j6':'joint6','j7':'joint7'}
             # 현재 joint_state에서 기본값 가져오기
             # joint_state에서 arm joint 7개만 추출 (gripper 제외)
-            if self.moveit2.joint_state:
-                js = self.moveit2.joint_state
-                name_to_pos = dict(zip(js.name, js.position))
+            from sensor_msgs.msg import JointState as _JS
+            try:
+                js_msg = self.latest_joint_state
+                name_to_pos = dict(zip(js_msg.name, js_msg.position))
                 positions = [float(name_to_pos.get(jn, 0.0)) for jn in joint_names]
-            else:
+            except Exception:
                 positions = [0.0] * 7
             for k, v in joints.items():
                 jname = key_map.get(k, k)
@@ -403,8 +411,20 @@ class PlanningNode(Node):
 
     def _home_sequence(self):
         try:
-            self.get_logger().info(f'1/2: 홈 위치로 이동')
-            self._move(HOME_X, HOME_Y, HOME_Z, QUAT_HOME)
+            self.get_logger().info('1/2: 홈 위치로 이동 (joint space, all-zero)')
+            if self.use_moveit2:
+                self.moveit2.force_reset_executing_state()
+                self.moveit2.move_to_configuration([0.0] * 7)
+                import time as _t
+                _t.sleep(0.5)
+                deadline = _t.time() + 30.0
+                while _t.time() < deadline:
+                    if not self.moveit2._MoveIt2__is_motion_requested and \
+                       not self.moveit2._MoveIt2__is_executing:
+                        break
+                    _t.sleep(0.1)
+            else:
+                self._move(HOME_X, HOME_Y, HOME_Z, QUAT_HOME)
 
             self.get_logger().info('2/2: 그리퍼 열기')
             self._gripper(SIM_GRIPPER_OPEN, GRIPPER_OPEN)
