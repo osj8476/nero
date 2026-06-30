@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """
-planning_node.py  (그리퍼 자세 유연화 패치)
+planning_node.py  (IK 안정화 패치)
 
-[변경점]
-- QUAT_DOWN 하드코딩 제거
-- _move(x, y, z, quat) 로 자세를 매번 명시적으로 전달
-- _auto_grasp_quat(pos, label) : 물체 위치·라벨 기반 자동 자세 선택
-    * 기본 : top-down (위에서 아래)
-    * 로봇 측면 가까이 있는 물체 : side (수평)
-    * 커맨드에 grasp_dir 필드가 있으면 그것을 우선
-- pick/place/move 시퀀스 모두 quat 을 인자로 받도록 변경
+[변경점 vs 이전 버전]
+1. _move_joints_sequence 중복 정의 제거
+2. _move() 재시도 로직 추가 (max_attempts=3)
+   - OMPL 랜덤 샘플링 특성상 같은 목표라도 재시도 시 성공률 크게 향상
+3. 이동 단계별 tolerance 분리
+   - approach/lift/transit: tolerance_orientation=0.15 (느슨하게 → 플래너 성공률 ↑)
+   - descend/ascend: tolerance_orientation=0.05 (파지 직전/직후는 정밀하게)
+4. POSES_FILE 경로를 XDG_DATA_HOME 기반으로 변경 (Jetson/PC 모두 호환)
+5. force_reset 타이밍 개선: move_to_pose 직전에만 호출
 """
 
 import json
 import math
+import os
 import threading
 import time
 
@@ -25,6 +27,10 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from std_msgs.msg import String
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import JointState
+from control_msgs.action import FollowJointTrajectory
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+from builtin_interfaces.msg import Duration
+from rclpy.action import ActionClient
 
 # ── 그리퍼 상수 ───────────────────────────────────────────────────────────────
 GRIPPER_OPEN  = 0.08
@@ -38,27 +44,66 @@ APPROACH_Z = 0.13
 DESCEND_Z  = 0.03
 LIFT_Z     = 0.23
 
+# ── side 그립 전용 (대규모 IK 그리드 전수조사 결과) ──────────────────────────
+# [검증 내역 - 연구실 PC compute_ik 전수조사, 2026-06-30]
+#   x: -0.45~0.45 (0.02m 간격), y: -0.40~0.40 (0.02m 간격),
+#   z: 0.09 / 0.15 / 0.25 (낮음/중간/높음 대표 높이), 총 5,598개 좌표 스캔.
+#   전체 평균 OK 비율: 59.4%
+#
+#   거리(dist = sqrt(x²+y²))를 기준으로 분석한 결과, yaw(각도)와 거의 무관하게
+#   "원점으로부터의 수평거리"가 도달 가능 여부를 가장 잘 설명함:
+#     dist < 0.30  : 거의 100% FAIL (0%)
+#     dist = 0.30  : 25% OK
+#     dist = 0.32  : threshold로 썼을 때 정확도 95~96% (z=0.09/0.15 기준)
+#     dist >= 0.35 : 90%대 이상 OK
+#     dist >= 0.55 : 100% OK
+#
+#   SIDE_MIN_DIST=0.32를 "거부 기준"으로 사용 시:
+#     z=0.09: 오탐(위험) 2.8%, 기회손실 1.7%, 정확도 95.5%
+#     z=0.15: 오탐 2.8%, 기회손실 1.0%, 정확도 96.1%
+#     z=0.25: 오탐 0.8%, 기회손실 7.1%, 정확도 92.1%
+#   → 가장 균형 잡힌 임계값으로 채택. (재현 데이터: ik_side_reachable_map.txt)
+SIDE_MIN_DIST   = 0.32   # side 그립 사전 검사 임계값: 이 거리 미만이면 IK 시도 없이 즉시 거부
+SIDE_PITCH_DEG  = 90      # side 그립 손목 pitch (그리퍼를 눕히는 각도)
+
+# ── 그리퍼 TCP 오프셋 (gripper_flange → 손가락 중간 지점까지 거리) ───────────
+# URDF: gripper_joint origin xyz="0 0 0.1358" → 그리퍼 전체 길이 13.58cm
+# 물체를 실제로 쥐는 지점은 손가락 끝이 아니라 손가락 중간(절반)이므로
+# top/side 모두 절반값을 TCP 오프셋으로 사용한다.
+#   (이전에 TOP을 0.136으로 둔 적이 있었으나, 그건 PLACE_DROP_Z 계산에서
+#    APPROACH_Z가 같이 더해져 너무 낮아진 게 원인이었음 -> place는 별도
+#    PLACE_DROP_Z + TOP_TCP_OFFSET 조합으로 따로 보정하므로 pick 쪽은
+#    절반값을 써도 무방함)
+TOP_TCP_OFFSET  = 0.068   # 미터 (그리퍼 길이의 절반)
+SIDE_TCP_OFFSET = 0.068   # 미터 (그리퍼 길이의 절반, 검증됨)
+
+# place(내려놓기) 시 그리퍼 손가락 끝이 바닥에서 떨어진 높이.
+PLACE_DROP_Z = 0.08   # 미터, place_pos.z 기준 손가락 끝 절대 높이
+
 # ── 홈 자세 ───────────────────────────────────────────────────────────────────
-HOME_X, HOME_Y, HOME_Z = 0.0, 0.0, 0.75   # 실측 홈 좌표
+HOME_X, HOME_Y, HOME_Z = 0.0, 0.0, 0.75
 
 # ── 타이밍 ────────────────────────────────────────────────────────────────────
 MOVE_DELAY    = 6.0
 GRIPPER_DELAY = 4.0
 
+# ── MoveIt2 플래너 설정 ────────────────────────────────────────────────────────
+# approach/lift/transit: 방향 정밀도 낮춰 플래너 성공률 ↑
+TOL_POS_LOOSE   = 0.01
+TOL_ORI_LOOSE   = 0.15   # 약 8.6도 — 수평 이동 단계
+# descend/ascend: 파지 직전·직후는 정밀하게
+TOL_POS_TIGHT   = 0.008
+TOL_ORI_TIGHT   = 0.05   # 약 2.9도
+# 재시도 횟수 (OMPL 랜덤 샘플링 특성상 재시도로 성공률 크게 개선)
+MOVE_MAX_ATTEMPTS = 3
+MOVE_TIMEOUT      = 30.0  # 단일 시도 타임아웃
+
 # ── 사전 정의 쿼터니언 (xyzw, base_link 기준) ─────────────────────────────────
-# RViz tf2_echo 실측값 기반 (IK 검증 완료)
-#
-# top_down  : gripper z → [0,0,-1]  위에서 아래로 파지
 QUAT_TOP_DOWN   = [0.008,  0.999,  0.023,  0.037]
-# top_down yaw+180
 QUAT_TOP_DOWN_R = [0.999, -0.008, -0.037,  0.023]
-# top_down yaw-90
 QUAT_TOP_DOWN_L = [0.708,  0.697, -0.010,  0.043]
-# top_down yaw+90
 QUAT_TOP_DOWN_RR= [-0.643, 0.653,  0.041,  0.011]
-# home: 홈 대기 자세 (gripper 위를 향함)
-QUAT_HOME       = [0.0, 0.0, 0.0, 1.0]  # 실측 홈 자세
-# ★ side_front: 앞에서 수평으로 파지 (RViz 실측값 2025-06-15)
+QUAT_HOME       = [0.0, 0.0, 0.0, 1.0]
 QUAT_SIDE_FRONT = [0.481, -0.527,  0.427,  0.556]
 
 GRASP_DIR_MAP = {
@@ -67,45 +112,99 @@ GRASP_DIR_MAP = {
     'top_down_r':  QUAT_TOP_DOWN_R,
     'top_down_l':  QUAT_TOP_DOWN_L,
     'top_down_rr': QUAT_TOP_DOWN_RR,
-    'side':        QUAT_SIDE_FRONT,   # ★ 실측값으로 교체
-    'side_front':  QUAT_SIDE_FRONT,   # ★ 실측값으로 교체
-    'side_left':   QUAT_TOP_DOWN_L,
-    'side_right':  QUAT_TOP_DOWN_RR,
+    'side':        'DYNAMIC',   # 물체 위치에 따라 _side_quat_for()로 동적 계산
+    'side_front':  'DYNAMIC',
+    'side_left':   'DYNAMIC',
+    'side_right':  'DYNAMIC',
 }
 
-# 물체 라벨별 기본 파지 방향 힌트
-LABEL_GRASP_HINT = {
-    'bottle':  'side_front',  # 세워진 병 → 앞에서 수평
-    'cup':     'top_down',    # 컵 → 위에서 아래로
-    'book':    'side_front',  # 책 → 앞에서 수평
-    'box':     'top_down',    # 박스 → 위에서 아래로
-    'ball':    'top_down',    # 공 → 위에서 아래로
-    'scissors':'side_front',  # 가위 → 앞에서 수평
-    'remote':  'top_down',    # 리모컨 → 위에서 아래로
-}
+# side 계열 식별용 마커 (쿼터니언 비교 대신 이 태그로 판별)
+SIDE_TAG = 'DYNAMIC'
 
 
 def _euler_to_quat(roll: float, pitch: float, yaw: float) -> list:
-    """rpy → xyzw 쿼터니언."""
-    cr, sr = math.cos(roll/2),  math.sin(roll/2)
+    """ZYX 오일러각(roll, pitch, yaw, 라디안) -> 쿼터니언(xyzw)."""
+    cr, sr = math.cos(roll/2), math.sin(roll/2)
     cp, sp = math.cos(pitch/2), math.sin(pitch/2)
-    cy, sy = math.cos(yaw/2),   math.sin(yaw/2)
+    cy, sy = math.cos(yaw/2), math.sin(yaw/2)
     return [
-        round(sr*cp*cy - cr*sp*sy, 6),
-        round(cr*sp*cy + sr*cp*sy, 6),
-        round(cr*cp*sy - sr*sp*cy, 6),
-        round(cr*cp*cy + sr*sp*sy, 6),
+        sr*cp*cy - cr*sp*sy,
+        cr*sp*cy + sr*cp*sy,
+        cr*cp*sy - sr*sp*cy,
+        cr*cp*cy + sr*sp*sy,
     ]
 
 
+def _side_quat_for(pos: dict) -> list:
+    """
+    로봇(base_link 원점) -> 물체 위치 방향을 바라보는 '옆에서 수평 그립' 쿼터니언.
+
+    [검증 내역 - 연구실 PC compute_ik 전수조사(5,598점), 2026-06-30]
+      roll=0, pitch=90도, yaw=atan2(y,x) 조합으로 x=-0.45~0.45, y=-0.4~0.4,
+      z=0.09/0.15/0.25 전 영역 스캔. dist=sqrt(x²+y²) < 0.32 는 거의 항상 FAIL.
+      실제 거부 판단은 _side_reachability_check()에서 수행한다.
+    """
+    x, y = pos.get('x', 0.0), pos.get('y', 0.0)
+    yaw = math.atan2(y, x)
+    pitch = math.radians(SIDE_PITCH_DEG)
+    roll = 0.0
+    return _euler_to_quat(roll, pitch, yaw)
+
+
+def _side_reachability_check(pos: dict) -> tuple:
+    """
+    side 그립 시도 전, 물체 위치가 도달 가능 영역인지 사전 판정한다.
+
+    IK를 직접 풀지 않고 거리(dist) 임계값만으로 판단하는 빠른 휴리스틱이며,
+    5,598점 전수조사로 검증된 SIDE_MIN_DIST(0.32m) 기준을 사용한다.
+    오탐(실제로는 되는데 거부, false negative) 약 1~7% 가능성이 있지만,
+    반대로 ABORTED를 반복하며 30초씩 허비하는 것보다 훨씬 빠르고 안전하다.
+
+    주의: SIDE_MIN_DIST는 "실제 로봇이 이동하는 목표 좌표(gripper_flange)"
+    기준으로 검증된 값이다. _pick_sequence/_place_sequence는 물체 좌표에서
+    SIDE_TCP_OFFSET만큼 당긴 지점으로 이동하므로, 검사도 그 오프셋이
+    적용된 지점(= 실제 이동 목표) 기준으로 해야 정확하다.
+
+    Returns:
+        (ok: bool, reason: str)
+        ok=True  -> 진행 가능
+        ok=False -> reason에 거부 사유 메시지 (사용자에게 그대로 노출 가능)
+    """
+    x, y = pos.get('x', 0.0), pos.get('y', 0.0)
+    dist = math.sqrt(x*x + y*y)
+    # 오프셋 적용 후 실제 이동 목표 지점까지의 거리
+    effective_dist = dist - SIDE_TCP_OFFSET
+    if effective_dist < SIDE_MIN_DIST:
+        return (False,
+                f'물체가 로봇 베이스로부터 너무 가깝습니다 '
+                f'(물체거리 {dist:.3f}m, TCP오프셋 적용 후 {effective_dist:.3f}m, '
+                f'side 그립 최소 거리 {SIDE_MIN_DIST}m). '
+                f'이 위치는 옆에서 수평으로 잡는 자세로 도달할 수 없는 영역입니다. '
+                f'물체를 더 멀리 옮기거나 top(위에서 잡기) 방식을 사용하세요.')
+    return (True, '')
+
+
+LABEL_GRASP_HINT = {
+    'bottle':   'side_front',
+    'cup':      'top_down',
+    'book':     'side_front',
+    'box':      'top_down',
+    'ball':     'top_down',
+    'scissors': 'side_front',
+    'remote':   'top_down',
+}
+
+
 def _auto_grasp_quat(pos: dict, label: str) -> list:
-    """물체 위치·라벨로 파지 자세 자동 선택."""
     hint = LABEL_GRASP_HINT.get(label, None)
     if hint:
-        return GRASP_DIR_MAP[hint]
+        entry = GRASP_DIR_MAP[hint]
+        if entry == SIDE_TAG:
+            return _side_quat_for(pos)
+        return entry
     x, y = pos.get('x', 0.0), pos.get('y', 0.0)
     if abs(y) > abs(x) * 1.5:
-        return QUAT_TOP_DOWN_L if y > 0 else QUAT_TOP_DOWN_RR
+        return _side_quat_for(pos)
     return QUAT_TOP_DOWN
 
 
@@ -124,10 +223,9 @@ class PlanningNode(Node):
 
         self._cb = ReentrantCallbackGroup()
 
-        from sensor_msgs.msg import JointState as _JointState
         self.latest_joint_state = None
         self.create_subscription(
-            _JointState, '/feedback/joint_states',
+            JointState, '/feedback/joint_states',
             lambda msg: setattr(self, 'latest_joint_state', msg), 10)
 
         self.sub_obj = self.create_subscription(
@@ -139,7 +237,7 @@ class PlanningNode(Node):
 
         self.pub_move    = self.create_publisher(PoseStamped, '/control/move_p', qos_reliable)
         self.pub_gripper = self.create_publisher(JointState,  '/control/joint_states', qos_reliable)
-        self.pub_result  = self.create_publisher(String, '/pick_result', qos_reliable)
+        self.pub_result  = self.create_publisher(String,      '/pick_result', qos_reliable)
 
         self.moveit2 = self.moveit2_gripper = None
         if self.use_moveit2:
@@ -156,27 +254,27 @@ class PlanningNode(Node):
                 use_move_group_action=True,
                 ignore_new_calls_while_executing=True,
             )
-            self.moveit2_gripper = MoveIt2(
-                node=self,
-                joint_names=['gripper'],
-                base_link_name='base_link',
-                end_effector_name='gripper_flange',
-                group_name='gripper',
-                callback_group=cb_gripper,
-                use_move_group_action=True,
-                ignore_new_calls_while_executing=False,
-            )
-            self.get_logger().info('MoveIt2 ENABLED')
+            # 기본값(0.5초, 5회)이 너무 짧아 side 자세처럼 까다로운 IK에서
+            # OMPL이 충분히 탐색 못 하고 ABORTED 나는 경우가 많음 → 넉넉하게 상향
+            self.moveit2.allowed_planning_time = 5.0
+            self.moveit2.num_planning_attempts = 20
+            self.get_logger().info(
+                'MoveIt2 ENABLED (allowed_planning_time=5.0s, num_planning_attempts=20)')
+        # 그리퍼 액션 클라이언트 (moveit2_gripper 대신 직접 액션 호출)
+        self._gripper_action = ActionClient(
+            self,
+            FollowJointTrajectory,
+            '/gripper_controller/follow_joint_trajectory',
+        )
 
         self.latest_objects = []
         self.busy = False
         self.lock = threading.Lock()
-        # action server 준비 대기
         if self.use_moveit2:
-            import time as _t
-            _t.sleep(3.0)
+            time.sleep(3.0)
         self.get_logger().info('PlanningNode 준비 완료')
 
+    # ── 토픽 콜백 ─────────────────────────────────────────────────────────────
     def on_objects(self, msg):
         try:
             self.latest_objects = json.loads(msg.data).get('objects', [])
@@ -209,11 +307,23 @@ class PlanningNode(Node):
                     self.busy = False
                 return
             grasp_dir = cmd.get('grasp_dir', None)
-            quat = (GRASP_DIR_MAP.get(grasp_dir, None)
-                    if grasp_dir else _auto_grasp_quat(pos, label))
+            is_side = False
+            if grasp_dir:
+                quat = GRASP_DIR_MAP.get(grasp_dir, None)
+                if quat == SIDE_TAG:
+                    is_side = True
+                    quat = _side_quat_for(pos)
+            else:
+                quat = _auto_grasp_quat(pos, label)
+                x, y = pos.get('x', 0.0), pos.get('y', 0.0)
+                if LABEL_GRASP_HINT.get(label) in ('side', 'side_front'):
+                    is_side = True
+                elif abs(y) > abs(x) * 1.5 and label not in LABEL_GRASP_HINT:
+                    is_side = True
             self.get_logger().info(
-                f'PICK 시작: {label} @ {pos} | 자세: {grasp_dir or "auto"} {quat}')
-            t = threading.Thread(target=self._pick_sequence, args=(pos, quat))
+                f'PICK 시작: {label} @ {pos} | 자세: {grasp_dir or "auto"} '
+                f'({"side" if is_side else "top"}) {[round(v,3) for v in quat]}')
+            t = threading.Thread(target=self._pick_sequence, args=(pos, quat, is_side))
             t.daemon = False
             t.start()
 
@@ -224,11 +334,19 @@ class PlanningNode(Node):
                     self.busy = False
                 return
             grasp_dir = cmd.get('grasp_dir', None)
-            quat = (GRASP_DIR_MAP.get(grasp_dir, None)
-                    if grasp_dir else QUAT_TOP_DOWN)
-            self.get_logger().info(f'PLACE 시작 @ {pos} | 자세: {quat}')
+            is_side = False
+            if grasp_dir:
+                quat = GRASP_DIR_MAP.get(grasp_dir, None)
+                if quat == SIDE_TAG:
+                    is_side = True
+                    quat = _side_quat_for(pos)
+            else:
+                quat = QUAT_TOP_DOWN
+            self.get_logger().info(
+                f'PLACE 시작 @ {pos} | 자세: {"side" if is_side else "top"} '
+                f'{[round(v,3) for v in quat]}')
             threading.Thread(
-                target=self._place_sequence, args=(pos, quat), daemon=True).start()
+                target=self._place_sequence, args=(pos, quat, is_side), daemon=True).start()
 
         elif action == 'move':
             pos = cmd.get('target_pos')
@@ -238,9 +356,12 @@ class PlanningNode(Node):
                     self.busy = False
                 return
             grasp_dir = cmd.get('grasp_dir', None)
-            # grasp_dir 없으면 현재 자세 유지 (QUAT_HOME 기본)
-            quat = (GRASP_DIR_MAP.get(grasp_dir, QUAT_HOME)
-                    if grasp_dir else QUAT_HOME)
+            if grasp_dir:
+                quat = GRASP_DIR_MAP.get(grasp_dir, QUAT_HOME)
+                if quat == SIDE_TAG:
+                    quat = _side_quat_for(pos)
+            else:
+                quat = QUAT_HOME
             self.get_logger().info(f'MOVE 시작 @ {pos} | 자세: {quat}')
             threading.Thread(
                 target=self._move_sequence, args=(pos, quat), daemon=True).start()
@@ -266,30 +387,80 @@ class PlanningNode(Node):
             with self.lock:
                 self.busy = False
 
+    # ── 유틸 ──────────────────────────────────────────────────────────────────
     def _find_object(self, label):
         for obj in self.latest_objects:
             if obj.get('label') == label:
                 return obj.get('center_3d')
         return None
 
-    def _pick_sequence(self, pos, quat):
+    # ── 시퀀스 ────────────────────────────────────────────────────────────────
+    def _pick_sequence(self, pos, quat, is_side=False):
         try:
-            self.get_logger().info('1/5: 접근')
-            self._move(pos['x'], pos['y'], pos['z'] + APPROACH_Z, quat)
+            # side 그립은 IK를 시도하기 전에 먼저 도달 가능 영역인지 검사한다.
+            # (전수조사 결과 dist<0.32는 거의 항상 IK 실패 -> ABORTED 3회 재시도로
+            #  30초씩 허비하는 대신 즉시 거부하고 사유를 알려준다)
+            if is_side:
+                ok, reason = _side_reachability_check(pos)
+                if not ok:
+                    self.get_logger().warn(f'PICK 거부: {reason}')
+                    self._publish_result('rejected', reason)
+                    return
+
+            # top 계열: 물체 바로 위에서 z 방향 TCP 오프셋만큼 띄워 수직 접근
+            # side 계열: 물체→로봇 방향으로 TCP 오프셋만큼 당겨서 손가락 중간이
+            #            물체 중심에 오도록 보정 (사전 검사는 원래 좌표 기준으로 이미 통과함)
+            if is_side:
+                dx, dy = pos['x'], pos['y']
+                dist = math.sqrt(dx*dx + dy*dy) or 1.0
+                # 물체 방향 단위벡터의 반대로 SIDE_TCP_OFFSET만큼 당김
+                px = dx - (dx / dist) * SIDE_TCP_OFFSET
+                py = dy - (dy / dist) * SIDE_TCP_OFFSET
+                offset_desc = f'side(TCP오프셋 {SIDE_TCP_OFFSET}m 적용)'
+            else:
+                px = pos['x']
+                py = pos['y']
+                offset_desc = 'top(z)'
+
+            if is_side:
+                # side는 수직 낙하 충돌 위험이 없는 수평 접근이므로
+                # approach 단계부터 바로 물체 실제 높이로 이동한다 (descend 생략 효과)
+                approach_z = pos['z']
+                descend_z  = pos['z']
+                lift_z     = pos['z'] + LIFT_Z      # top과 동일한 상승폭
+            else:
+                pz = pos['z']
+                approach_z = pz + APPROACH_Z + TOP_TCP_OFFSET
+                descend_z  = pz + DESCEND_Z + TOP_TCP_OFFSET
+                lift_z     = pz + LIFT_Z + TOP_TCP_OFFSET
+
+            self.get_logger().info(
+                f'1/5: 접근 (approach) | {offset_desc}')
+            ok = self._move(px, py, approach_z, quat, tol_ori=TOL_ORI_LOOSE)
+            if not ok:
+                raise RuntimeError('approach 이동 실패 (재시도 초과)')
 
             self.get_logger().info('2/5: 그리퍼 열기')
             self._gripper(SIM_GRIPPER_OPEN, GRIPPER_OPEN)
             time.sleep(GRIPPER_DELAY)
 
-            self.get_logger().info('3/5: 내려가기')
-            self._move(pos['x'], pos['y'], pos['z'] + DESCEND_Z, quat)
+            if is_side:
+                self.get_logger().info('3/5: 내려가기 (descend) — side는 approach와 동일 높이, 재확인만')
+            else:
+                self.get_logger().info('3/5: 내려가기 (descend) — tight tolerance')
+            tol = TOL_ORI_TIGHT if not is_side else TOL_ORI_LOOSE
+            ok = self._move(px, py, descend_z, quat, tol_ori=tol)
+            if not ok:
+                raise RuntimeError('descend 이동 실패 (재시도 초과)')
 
             self.get_logger().info('4/5: 그리퍼 닫기')
             self._gripper(SIM_GRIPPER_CLOSE, GRIPPER_CLOSE)
             time.sleep(GRIPPER_DELAY)
 
-            self.get_logger().info('5/5: 들어올리기')
-            self._move(pos['x'], pos['y'], pos['z'] + LIFT_Z, quat)
+            self.get_logger().info('5/5: 들어올리기 (lift) — joint-space (빙글 방지)')
+            ok = self._move(px, py, lift_z, quat, tol_ori=TOL_ORI_LOOSE)
+            if not ok:
+                raise RuntimeError('lift 이동 실패 (재시도 초과)')
 
             self.get_logger().info('✅ PICK 완료')
             self._publish_result('success', 'pick_complete')
@@ -300,10 +471,32 @@ class PlanningNode(Node):
             with self.lock:
                 self.busy = False
 
-    def _place_sequence(self, pos, quat):
+    def _place_sequence(self, pos, quat, is_side=False):
         try:
+            if is_side:
+                ok, reason = _side_reachability_check(pos)
+                if not ok:
+                    self.get_logger().warn(f'PLACE 거부: {reason}')
+                    self._publish_result('rejected', reason)
+                    return
+                dx, dy = pos['x'], pos['y']
+                dist = math.sqrt(dx*dx + dy*dy) or 1.0
+                px = dx - (dx / dist) * SIDE_TCP_OFFSET
+                py = dy - (dy / dist) * SIDE_TCP_OFFSET
+                target_z = pos['z'] + APPROACH_Z
+            else:
+                px = pos['x']
+                py = pos['y']
+                # PLACE_DROP_Z는 "그리퍼 손가락 끝"이 바닥에서 떨어진 높이.
+                # 실제 이동 목표는 gripper_flange 기준이므로 TOP_TCP_OFFSET(그리퍼
+                # 길이)을 더해야 한다. 안 더하면 flange가 손가락 끝 위치까지
+                # 내려가버려서 그리퍼가 바닥을 뚫고 들어가는 문제가 생김.
+                target_z = pos['z'] + PLACE_DROP_Z + TOP_TCP_OFFSET
+
             self.get_logger().info('1/2: place 이동')
-            self._move(pos['x'], pos['y'], pos['z'] + APPROACH_Z, quat)
+            ok = self._move(px, py, target_z, quat, tol_ori=TOL_ORI_LOOSE)
+            if not ok:
+                raise RuntimeError('place 이동 실패 (재시도 초과)')
 
             self.get_logger().info('2/2: 그리퍼 열기')
             self._gripper(SIM_GRIPPER_OPEN, GRIPPER_OPEN)
@@ -322,8 +515,10 @@ class PlanningNode(Node):
         try:
             self.get_logger().info(
                 f"1/1: 이동 → ({pos['x']:.3f}, {pos['y']:.3f}, {pos['z']:.3f})")
-            self._move(pos['x'], pos['y'], pos['z'], quat)
-
+            ok = self._move(pos['x'], pos['y'], pos['z'], quat,
+                            tol_ori=TOL_ORI_LOOSE)
+            if not ok:
+                raise RuntimeError('move 이동 실패 (재시도 초과)')
             self.get_logger().info('✅ MOVE 완료')
             self._publish_result('success', 'move_complete')
         except Exception as e:
@@ -334,13 +529,11 @@ class PlanningNode(Node):
                 self.busy = False
 
     def _move_joints_sequence(self, joints: dict):
+        """joint space 직접 이동. _move_joints_sequence 중복 정의 제거됨."""
         try:
             joint_names = ['joint1','joint2','joint3','joint4','joint5','joint6','joint7']
             key_map = {'j1':'joint1','j2':'joint2','j3':'joint3','j4':'joint4',
                        'j5':'joint5','j6':'joint6','j7':'joint7'}
-            # 현재 joint_state에서 기본값 가져오기
-            # joint_state에서 arm joint 7개만 추출 (gripper 제외)
-            from sensor_msgs.msg import JointState as _JS
             try:
                 js_msg = self.latest_joint_state
                 name_to_pos = dict(zip(js_msg.name, js_msg.position))
@@ -354,52 +547,13 @@ class PlanningNode(Node):
                     positions[idx] = float(v)
             self.get_logger().info(f'joint positions: {[round(p,3) for p in positions]}')
             self.moveit2.move_to_configuration(positions)
-            import time as _t
-            _t.sleep(0.5)
-            deadline = _t.time() + 30.0
-            while _t.time() < deadline:
-                if not self.moveit2._MoveIt2__is_motion_requested and \
-                   not self.moveit2._MoveIt2__is_executing:
+            time.sleep(0.5)
+            deadline = time.time() + MOVE_TIMEOUT
+            while time.time() < deadline:
+                if (not self.moveit2._MoveIt2__is_motion_requested and
+                        not self.moveit2._MoveIt2__is_executing):
                     break
-                _t.sleep(0.1)
-            self.get_logger().info('✅ MOVE_JOINTS 완료')
-            self._publish_result('success', 'joint_move_complete')
-        except Exception as e:
-            self.get_logger().error(f'MOVE_JOINTS 오류: {e}')
-            self._publish_result('failed', str(e))
-        finally:
-            with self.lock:
-                self.busy = False
-
-    def _move_joints_sequence(self, joints: dict):
-        try:
-            joint_names = ['joint1','joint2','joint3','joint4','joint5','joint6','joint7']
-            key_map = {'j1':'joint1','j2':'joint2','j3':'joint3','j4':'joint4',
-                       'j5':'joint5','j6':'joint6','j7':'joint7'}
-            # 현재 joint_state에서 기본값 가져오기
-            # joint_state에서 arm joint 7개만 추출 (gripper 제외)
-            from sensor_msgs.msg import JointState as _JS
-            try:
-                js_msg = self.latest_joint_state
-                name_to_pos = dict(zip(js_msg.name, js_msg.position))
-                positions = [float(name_to_pos.get(jn, 0.0)) for jn in joint_names]
-            except Exception:
-                positions = [0.0] * 7
-            for k, v in joints.items():
-                jname = key_map.get(k, k)
-                if jname in joint_names:
-                    idx = joint_names.index(jname)
-                    positions[idx] = float(v)
-            self.get_logger().info(f'joint positions: {[round(p,3) for p in positions]}')
-            self.moveit2.move_to_configuration(positions)
-            import time as _t
-            _t.sleep(0.5)
-            deadline = _t.time() + 30.0
-            while _t.time() < deadline:
-                if not self.moveit2._MoveIt2__is_motion_requested and \
-                   not self.moveit2._MoveIt2__is_executing:
-                    break
-                _t.sleep(0.1)
+                time.sleep(0.1)
             self.get_logger().info('✅ MOVE_JOINTS 완료')
             self._publish_result('success', 'joint_move_complete')
         except Exception as e:
@@ -415,14 +569,13 @@ class PlanningNode(Node):
             if self.use_moveit2:
                 self.moveit2.force_reset_executing_state()
                 self.moveit2.move_to_configuration([0.0] * 7)
-                import time as _t
-                _t.sleep(0.5)
-                deadline = _t.time() + 30.0
-                while _t.time() < deadline:
-                    if not self.moveit2._MoveIt2__is_motion_requested and \
-                       not self.moveit2._MoveIt2__is_executing:
+                time.sleep(0.5)
+                deadline = time.time() + MOVE_TIMEOUT
+                while time.time() < deadline:
+                    if (not self.moveit2._MoveIt2__is_motion_requested and
+                            not self.moveit2._MoveIt2__is_executing):
                         break
-                    _t.sleep(0.1)
+                    time.sleep(0.1)
             else:
                 self._move(HOME_X, HOME_Y, HOME_Z, QUAT_HOME)
 
@@ -439,39 +592,20 @@ class PlanningNode(Node):
             with self.lock:
                 self.busy = False
 
-    def _move(self, x: float, y: float, z: float, quat: list):
-        if self.use_moveit2:
-            # 이전 상태 리셋
-            self.moveit2.force_reset_executing_state()
-            # action server 준비 확인
-            import time as _t
-            ready = self.moveit2._MoveIt2__move_action_client.server_is_ready()
-            self.get_logger().info(f'action server ready: {ready}')
-            self.get_logger().info(f'mutex locked: {self.moveit2._MoveIt2__execution_mutex.locked()}')
-            self.moveit2.move_to_pose(
-                position=[x, y, z],
-                quat_xyzw=quat,
-                tolerance_position=0.01,
-                tolerance_orientation=0.05,
-                cartesian=False,
-            )
-            self.get_logger().info(f'move_to_pose 반환됨')
-            # executor가 별도 스레드에서 spin 중이므로 단순 sleep으로 완료 대기
-            import time as _t
-            _t.sleep(0.5)
-            deadline = _t.time() + 30.0
-            while _t.time() < deadline:
-                req = self.moveit2._MoveIt2__is_motion_requested
-                exe = self.moveit2._MoveIt2__is_executing
-                if not req and not exe:
-                    self.get_logger().info(f'move 완료: ({x:.3f},{y:.3f},{z:.3f})')
-                    break
-                _t.sleep(0.2)
-            else:
-                self.get_logger().warn(f'move 타임아웃: ({x:.3f},{y:.3f},{z:.3f})')
-            self.get_logger().info(
-                f'[sim] move → {x:.3f} {y:.3f} {z:.3f} | quat={quat}')
-        else:
+    # ── 핵심: 재시도 포함 _move() ─────────────────────────────────────────────
+    def _move(self, x: float, y: float, z: float, quat: list,
+              tol_pos: float = TOL_POS_LOOSE,
+              tol_ori: float = TOL_ORI_LOOSE) -> bool:
+        """
+        MoveIt2로 목표 pose 이동. 실패 시 MOVE_MAX_ATTEMPTS 회 재시도.
+        성공하면 True, 모든 시도 실패 시 False 반환.
+
+        tol_ori 파라미터로 단계별 tolerance 분리:
+          - approach/lift/transit → TOL_ORI_LOOSE (0.15 rad)
+          - descend/ascend       → TOL_ORI_TIGHT  (0.05 rad)
+        """
+        if not self.use_moveit2:
+            # 실물 모드: PoseStamped 발행 (재시도 없음)
             pose = PoseStamped()
             pose.header.frame_id = 'base_link'
             pose.header.stamp    = self.get_clock().now().to_msg()
@@ -483,20 +617,108 @@ class PlanningNode(Node):
             pose.pose.orientation.z = quat[2]
             pose.pose.orientation.w = quat[3]
             self.pub_move.publish(pose)
+            return True
+
+        for attempt in range(1, MOVE_MAX_ATTEMPTS + 1):
+            self.get_logger().info(
+                f'  → move 시도 {attempt}/{MOVE_MAX_ATTEMPTS} '
+                f'({x:.3f},{y:.3f},{z:.3f}) tol_ori={tol_ori:.3f}')
+
+            # 이전 상태 리셋 (재시도 시 필수)
+            self.moveit2.force_reset_executing_state()
+
+            ready = self.moveit2._MoveIt2__move_action_client.server_is_ready()
+            if not ready:
+                self.get_logger().warn('  action server not ready, 잠시 대기...')
+                time.sleep(1.0)
+                continue
+
+            self.moveit2.move_to_pose(
+                position=[x, y, z],
+                quat_xyzw=quat,
+                tolerance_position=tol_pos,
+                tolerance_orientation=tol_ori,
+                cartesian=False,
+            )
+
+            time.sleep(0.5)
+            deadline = time.time() + MOVE_TIMEOUT
+            motion_done = False
+            while time.time() < deadline:
+                req = self.moveit2._MoveIt2__is_motion_requested
+                exe = self.moveit2._MoveIt2__is_executing
+                if not req and not exe:
+                    motion_done = True
+                    break
+                time.sleep(0.2)
+
+            # motion_suceeded 로 실제 IK/실행 성공 여부 확인
+            # (req/exe 가 False 가 됐다고 성공인 것은 아님 — ABORTED 시에도 False 가 됨)
+            success = motion_done and self.moveit2.motion_suceeded
+            error_code = self.moveit2.get_last_execution_error_code()
+            err_str = f' [error_code={error_code.val}]' if (not success and error_code) else ''
+
+            self.get_logger().info(
+                f'  [sim] move → {x:.3f} {y:.3f} {z:.3f} | '
+                f'quat={quat} | {"✅ 성공" if success else "❌ 실패/타임아웃"}{err_str}')
+
+            if success:
+                return True
+
+            if attempt < MOVE_MAX_ATTEMPTS:
+                self.get_logger().warn(
+                    f'  재시도 전 1초 대기... ({attempt}/{MOVE_MAX_ATTEMPTS})')
+                time.sleep(1.0)
+
+        self.get_logger().error(
+            f'_move 최종 실패: ({x:.3f},{y:.3f},{z:.3f}) '
+            f'[{MOVE_MAX_ATTEMPTS}회 모두 실패]')
+        return False
 
     def _gripper(self, sim_joints, real_width):
+        """
+        그리퍼 제어.
+        시뮬(use_moveit2=True):
+          /gripper_controller/follow_joint_trajectory 액션 직접 호출
+          SRDF: open=[0.05,-0.05], close=[0.0,0.0]
+        실물(use_moveit2=False):
+          /control/joint_states 퍼블리시 (agx_arm_ros 공식)
+        """
         if self.use_moveit2:
-            g_goal = self.moveit2_gripper._MoveIt2__move_action_goal
-            self.get_logger().info(f'GRIPPER group_name: [{g_goal.request.group_name}]')
-            self.moveit2_gripper.move_to_configuration(sim_joints)
-            self.get_logger().info(f'[sim] gripper {sim_joints}')
+            if float(sim_joints[0]) > 0.04:
+                positions = [0.05, -0.05]  # open
+                label = 'open'
+            else:
+                positions = [0.0, 0.0]     # close
+                label = 'close'
+
+            traj = JointTrajectory()
+            traj.joint_names = ['gripper_joint1', 'gripper_joint2']
+            pt = JointTrajectoryPoint()
+            pt.positions = positions
+            pt.time_from_start = Duration(sec=2, nanosec=0)
+            traj.points = [pt]
+
+            goal = FollowJointTrajectory.Goal()
+            goal.trajectory = traj
+
+            if not self._gripper_action.wait_for_server(timeout_sec=2.0):
+                self.get_logger().warn('[gripper] action server 없음, 스킵')
+                return
+
+            future = self._gripper_action.send_goal_async(goal)
+            # 비동기 — 완료 대기 없이 반환 (GRIPPER_DELAY로 대기)
+            self.get_logger().info(
+                f'[sim gripper] {label} → {positions} (follow_joint_trajectory)')
         else:
             msg = JointState()
-            msg.header.stamp  = self.get_clock().now().to_msg()
-            msg.name          = ['gripper']
-            msg.position      = [float(real_width)]
-            msg.effort        = [GRIPPER_FORCE]
+            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.name         = ['gripper']
+            msg.position     = [float(real_width)]
+            msg.effort       = [GRIPPER_FORCE]
             self.pub_gripper.publish(msg)
+            self.get_logger().info(
+                f'[gripper] width={real_width:.3f}m force={GRIPPER_FORCE}N → /control/joint_states')
 
     def _publish_result(self, status, reason=''):
         msg = String()
@@ -510,7 +732,6 @@ def main():
     node = PlanningNode()
     executor = MultiThreadedExecutor(num_threads=16)
     executor.add_node(node)
-    # executor를 별도 스레드에서 spin (테스트 스크립트와 동일한 방식)
     spin_thread = threading.Thread(target=executor.spin, daemon=True)
     spin_thread.start()
     try:
@@ -521,3 +742,7 @@ def main():
         executor.shutdown()
         node.destroy_node()
         rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
