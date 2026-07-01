@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-perception_node.py  (박스 전용 단순화 버전)
-RealSense RGB-D + 박스 전용 커스텀 YOLO 서버(vlm_boxyolo.py) 클라이언트.
+perception_node.py  (박스 전용 단순화 버전 v2)
+=================================================================================
+[변경 이력 vs 기존 nero_ai perception_node]
+- 멀티서버 클러스터(CLUSTER_N, 라운드로빈) 제거 → 박스 서버 하나에만 디스패치
+- RealSense 노출값 수동 설정 추가 (어두운 환경 대응)
+- 이미지 원본 크기(640x480)로 서버에 전송 (다운스케일 시 탐지 누락 방지)
+- /detected_objects 퍼블리시 포맷 기존과 동일 유지 (planning_node 변경 불필요)
 
-[기존 버전과의 차이]
-- 기존: YOLO-World 멀티서버 클러스터에 라운드로빈 디스패치 (cup/bottle/box/book 등 다중 라벨)
-- 지금: 박스 단일 클래스만 탐지하는 단일 서버(vlm_boxyolo.py)에 디스패치
-  → CLUSTER_N, 라운드로빈, 헬스체크 과반수 로직 등 멀티서버 복잡도 제거
-  → /detected_objects 퍼블리시 포맷은 기존과 동일하게 유지 (planning_node 등 하위 노드 변경 불필요)
-
-[추후 다른 객체(cup, bottle 등) 다시 추가할 때]
-  BOX_SERVER 외에 일반 객체용 서버(vlm_yoloworld.py)를 별도로 띄우고,
-  _send_and_publish에서 두 서버 응답을 합쳐서 publish하도록 확장하면 됨.
-  (지금은 범위를 박스로만 좁혀서 일단 단순하게 둠)
+[환경변수]
+  BOX_SERVER_URL  : 박스 서버 주소 (기본: http://127.0.0.1:8002/detect)
+  BOX_HEALTH_URL  : 헬스체크 주소 (기본: http://127.0.0.1:8002/health)
+  CAM_EXPOSURE    : RealSense 노출값 (기본: 500, 0이면 자동노출)
+  DISPATCH_RATE_HZ: 추론 요청 주기 (기본: 10Hz)
+  TARGET_LABEL    : 탐지 대상 클래스 (기본: box)
 """
 
 import os
@@ -41,29 +42,27 @@ from nero_ai.camera_calibration import pixel_to_robot_xyz
 # ──────────────────────────────────────────────
 # 설정
 # ──────────────────────────────────────────────
-TARGET_LABEL = os.environ.get("TARGET_LABEL", "box")
-
-BOX_SERVER_URL = os.environ.get("BOX_SERVER_URL", "http://127.0.0.1:8002/detect")
-BOX_HEALTH_URL = os.environ.get("BOX_HEALTH_URL", "http://127.0.0.1:8002/health")
-REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "2.0"))
-DISPATCH_RATE_HZ = float(os.environ.get("DISPATCH_RATE_HZ", "20.0"))
-
-# 추론 입력 해상도 (네트워크 + GPU 부하 절감)
-INFER_W = int(os.environ.get("INFER_W", "320"))
-INFER_H = int(os.environ.get("INFER_H", "180"))
+TARGET_LABEL     = os.environ.get("TARGET_LABEL", "box")
+BOX_SERVER_URL   = os.environ.get("BOX_SERVER_URL", "http://127.0.0.1:8002/detect")
+BOX_HEALTH_URL   = os.environ.get("BOX_HEALTH_URL", "http://127.0.0.1:8002/health")
+REQUEST_TIMEOUT  = float(os.environ.get("REQUEST_TIMEOUT", "3.0"))
+DISPATCH_RATE_HZ = float(os.environ.get("DISPATCH_RATE_HZ", "10.0"))
 
 # 카메라 해상도
-CAM_W = int(os.environ.get("CAM_W", "640"))
-CAM_H = int(os.environ.get("CAM_H", "480"))
+CAM_W   = int(os.environ.get("CAM_W", "640"))
+CAM_H   = int(os.environ.get("CAM_H", "480"))
 CAM_FPS = int(os.environ.get("CAM_FPS", "30"))
+
+# 노출값: 0이면 자동노출, 그 외 수동값 (500 권장)
+CAM_EXPOSURE = int(os.environ.get("CAM_EXPOSURE", "500"))
 
 # 오탐 필터
 MIN_BBOX_SIZE = 0.02
-DEDUP_THRESH = 0.08
+DEDUP_THRESH  = 0.08
 
 
 def filter_detections(dets):
-    """크기 필터 + 중복 제거. dets: [{label,x_min,y_min,x_max,y_max}]."""
+    """크기 필터 + 중복 제거."""
     filtered = []
     for d in dets:
         w = d["x_max"] - d["x_min"]
@@ -88,8 +87,7 @@ class PerceptionNode(Node):
         super().__init__('perception_node')
 
         if rs is None:
-            self.get_logger().error(
-                'pyrealsense2 미설치. pip3 install pyrealsense2 --break-system-packages')
+            self.get_logger().error('pyrealsense2 미설치')
             raise RuntimeError("pyrealsense2 not installed")
 
         qos = QoSProfile(
@@ -114,7 +112,8 @@ class PerceptionNode(Node):
         self.timer = self.create_timer(1.0 / DISPATCH_RATE_HZ, self._dispatch_inference)
 
         self.get_logger().info(
-            f'PerceptionNode(박스 전용) 시작 | target: {TARGET_LABEL} | server: {BOX_SERVER_URL}')
+            f'PerceptionNode 시작 | target={TARGET_LABEL} | '
+            f'server={BOX_SERVER_URL} | exposure={CAM_EXPOSURE}')
 
     def _init_camera(self):
         self.rs_pipe = rs.pipeline()
@@ -122,9 +121,25 @@ class PerceptionNode(Node):
         cfg.enable_stream(rs.stream.color, CAM_W, CAM_H, rs.format.bgr8, CAM_FPS)
         cfg.enable_stream(rs.stream.depth, CAM_W, CAM_H, rs.format.z16, CAM_FPS)
         profile = self.rs_pipe.start(cfg)
+
         self.rs_align = rs.align(rs.stream.color)
+
+        # depth scale
         depth_sensor = profile.get_device().first_depth_sensor()
         self.depth_scale = depth_sensor.get_depth_scale()
+
+        # 노출값 설정 (0이면 자동노출 유지)
+        if CAM_EXPOSURE > 0:
+            try:
+                color_sensor = profile.get_device().query_sensors()[1]
+                color_sensor.set_option(rs.option.enable_auto_exposure, 0)
+                color_sensor.set_option(rs.option.exposure, CAM_EXPOSURE)
+                self.get_logger().info(f'RealSense 노출값 수동 설정: {CAM_EXPOSURE}')
+            except Exception as e:
+                self.get_logger().warn(f'노출값 설정 실패 (자동노출 유지): {e}')
+        else:
+            self.get_logger().info('RealSense 자동노출 사용')
+
         self.get_logger().info(
             f'RealSense: {CAM_W}x{CAM_H}@{CAM_FPS}fps | depth_scale={self.depth_scale}')
 
@@ -174,8 +189,8 @@ class PerceptionNode(Node):
 
     def _send_and_publish(self, color: np.ndarray, depth: np.ndarray):
         try:
-            small = cv2.resize(color, (INFER_W, INFER_H))
-            ok, buf = cv2.imencode('.jpg', small, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            # 원본 크기(640x480)로 전송 — 다운스케일 시 탐지 누락 방지
+            ok, buf = cv2.imencode('.jpg', color, [cv2.IMWRITE_JPEG_QUALITY, 90])
             if not ok:
                 return
             img_b64 = base64.b64encode(buf.tobytes()).decode('ascii')
@@ -211,6 +226,7 @@ class PerceptionNode(Node):
                 "center_2d": {"x": cx_norm, "y": cy_norm},
                 "center_3d": xyz,
                 "depth_m": round(float(depth_m), 3) if depth_m else None,
+                "confidence": round(float(d.get("confidence", 0.0)), 3),
             })
 
         msg = String()
