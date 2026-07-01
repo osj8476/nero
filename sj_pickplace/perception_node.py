@@ -50,7 +50,7 @@ try:
 except ImportError:
     rs = None
 
-from sj_folder.camera_calibration import (
+from sj_pickplace.camera_calibration import (
     CameraIntrinsics, set_intrinsics, pixel_to_camera_xyz,
 )
 
