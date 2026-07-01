@@ -35,7 +35,7 @@ try:
 except ImportError:
     rs = None
 
-from nero_ai.camera_calibration import pixel_to_robot_xyz
+from sj_folder.camera_calibration import pixel_to_robot_xyz
 
 
 # ──────────────────────────────────────────────
