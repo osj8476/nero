@@ -8,12 +8,21 @@ perception_node.py  (박스 전용 단순화 버전 v2)
 - 이미지 원본 크기(640x480)로 서버에 전송 (다운스케일 시 탐지 누락 방지)
 - /detected_objects 퍼블리시 포맷 기존과 동일 유지 (planning_node 변경 불필요)
 
+[2026-07 eye-in-hand 캘리브레이션 통합]
+- pixel_to_robot_xyz(호모그래피 기반 평면 가정) 제거
+- pixel_to_camera_xyz(표준 핀홀 역투영) + tf2(camera_color_optical_frame
+  -> base_link)로 교체. 카메라가 tcp_link에 붙어 팔과 함께 움직이는
+  eye-in-hand 구조이므로, 매 detection마다 그 순간의 실제 팔 자세를
+  반영한 tf 변환이 필요함 (고정 오프셋 계산으로는 안 됨).
+
 [환경변수]
   BOX_SERVER_URL  : 박스 서버 주소 (기본: http://127.0.0.1:8002/detect)
   BOX_HEALTH_URL  : 헬스체크 주소 (기본: http://127.0.0.1:8002/health)
   CAM_EXPOSURE    : RealSense 노출값 (기본: 500, 0이면 자동노출)
   DISPATCH_RATE_HZ: 추론 요청 주기 (기본: 10Hz)
   TARGET_LABEL    : 탐지 대상 클래스 (기본: box)
+  BASE_FRAME      : tf 변환 목표 프레임 (기본: base_link)
+  CAMERA_OPTICAL_FRAME : 카메라 광학 프레임 (기본: camera_color_optical_frame)
 """
 
 import os
@@ -29,14 +38,21 @@ import requests
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from rclpy.duration import Duration
 from std_msgs.msg import String
+from geometry_msgs.msg import PointStamped
+
+import tf2_ros
+import tf2_geometry_msgs  # noqa: F401  (PointStamped 변환 등록용)
 
 try:
     import pyrealsense2 as rs
 except ImportError:
     rs = None
 
-from nero_ai.camera_calibration import pixel_to_robot_xyz
+from sj_folder.camera_calibration import (
+    CameraIntrinsics, set_intrinsics, pixel_to_camera_xyz,
+)
 
 
 # ──────────────────────────────────────────────
@@ -59,6 +75,11 @@ CAM_EXPOSURE = int(os.environ.get("CAM_EXPOSURE", "500"))
 # 오탐 필터
 MIN_BBOX_SIZE = 0.02
 DEDUP_THRESH  = 0.08
+
+# tf 변환 대상 프레임 (URDF에서 tcp_link 하위에 붙인 광학 프레임과 일치해야 함)
+BASE_FRAME = os.environ.get("BASE_FRAME", "base_link")
+CAMERA_OPTICAL_FRAME = os.environ.get("CAMERA_OPTICAL_FRAME", "camera_color_optical_frame")
+TF_TIMEOUT_SEC = float(os.environ.get("TF_TIMEOUT_SEC", "0.2"))
 
 
 def filter_detections(dets):
@@ -97,7 +118,12 @@ class PerceptionNode(Node):
         )
         self.pub = self.create_publisher(String, '/detected_objects', qos)
 
+        # ── RealSense 초기화 (이 안에서 intrinsics도 등록됨) ──
         self._init_camera()
+
+        # ── tf2: eye-in-hand라 매 순간 camera->base_link 변환이 바뀜 ──
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
         self.frame_lock = threading.Lock()
         self.latest_color: Optional[np.ndarray] = None
@@ -113,7 +139,8 @@ class PerceptionNode(Node):
 
         self.get_logger().info(
             f'PerceptionNode 시작 | target={TARGET_LABEL} | '
-            f'server={BOX_SERVER_URL} | exposure={CAM_EXPOSURE}')
+            f'server={BOX_SERVER_URL} | exposure={CAM_EXPOSURE} | '
+            f'tf: {CAMERA_OPTICAL_FRAME} -> {BASE_FRAME}')
 
     def _init_camera(self):
         self.rs_pipe = rs.pipeline()
@@ -142,6 +169,13 @@ class PerceptionNode(Node):
 
         self.get_logger().info(
             f'RealSense: {CAM_W}x{CAM_H}@{CAM_FPS}fps | depth_scale={self.depth_scale}')
+
+        # ── intrinsics 등록: 반드시 color 스트림 기준 (depth/IR 아님) ──
+        # align(rs.stream.color) 를 썼으므로 depth도 color 픽셀 좌표계에 맞춰져
+        # 있음. 따라서 역투영도 color intrinsics로 해야 함 — 다른 렌즈(좌측 IR)
+        # intrinsics를 쓰면 렌즈 baseline만큼(15~25mm) 어긋난다.
+        color_profile = profile.get_stream(rs.stream.color).as_video_stream_profile()
+        set_intrinsics(CameraIntrinsics.from_realsense_profile(color_profile))
 
     def _capture_loop(self):
         while rclpy.ok():
@@ -210,6 +244,7 @@ class PerceptionNode(Node):
         filtered = filter_detections(raw_dets)
 
         ch, cw = color.shape[:2]
+        now_stamp = self.get_clock().now().to_msg()
         objs = []
         for d in filtered:
             cx_norm = (d["x_min"] + d["x_max"]) / 2
@@ -218,7 +253,33 @@ class PerceptionNode(Node):
             cy_px = int(cy_norm * ch)
 
             depth_m = self._sample_depth(depth, cx_px, cy_px)
-            xyz = pixel_to_robot_xyz(cx_px, cy_px, cw, ch, depth_m=depth_m)
+
+            # ── 픽셀+depth → 카메라 광학 좌표계 3D 점 (핀홀 역투영) ──
+            pt_cam = pixel_to_camera_xyz(cx_px, cy_px, depth_m)
+            if pt_cam is None:
+                continue  # depth 무효하거나 intrinsics 미설정 → 이 물체는 스킵
+
+            # ── 카메라 좌표계 점 → base_link (eye-in-hand이므로 매번 tf 조회) ──
+            pt_stamped = PointStamped()
+            pt_stamped.header.frame_id = CAMERA_OPTICAL_FRAME
+            pt_stamped.header.stamp = now_stamp
+            pt_stamped.point.x = pt_cam["x"]
+            pt_stamped.point.y = pt_cam["y"]
+            pt_stamped.point.z = pt_cam["z"]
+
+            try:
+                pt_base = self.tf_buffer.transform(
+                    pt_stamped, BASE_FRAME, timeout=Duration(seconds=TF_TIMEOUT_SEC))
+                xyz = {
+                    "x": round(pt_base.point.x, 3),
+                    "y": round(pt_base.point.y, 3),
+                    "z": round(pt_base.point.z, 3),
+                }
+            except Exception as e:
+                self.get_logger().warn(
+                    f'tf 변환 실패 ({CAMERA_OPTICAL_FRAME} -> {BASE_FRAME}): {e}',
+                    throttle_duration_sec=5.0)
+                continue
 
             objs.append({
                 "label": d["label"],
