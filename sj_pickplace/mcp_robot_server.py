@@ -69,7 +69,7 @@ class RosBridgeNode(Node):
         super().__init__('mcp_robot_bridge')
 
         qos = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST,
             depth=10,
         )

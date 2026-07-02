@@ -233,7 +233,7 @@ class PlanningNode(Node):
             qos_best_effort, callback_group=self._cb)
         self.sub_cmd = self.create_subscription(
             String, '/arm_command', self.on_command,
-            qos_reliable, callback_group=self._cb)
+            qos_best_effort, callback_group=self._cb)
 
         self.pub_move    = self.create_publisher(PoseStamped, '/control/move_p', qos_reliable)
         self.pub_gripper = self.create_publisher(JointState,  '/control/joint_states', qos_reliable)
@@ -546,14 +546,22 @@ class PlanningNode(Node):
                     idx = joint_names.index(jname)
                     positions[idx] = float(v)
             self.get_logger().info(f'joint positions: {[round(p,3) for p in positions]}')
-            self.moveit2.move_to_configuration(positions)
-            time.sleep(0.5)
-            deadline = time.time() + MOVE_TIMEOUT
-            while time.time() < deadline:
-                if (not self.moveit2._MoveIt2__is_motion_requested and
-                        not self.moveit2._MoveIt2__is_executing):
-                    break
-                time.sleep(0.1)
+            if self.use_moveit2:
+                self.moveit2.move_to_configuration(positions)
+                time.sleep(0.5)
+                deadline = time.time() + MOVE_TIMEOUT
+                while time.time() < deadline:
+                    if (not self.moveit2._MoveIt2__is_motion_requested and
+                            not self.moveit2._MoveIt2__is_executing):
+                        break
+                    time.sleep(0.1)
+            else:
+                js = JointState()
+                js.header.stamp = self.get_clock().now().to_msg()
+                js.name = ['joint1','joint2','joint3','joint4','joint5','joint6','joint7']
+                js.position = [float(p) for p in positions]
+                self.pub_gripper.publish(js)
+                time.sleep(3.0)
             self.get_logger().info('✅ MOVE_JOINTS 완료')
             self._publish_result('success', 'joint_move_complete')
         except Exception as e:
@@ -577,7 +585,12 @@ class PlanningNode(Node):
                         break
                     time.sleep(0.1)
             else:
-                self._move(HOME_X, HOME_Y, HOME_Z, QUAT_HOME)
+                js = JointState()
+                js.header.stamp = self.get_clock().now().to_msg()
+                js.name = ['joint1','joint2','joint3','joint4','joint5','joint6','joint7']
+                js.position = [0.0] * 7
+                self.pub_gripper.publish(js)
+                time.sleep(3.0)
 
             self.get_logger().info('2/2: 그리퍼 열기')
             self._gripper(SIM_GRIPPER_OPEN, GRIPPER_OPEN)
