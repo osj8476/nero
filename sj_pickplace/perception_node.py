@@ -40,6 +40,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from rclpy.duration import Duration
 from std_msgs.msg import String
+from sensor_msgs.msg import Image, CameraInfo
 from geometry_msgs.msg import PointStamped
 
 import tf2_ros
@@ -116,7 +117,9 @@ class PerceptionNode(Node):
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
         )
-        self.pub = self.create_publisher(String, '/detected_objects', qos)
+        self.pub = self.create_publisher(String, "/detected_objects", qos)
+        self.pub_image = self.create_publisher(Image, "/camera/color/image_raw", qos)
+        self.pub_info = self.create_publisher(CameraInfo, "/camera/camera_info", qos)
 
         # ── RealSense 초기화 (이 안에서 intrinsics도 등록됨) ──
         self._init_camera()
@@ -176,6 +179,12 @@ class PerceptionNode(Node):
         # intrinsics를 쓰면 렌즈 baseline만큼(15~25mm) 어긋난다.
         color_profile = profile.get_stream(rs.stream.color).as_video_stream_profile()
         set_intrinsics(CameraIntrinsics.from_realsense_profile(color_profile))
+        intr = color_profile.get_intrinsics()
+        self._cam_info = CameraInfo()
+        self._cam_info.width = intr.width
+        self._cam_info.height = intr.height
+        self._cam_info.k = [intr.fx, 0.0, intr.ppx, 0.0, intr.fy, intr.ppy, 0.0, 0.0, 1.0]
+        self._cam_info.distortion_model = "plumb_bob"
 
     def _capture_loop(self):
         while rclpy.ok():
@@ -190,6 +199,17 @@ class PerceptionNode(Node):
                 depth_np = np.asanyarray(depth.get_data()).astype(np.float32)
                 depth_np *= self.depth_scale
                 with self.frame_lock:
+                    img_msg = Image()
+                    img_msg.header.stamp = self.get_clock().now().to_msg()
+                    img_msg.header.frame_id = "camera_color_optical_frame"
+                    img_msg.height = color_np.shape[0]
+                    img_msg.width = color_np.shape[1]
+                    img_msg.encoding = "bgr8"
+                    img_msg.step = color_np.shape[1] * 3
+                    img_msg.data = color_np.tobytes()
+                    self.pub_image.publish(img_msg)
+                    self._cam_info.header = img_msg.header
+                    self.pub_info.publish(self._cam_info)
                     self.latest_color = color_np
                     self.latest_depth = depth_np
             except Exception as e:
@@ -262,7 +282,7 @@ class PerceptionNode(Node):
             # ── 카메라 좌표계 점 → base_link (eye-in-hand이므로 매번 tf 조회) ──
             pt_stamped = PointStamped()
             pt_stamped.header.frame_id = CAMERA_OPTICAL_FRAME
-            pt_stamped.header.stamp = now_stamp
+            pt_stamped.header.stamp = rclpy.time.Time().to_msg()
             pt_stamped.point.x = pt_cam["x"]
             pt_stamped.point.y = pt_cam["y"]
             pt_stamped.point.z = pt_cam["z"]
