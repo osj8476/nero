@@ -7,9 +7,10 @@ from std_msgs.msg import String
 from visualization_msgs.msg import Marker, MarkerArray
 
 FAKE_OBJECTS = [
-    {"label": "cup",      "center_3d": {"x": 0.25, "y": - 0.20, "z": 0.00}},
-    {"label": "bottle",   "center_3d": {"x": 0.40, "y": 0.00, "z": 0.09}},
-    {"label": "book", "center_3d": {"x": 0.20, "y": -0.25, "z": 0.00}},
+    {"label": "cup",    "center_3d": {"x": 0.25, "y": -0.20, "z": 0.00}, "angle_base_deg": None},
+    {"label": "bottle", "center_3d": {"x": 0.40, "y":  0.00, "z": 0.09}, "angle_base_deg": None},
+    {"label": "book",   "center_3d": {"x": 0.20, "y": -0.25, "z": 0.00}, "angle_base_deg": None},
+    {"label": "box",    "center_3d": {"x": 0.35, "y":  0.35, "z": 0.00}, "angle_base_deg": 45.0},
 ]
 
 ORIGINAL_POSITIONS = {obj["label"]: dict(obj["center_3d"]) for obj in FAKE_OBJECTS}
@@ -19,7 +20,7 @@ class FakePerception(Node):
         super().__init__("fake_perception")
 
         qos = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST, depth=1)
 
         self.pub = self.create_publisher(String, "/detected_objects", qos)
@@ -99,7 +100,8 @@ class FakePerception(Node):
              "bbox": [0,0,0,0],
              "center_2d": {"x": 0, "y": 0},
              "center_3d": dict(ORIGINAL_POSITIONS[obj["label"]]),
-             "depth_m": 0.6}
+             "depth_m": 0.6,
+             "angle_base_deg": obj.get("angle_base_deg", None)}
             for obj in FAKE_OBJECTS
         ]}, ensure_ascii=False)
         self.pub.publish(msg)
@@ -150,6 +152,76 @@ class FakePerception(Node):
             t.color.a = 1.0
             t.text = label
             array.markers.append(t)
+
+        # 박스 각도 화살표 마커
+        import math
+        for i, obj in enumerate(FAKE_OBJECTS):
+            if obj.get("angle_base_deg") is None:
+                continue
+            label = obj["label"]
+            pos = self.display_positions[label]
+            angle_rad = math.radians(obj["angle_base_deg"])
+
+            arrow = Marker()
+            arrow.header.frame_id = "base_link"
+            arrow.header.stamp = now
+            arrow.ns = "angles"
+            arrow.id = i + 200
+            arrow.type = Marker.ARROW
+            arrow.action = Marker.ADD
+            arrow.pose.position.x = pos['x']
+            arrow.pose.position.y = pos['y']
+            arrow.pose.position.z = pos['z'] + 0.05
+
+            # 각도를 쿼터니언으로 (z축 회전)
+            arrow.pose.orientation.x = 0.0
+            arrow.pose.orientation.y = 0.0
+            arrow.pose.orientation.z = math.sin(angle_rad / 2)
+            arrow.pose.orientation.w = math.cos(angle_rad / 2)
+
+            arrow.scale.x = 0.15  # 화살표 길이
+            arrow.scale.y = 0.02  # 화살표 폭
+            arrow.scale.z = 0.02
+            arrow.color.r = 0.0
+            arrow.color.g = 1.0
+            arrow.color.b = 1.0
+            arrow.color.a = 1.0
+            array.markers.append(arrow)
+
+        # 박스 각도 화살표 마커
+        import math
+        for i, obj in enumerate(FAKE_OBJECTS):
+            if obj.get("angle_base_deg") is None:
+                continue
+            label = obj["label"]
+            pos = self.display_positions[label]
+            angle_rad = math.radians(obj["angle_base_deg"])
+
+            arrow = Marker()
+            arrow.header.frame_id = "base_link"
+            arrow.header.stamp = now
+            arrow.ns = "angles"
+            arrow.id = i + 200
+            arrow.type = Marker.ARROW
+            arrow.action = Marker.ADD
+            arrow.pose.position.x = pos['x']
+            arrow.pose.position.y = pos['y']
+            arrow.pose.position.z = pos['z'] + 0.05
+
+            # 각도를 쿼터니언으로 (z축 회전)
+            arrow.pose.orientation.x = 0.0
+            arrow.pose.orientation.y = 0.0
+            arrow.pose.orientation.z = math.sin(angle_rad / 2)
+            arrow.pose.orientation.w = math.cos(angle_rad / 2)
+
+            arrow.scale.x = 0.15  # 화살표 길이
+            arrow.scale.y = 0.02  # 화살표 폭
+            arrow.scale.z = 0.02
+            arrow.color.r = 0.0
+            arrow.color.g = 1.0
+            arrow.color.b = 1.0
+            arrow.color.a = 1.0
+            array.markers.append(arrow)
 
         self.pub_markers.publish(array)
 
