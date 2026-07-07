@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-planning_node.py  (IK 안정화 패치)
+planning_node.py  (IK 안정화 패치 + 박스 각도보정 재도입판)
 
 [변경점 vs 이전 버전]
 1. _move_joints_sequence 중복 정의 제거
@@ -12,14 +12,31 @@ planning_node.py  (IK 안정화 패치)
 4. POSES_FILE 경로를 XDG_DATA_HOME 기반으로 변경 (Jetson/PC 모두 호환)
 5. force_reset 타이밍 개선: move_to_pose 직전에만 호출
 
-[2026-07 각도보정 제거]
-- joint5 값을 읽어 joint7 자리에 넣는 방식(2.5/5 yaw 보정 / 4.5/5 원복)의
-  조인트 제어 기반 각도보정이 실패하여 관련 코드를 전부 제거함.
-  (perception_node의 angle_base_deg 계산도 함께 제거됨)
-- _find_object_with_angle() 대신 각도 없이 위치만 반환하는
-  _find_object()를 사용하도록 되돌림.
-- 각도보정 자체가 필요없다는 뜻은 아니며, 추후 조인트 제어가 아닌 다른
-  방식(예: place 단계에서만 보정, 그리퍼 자체 회전 등)으로 재도입 검토 예정.
+[2026-07 각도보정 — 1차 시도 실패 -> 제거 -> 2차 시도로 재도입]
+- 1차 시도(실패, 제거됨): approach 이후 joint5 값을 읽어 joint7 자리에
+  넣는 방식. 직렬 링크 로봇은 특정 조인트 하나만 움직여도 그 이후 링크
+  전체가 같이 움직이므로 "그리퍼 yaw만 살짝 돌리기"가 조인트 스페이스
+  제어로는 애초에 성립 불가능했음. 게다가 approach 중간에 자세를 바꾸는
+  방식이라, MoveIt2/펌웨어가 매번 새로 IK를 풀면서 조인트1~4가 20도
+  이상 튀는 위험한 동작(엘보 플립)까지 관찰되어 폐기.
+
+- 2차 시도(현재, 채택): 실물 컨트롤러(agx_arm_ctrl_single_node,
+  pyAgxArm 펌웨어)를 대상으로 직접 orientation sweep 실험을 수행한 결과:
+    * roll=180°,pitch=0°(우리가 "top-down"이라 가정했던 자세)는 여러
+      위치에서 광범위하게 NO_SOLUTION.
+    * 반대로 pitch=90°,yaw=0° 고정, roll을 0°~-90°로 스윕한 전 구간은
+      전부 IK 성공. 실측 tf 결과는 항상 roll≈180°,pitch≈0°(즉 실제로는
+      정확히 top-down 자세)이면서, yaw만 "실측yaw = 요청roll - 90°"
+      관계로 정확히 선형 대응함을 확인 (2026-07 검증, 15° 간격 스윕).
+    * 즉 이 로봇 펌웨어에서 "그리퍼를 top-down으로 유지한 채 접근축
+      기준 yaw만 돌리는" 자세를 안정적으로 얻으려면, 요청 쿼터니언을
+      (roll=-angle_deg, pitch=90°, yaw=0)로 구성해야 한다.
+  이 자세는 approach 진입 전에 딱 한 번만 계산해서 pick 시퀀스
+  (approach→descend→lift) 내내 동일하게 유지한다. 시퀀스 중간에 자세를
+  바꾸는 로직이 전혀 없으므로, 1차 시도 때 있었던 "중간 전환 -> IK 분기
+  튐" 문제가 구조적으로 재발하지 않는다.
+  perception_node가 계산해 보내는 angle_base_deg(0~90도 정규화)를
+  그대로 사용한다.
 """
 
 import json
@@ -40,6 +57,26 @@ from control_msgs.action import FollowJointTrajectory
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from builtin_interfaces.msg import Duration
 from rclpy.action import ActionClient
+
+try:
+    from agx_arm_msgs.msg import AgxArmStatus
+    HAVE_ARM_STATUS_MSG = True
+except ImportError:
+    HAVE_ARM_STATUS_MSG = False
+
+# arm_status/motion_status 값 -> 사람이 읽을 이름 (로그용)
+ARM_STATUS_NAMES = {
+    0: "NORMAL", 1: "EMERGENCY_STOP", 2: "NO_SOLUTION",
+    3: "SINGULARITY_POINT", 4: "TARGET_POS_EXCEEDS_LIMIT",
+    5: "JOINT_COMMUNICATION_ERR", 6: "JOINT_BRAKE_NOT_RELEASED",
+    7: "COLLISION_OCCURRED",
+}
+MOTION_STATUS_NAMES = {0: "SUCCESS", 1: "FAILED", 255: "UNKNOWN"}
+
+# 실물 모드에서 _move()가 도착 확인을 기다리는 최대 시간(초)
+REAL_MOVE_TIMEOUT = 8.0
+REAL_MOVE_POLL_SEC = 0.1
+REAL_MOVE_SETTLE_SEC = 0.3  # 퍼블리시 직후 arm_status가 갱신되기까지 최소 대기
 
 # ── 그리퍼 상수 ───────────────────────────────────────────────────────────────
 GRIPPER_OPEN  = 0.08
@@ -74,6 +111,27 @@ LIFT_Z     = 0.23
 #   → 가장 균형 잡힌 임계값으로 채택. (재현 데이터: ik_side_reachable_map.txt)
 SIDE_MIN_DIST   = 0.32   # side 그립 사전 검사 임계값: 이 거리 미만이면 IK 시도 없이 즉시 거부
 SIDE_PITCH_DEG  = 90      # side 그립 손목 pitch (그리퍼를 눕히는 각도)
+
+# ── top 그립 각도보정 전용 상수 ───────────────────────────────────────────────
+# [검증 내역 - 실물 agx_arm_ctrl_single_node 대상 orientation sweep, 2026-07]
+#   위치 (0.3,0.3,0.15) 고정, pitch=90°,yaw=0° 고정, roll을 0~-90도로
+#   15도 간격 스윕 -> 전 구간 IK 성공(arm_status=NORMAL). 실측 tf 결과가
+#   항상 top-down 자세(roll≈180°,pitch≈0°)이며, 실측yaw = 요청roll - 90°
+#   관계로 정확히 선형 대응함을 확인. 이 결과를 이용해 top 그립 시
+#   "top-down 유지 + 박스각도만큼 yaw 회전"을 아래 함수로 구현한다.
+TOP_ANGLE_PITCH_DEG = 90.0   # 고정값 (실측상 항상 top-down으로 귀결됨)
+
+
+def _top_down_angle_quat(angle_deg: float) -> list:
+    """
+    박스 각도(angle_deg, base_link 기준 0~90도)를 반영한 top-down 쿼터니언.
+
+    roll=-angle_deg, pitch=90, yaw=0 으로 요청하면, 실물 펌웨어 기준
+    실제로는 top-down 자세(roll≈180,pitch≈0)를 유지하면서 접근축 기준
+    yaw만 angle_deg만큼 회전한 자세로 귀결됨 (2026-07 실측 검증).
+    """
+    return _euler_to_quat(math.radians(-angle_deg), math.radians(TOP_ANGLE_PITCH_DEG), 0.0)
+
 
 # ── 그리퍼 TCP 오프셋 (gripper_flange → 손가락 중간 지점까지 거리) ───────────
 # URDF: gripper_joint origin xyz="0 0 0.1358" → 그리퍼 전체 길이 13.58cm
@@ -237,6 +295,24 @@ class PlanningNode(Node):
             JointState, '/feedback/joint_states',
             lambda msg: setattr(self, 'latest_joint_state', msg), 10)
 
+        self.latest_arm_status = None
+        self._arm_status_available = False
+        if HAVE_ARM_STATUS_MSG:
+            try:
+                self.create_subscription(
+                    AgxArmStatus, '/feedback/arm_status',
+                    lambda msg: setattr(self, 'latest_arm_status', msg), 10)
+                self._arm_status_available = True
+            except Exception as e:
+                self.get_logger().warn(
+                    f'/feedback/arm_status 구독 생성 실패 (typesupport 문제로 추정): {e} | '
+                    f'실물 모드 _move()가 도착 확인 없이 예전처럼 즉시 성공 처리됩니다.')
+        else:
+            self.get_logger().warn(
+                'agx_arm_msgs.msg.AgxArmStatus import 실패 — 실물 모드 _move()가 '
+                '도착 확인 없이 예전처럼 즉시 성공 처리됩니다. '
+                '(ros2 interface show agx_arm_msgs/msg/AgxArmStatus 로 실제 타입 확인 필요)')
+
         self.sub_obj = self.create_subscription(
             String, '/detected_objects', self.on_objects,
             qos_best_effort, callback_group=self._cb)
@@ -277,6 +353,7 @@ class PlanningNode(Node):
         )
 
         self.latest_objects = []
+        self._box_angle_deg = None
         self.busy = False
         self.lock = threading.Lock()
         if self.use_moveit2:
@@ -309,7 +386,8 @@ class PlanningNode(Node):
 
         if action == 'pick':
             label = cmd.get('target_label', '')
-            pos = self._find_object(label)
+            pos, angle_deg = self._find_object_with_angle(label)
+            self._box_angle_deg = angle_deg
             if pos is None:
                 self.get_logger().warn(f"'{label}' 못 찾음.")
                 with self.lock:
@@ -331,7 +409,8 @@ class PlanningNode(Node):
                     is_side = True
             self.get_logger().info(
                 f'PICK 시작: {label} @ {pos} | 자세: {grasp_dir or "auto"} '
-                f'({"side" if is_side else "top"}) {[round(v,3) for v in quat]}')
+                f'({"side" if is_side else "top"}) {[round(v,3) for v in quat]} | '
+                f'박스각도={angle_deg}')
             t = threading.Thread(target=self._pick_sequence, args=(pos, quat, is_side))
             t.daemon = False
             t.start()
@@ -350,7 +429,21 @@ class PlanningNode(Node):
                     is_side = True
                     quat = _side_quat_for(pos)
             else:
-                quat = QUAT_TOP_DOWN
+                # ── 2026-07 수정 ──────────────────────────────────────────
+                # 예전엔 여기서 QUAT_TOP_DOWN(roll≈180,pitch≈0) 고정값을 썼는데,
+                # 이 자세가 실물 펌웨어에서 워크스페이스 넓은 범위에 걸쳐
+                # NO_SOLUTION 나는 것으로 이미 확인됨(오늘 pick 각도보정 검증
+                # 과정에서 발견). place도 pick과 동일하게 검증된
+                # (roll=-angle, pitch=90, yaw=0) 공식을 사용하도록 교체.
+                # 마지막으로 집었던 물체의 박스각도(self._box_angle_deg)를
+                # 그대로 이어받아, 잡은 자세 그대로 내려놓게 한다
+                # (물체를 든 채로 억지로 비틀지 않기 위함). pick 이력이 없으면
+                # angle=0으로 처리.
+                angle_deg = self._box_angle_deg if self._box_angle_deg is not None else 0.0
+                quat = _top_down_angle_quat(angle_deg)
+                self.get_logger().info(
+                    f'[place] 박스각도 반영 쿼터니언 사용: angle={angle_deg}° -> '
+                    f'quat={[round(v,3) for v in quat]}')
             self.get_logger().info(
                 f'PLACE 시작 @ {pos} | 자세: {"side" if is_side else "top"} '
                 f'{[round(v,3) for v in quat]}')
@@ -403,9 +496,27 @@ class PlanningNode(Node):
                 return obj.get('center_3d')
         return None
 
+    def _find_object_with_angle(self, label):
+        for obj in self.latest_objects:
+            if obj.get('label') == label:
+                return obj.get('center_3d'), obj.get('angle_base_deg', None)
+        return None, None
+
     # ── 시퀀스 ────────────────────────────────────────────────────────────────
     def _pick_sequence(self, pos, quat, is_side=False):
         try:
+            # ── top 그립 + 박스각도 있음: approach 진입 전에 딱 한 번만
+            # "top-down 유지 + yaw=박스각도" 쿼터니언을 계산하고, 이후
+            # approach/descend/lift 내내 이 값을 그대로 사용한다.
+            # (시퀀스 중간에 자세를 바꾸지 않음 — 1차 시도 실패의 핵심 원인이었던
+            #  "중간 전환 -> IK 재계산 -> 조인트 튐"을 구조적으로 피하기 위함)
+            if not is_side:
+                angle_deg = self._box_angle_deg if self._box_angle_deg is not None else 0.0
+                quat = _top_down_angle_quat(angle_deg)
+                self.get_logger().info(
+                    f'[top] 박스각도 반영 쿼터니언 고정: angle={angle_deg}° -> '
+                    f'quat={[round(v,3) for v in quat]} (approach~lift 내내 동일 유지)')
+
             # side 그립은 IK를 시도하기 전에 먼저 도달 가능 영역인지 검사한다.
             # (전수조사 결과 dist<0.32는 거의 항상 IK 실패 -> ABORTED 3회 재시도로
             #  30초씩 허비하는 대신 즉시 거부하고 사유를 알려준다)
@@ -443,12 +554,6 @@ class PlanningNode(Node):
                 descend_z  = pz + DESCEND_Z + TOP_TCP_OFFSET
                 lift_z     = pz + LIFT_Z + TOP_TCP_OFFSET
 
-            # ── top 그립: approach 쿼터니언을 수직 고정 (roll=π, pitch=0, yaw=0) ──
-            # IK 안정성을 위해 approach는 항상 정수직 자세로 접근
-            if not is_side:
-                quat = _euler_to_quat(math.pi, 0.0, 0.0)
-                self.get_logger().info('[top] approach 쿼터니언 수직 고정 (roll=180°, pitch=0, yaw=0)')
-
             self.get_logger().info(
                 f'1/5: 접근 (approach) | {offset_desc}')
             ok = self._move(px, py, approach_z, quat, tol_ori=TOL_ORI_LOOSE)
@@ -473,9 +578,32 @@ class PlanningNode(Node):
             time.sleep(GRIPPER_DELAY)
 
             self.get_logger().info('5/5: 들어올리기 (lift) — joint-space (빙글 방지)')
-            ok = self._move(px, py, lift_z, quat, tol_ori=TOL_ORI_LOOSE)
+            if not is_side:
+                lift_quat = _top_down_angle_quat(0.0)
+                self.get_logger().info(
+                    f'[top] lift 각도보정 해제: quat={[round(v,3) for v in lift_quat]}로 전환')
+            else:
+                lift_quat = quat
+
+            # ── 2026-07 수정 ──────────────────────────────────────────────
+            # 특정 위치에서는 완전한 LIFT_Z 높이가 워크스페이스 경계/특이점
+            # 근처라 간헐적으로 NO_SOLUTION 나는 것이 실측으로 확인됨(동일
+            # 목표가 어떨 땐 성공, 어떨 땐 6연속 실패). 근본 원인(정확한
+            # 안전 범위)은 side 그립처럼 전수조사가 필요하지만, 당장은
+            # 완전한 높이가 막히면 더 낮은 높이로 단계적으로 낮춰가며
+            # 재시도해서 최소한 바닥에서는 띄우는 것을 우선한다.
+            lift_candidates = [lift_z, pos['z'] + 0.15 + (0 if is_side else TOP_TCP_OFFSET),
+                               pos['z'] + 0.08 + (0 if is_side else TOP_TCP_OFFSET)]
+            ok = False
+            for i, lz in enumerate(lift_candidates):
+                if i > 0:
+                    self.get_logger().warn(
+                        f'  lift 높이 낮춰서 재시도: {lz:.3f}m (원래 목표 {lift_z:.3f}m)')
+                ok = self._move(px, py, lz, lift_quat, tol_ori=TOL_ORI_LOOSE)
+                if ok:
+                    break
             if not ok:
-                raise RuntimeError('lift 이동 실패 (재시도 초과)')
+                raise RuntimeError('lift 이동 실패 (모든 높이 재시도 초과)')
 
             self.get_logger().info('✅ PICK 완료')
             self._publish_result('success', 'pick_complete')
@@ -488,6 +616,19 @@ class PlanningNode(Node):
 
     def _place_sequence(self, pos, quat, is_side=False):
         try:
+            # ── 2026-07 수정 ──────────────────────────────────────────────
+            # on_command에서 grasp_dir을 명시적으로 'top'/'top_down' 등으로
+            # 보내면 GRASP_DIR_MAP의 옛날 QUAT_TOP_DOWN 상수로 빠지는 구멍이
+            # 있었음(기본값(grasp_dir 생략) 케이스만 고쳤던 게 원인).
+            # _pick_sequence와 동일하게, top 계열이면 여기서 무조건
+            # 각도보정 쿼터니언으로 덮어써서 이 구멍을 원천 차단한다.
+            if not is_side:
+                angle_deg = self._box_angle_deg if self._box_angle_deg is not None else 0.0
+                quat = _top_down_angle_quat(angle_deg)
+                self.get_logger().info(
+                    f'[place-top] 각도보정 쿼터니언 고정: angle={angle_deg}° -> '
+                    f'quat={[round(v,3) for v in quat]}')
+
             if is_side:
                 ok, reason = _side_reachability_check(pos)
                 if not ok:
@@ -543,6 +684,64 @@ class PlanningNode(Node):
             with self.lock:
                 self.busy = False
 
+    def _publish_joint_positions(self, positions, joint_names=None):
+        joint_names = joint_names or ['joint1','joint2','joint3','joint4','joint5','joint6','joint7']
+        js = JointState()
+        js.header.stamp = self.get_clock().now().to_msg()
+        js.name = joint_names
+        js.position = [float(p) for p in positions]
+        self.pub_gripper.publish(js)
+
+    def _move_joints_real_wait(self, positions, joint_names=None) -> bool:
+        """
+        실물 모드에서 joint-space 이동(/control/joint_states 발행) 후
+        /feedback/arm_status로 실제 도착을 확인한다 (home, move_joints 공용).
+
+        예전엔 발행만 하고 3초 고정 대기 후 무조건 성공 처리했는데, 이게
+        "간헐적으로 그리퍼만 열리고 팔은 안 움직임" 문제의 원인이었다 —
+        CAN 버스 혼잡/타이밍 문제로 조인트 이동 메시지만 조용히 씹혀도
+        확인할 방법이 없었음. _move()와 동일한 패턴으로 확인+재시도 추가.
+        """
+        if not self._arm_status_available:
+            self._publish_joint_positions(positions, joint_names)
+            time.sleep(3.0)  # 확인 불가 시 예전 방식(고정 대기)으로 폴백
+            return True
+
+        for attempt in range(1, MOVE_MAX_ATTEMPTS + 1):
+            self.get_logger().info(
+                f'  → [실물] joint 이동 시도 {attempt}/{MOVE_MAX_ATTEMPTS}: '
+                f'{[round(p,3) for p in positions]}')
+            self._publish_joint_positions(positions, joint_names)
+
+            time.sleep(REAL_MOVE_SETTLE_SEC)
+            deadline = time.time() + REAL_MOVE_TIMEOUT
+            last_status = None
+            while time.time() < deadline:
+                status = self.latest_arm_status
+                if status is not None:
+                    last_status = status
+                    if status.motion_status == 0:  # SUCCESS
+                        return True
+                    if status.motion_status == 1:  # FAILED
+                        break
+                time.sleep(REAL_MOVE_POLL_SEC)
+
+            if last_status is not None:
+                arm_s = ARM_STATUS_NAMES.get(last_status.arm_status, str(last_status.arm_status))
+                motion_s = MOTION_STATUS_NAMES.get(last_status.motion_status, str(last_status.motion_status))
+                self.get_logger().warn(
+                    f'  [실물] joint 이동 실패/타임아웃: arm_status={arm_s} motion_status={motion_s}')
+            else:
+                self.get_logger().warn('  [실물] arm_status 수신 안 됨 (타임아웃)')
+
+            if attempt < MOVE_MAX_ATTEMPTS:
+                time.sleep(0.5)
+
+        self.get_logger().error(
+            f'[실물] joint 이동 최종 실패: {[round(p,3) for p in positions]} '
+            f'[{MOVE_MAX_ATTEMPTS}회 모두 실패]')
+        return False
+
     def _move_joints_sequence(self, joints: dict):
         """joint space 직접 이동. _move_joints_sequence 중복 정의 제거됨."""
         try:
@@ -571,13 +770,9 @@ class PlanningNode(Node):
                         break
                     time.sleep(0.1)
             else:
-                js = JointState()
-                js.header.stamp = self.get_clock().now().to_msg()
-                js.name = ['joint1','joint2','joint3','joint4','joint5','joint6','joint7']
-                js.position = [float(p) for p in positions]
-                self.pub_gripper.publish(js)
-                time.sleep(3.0)
-            self.get_logger().info('✅ MOVE_JOINTS 완료')
+                ok = self._move_joints_real_wait(positions)
+                if not ok:
+                    raise RuntimeError('move_joints 이동 실패 (재시도 초과)')
             self._publish_result('success', 'joint_move_complete')
         except Exception as e:
             self.get_logger().error(f'MOVE_JOINTS 오류: {e}')
@@ -600,14 +795,9 @@ class PlanningNode(Node):
                         break
                     time.sleep(0.1)
             else:
-                js = JointState()
-                js.header.stamp = self.get_clock().now().to_msg()
-                js.name = ['joint1','joint2','joint3','joint4','joint5','joint6','joint7']
-                js.position = [0.0] * 7
-                self.pub_gripper.publish(js)
-                time.sleep(3.0)
-
-            self.get_logger().info('2/2: 그리퍼 열기')
+                ok = self._move_joints_real_wait([0.0] * 7)
+                if not ok:
+                    raise RuntimeError('home 조인트 이동 실패 (재시도 초과)')
             self._gripper(SIM_GRIPPER_OPEN, GRIPPER_OPEN)
             time.sleep(GRIPPER_DELAY)
 
@@ -633,7 +823,12 @@ class PlanningNode(Node):
           - descend/ascend       → TOL_ORI_TIGHT  (0.05 rad)
         """
         if not self.use_moveit2:
-            # 실물 모드: PoseStamped 발행 (재시도 없음)
+            # 실물 모드: PoseStamped 발행 후 /feedback/arm_status로 실제
+            # 도착(성공/실패)을 확인할 때까지 대기한다.
+            # (예전엔 발행만 하고 바로 True를 반환했는데, 그러면 다음 단계
+            #  명령이 로봇이 아직 이동 중인 위로 덮어써지는 레이스 컨디션이
+            #  발생함 — 그리퍼가 회전 도중에 닫히거나, lift 실패를 못
+            #  알아채는 원인이 됐음. 2026-07 수정.)
             pose = PoseStamped()
             pose.header.frame_id = 'base_link'
             pose.header.stamp    = self.get_clock().now().to_msg()
@@ -644,8 +839,47 @@ class PlanningNode(Node):
             pose.pose.orientation.y = quat[1]
             pose.pose.orientation.z = quat[2]
             pose.pose.orientation.w = quat[3]
-            self.pub_move.publish(pose)
-            return True
+
+            if not self._arm_status_available:
+                # 상태 확인 불가 — 예전 방식(발행만 하고 성공 처리)으로 폴백
+                self.pub_move.publish(pose)
+                return True
+
+            for attempt in range(1, MOVE_MAX_ATTEMPTS + 1):
+                self.get_logger().info(
+                    f'  → [실물] move 시도 {attempt}/{MOVE_MAX_ATTEMPTS} '
+                    f'({x:.3f},{y:.3f},{z:.3f}) quat={[round(v,3) for v in quat]}')
+                pose.header.stamp = self.get_clock().now().to_msg()
+                self.pub_move.publish(pose)
+
+                time.sleep(REAL_MOVE_SETTLE_SEC)
+                deadline = time.time() + REAL_MOVE_TIMEOUT
+                last_status = None
+                while time.time() < deadline:
+                    status = self.latest_arm_status
+                    if status is not None:
+                        last_status = status
+                        if status.motion_status == 0:  # SUCCESS
+                            return True
+                        if status.motion_status == 1:  # FAILED
+                            break
+                    time.sleep(REAL_MOVE_POLL_SEC)
+
+                if last_status is not None:
+                    arm_s = ARM_STATUS_NAMES.get(last_status.arm_status, str(last_status.arm_status))
+                    motion_s = MOTION_STATUS_NAMES.get(last_status.motion_status, str(last_status.motion_status))
+                    self.get_logger().warn(
+                        f'  [실물] 이동 실패/타임아웃: arm_status={arm_s} motion_status={motion_s}')
+                else:
+                    self.get_logger().warn('  [실물] arm_status 수신 안 됨 (타임아웃)')
+
+                if attempt < MOVE_MAX_ATTEMPTS:
+                    time.sleep(0.5)
+
+            self.get_logger().error(
+                f'[실물] _move 최종 실패: ({x:.3f},{y:.3f},{z:.3f}) '
+                f'[{MOVE_MAX_ATTEMPTS}회 모두 실패]')
+            return False
 
         for attempt in range(1, MOVE_MAX_ATTEMPTS + 1):
             self.get_logger().info(
