@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-perception_node.py  (박스 전용 단순화 버전 v2)
+perception_node.py  (박스 전용 단순화 버전 v3 — 각도보정 복원판)
 =================================================================================
 [변경 이력 vs 기존 nero_ai perception_node]
 - 멀티서버 클러스터(CLUSTER_N, 라운드로빈) 제거 → 박스 서버 하나에만 디스패치
@@ -15,13 +15,21 @@ perception_node.py  (박스 전용 단순화 버전 v2)
   eye-in-hand 구조이므로, 매 detection마다 그 순간의 실제 팔 자세를
   반영한 tf 변환이 필요함 (고정 오프셋 계산으로는 안 됨).
 
-[2026-07 각도보정 제거]
-- 조인트 제어(joint7/joint5) 방식의 박스 각도보정이 실패하여 관련 코드를
-  perception_node/planning_node 양쪽에서 전부 제거함.
-  (_compute_box_angle_base(), angle_base_deg 필드, planning_node의
-   2.5/5·4.5/5 joint yaw 보정 단계)
-- 추후 다른 방식(예: 그리퍼 자체 회전 기구, place 단계에서만 보정 등)으로
-  재도입할 수 있으므로 참고용으로 이 이력만 남겨둠.
+[2026-07 각도보정 제거 -> 재도입]
+- 1차 시도: joint5/joint7 값을 직접 조작하는 방식의 조인트 제어 기반
+  각도보정은 기구학적으로 성립 불가(직렬 링크 특정 조인트만 돌리는 게
+  불가능)하여 실패, 관련 코드 전부 제거했었음.
+- 2차 시도: 이 파일의 angle_base_deg 계산(본 함수)은 유지한 채,
+  planning_node 쪽에서 "그리퍼가 top-down을 유지하면서 접근축 기준으로만
+  회전하는" 자세를 approach 단계 진입 전에 한 번만 계산해서 시퀀스 내내
+  고정 사용하는 방식으로 재설계함 (중간에 자세를 바꾸는 로직 없음).
+  실제 하드웨어(agx_arm_ctrl_single_node)에서 pitch=90°, yaw=0° 고정,
+  roll=-각도 로 15° 간격 스윕 검증 완료 (roll 0~-90° 전 구간 IK 성공,
+  실측 tf 결과가 항상 top-down 자세(roll≈180°,pitch≈0°) + 원하는 yaw
+  회전으로 정확히 일치함을 확인, 2026-07).
+- 이 재도입 버전에서 perception_node가 할 일은 변경 없음: 박스의
+  base_link 기준 yaw 각도(0~90도 정규화)를 계산해서 angle_base_deg로
+  실어 보내는 것까지가 이 노드의 책임.
 
 [환경변수]
   BOX_SERVER_URL  : 박스 서버 주소 (기본: http://127.0.0.1:8002/detect)
@@ -36,6 +44,7 @@ perception_node.py  (박스 전용 단순화 버전 v2)
 import os
 import json
 import base64
+import math
 import threading
 import time
 from typing import Optional
@@ -49,10 +58,10 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from rclpy.duration import Duration
 from std_msgs.msg import String
 from sensor_msgs.msg import Image, CameraInfo
-from geometry_msgs.msg import PointStamped
+from geometry_msgs.msg import PointStamped, Vector3Stamped
 
 import tf2_ros
-import tf2_geometry_msgs  # noqa: F401  (PointStamped 변환 등록용)
+import tf2_geometry_msgs  # noqa: F401  (PointStamped/Vector3Stamped 변환 등록용)
 
 try:
     import pyrealsense2 as rs
@@ -89,6 +98,65 @@ DEDUP_THRESH  = 0.08
 BASE_FRAME = os.environ.get("BASE_FRAME", "base_link")
 CAMERA_OPTICAL_FRAME = os.environ.get("CAMERA_OPTICAL_FRAME", "camera_color_optical_frame")
 TF_TIMEOUT_SEC = float(os.environ.get("TF_TIMEOUT_SEC", "0.2"))
+
+
+def _compute_box_angle_base(color: np.ndarray, d: dict,
+                             tf_buffer, cam_frame: str, base_frame: str,
+                             timeout_sec: float = 0.2) -> Optional[float]:
+    """
+    bbox ROI에서 박스의 base_link 기준 yaw 각도(도) 계산.
+
+    1. ROI에서 Canny 엣지 검출
+    2. Hough 직선으로 주요 선분 방향 추출
+    3. 카메라 이미지 평면 각도 → base_link yaw로 변환
+    """
+    H, W = color.shape[:2]
+    x1 = int(d["x_min"] * W); y1 = int(d["y_min"] * H)
+    x2 = int(d["x_max"] * W); y2 = int(d["y_max"] * H)
+    roi = color[max(0, y1):min(H, y2), max(0, x1):min(W, x2)]
+    if roi.size == 0:
+        return None
+
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 50, 150)
+    lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=20,
+                             minLineLength=roi.shape[1] // 4, maxLineGap=10)
+    if lines is None:
+        return None
+
+    angles = []
+    for line in lines:
+        x_a, y_a, x_b, y_b = line[0]
+        angle = math.degrees(math.atan2(y_b - y_a, x_b - x_a))
+        # 0~90도로 정규화 (박스 대칭성)
+        angle = angle % 180
+        if angle > 90:
+            angle -= 90
+        angles.append(angle)
+
+    if not angles:
+        return None
+
+    # 중앙값으로 대표 각도
+    cam_angle_deg = float(np.median(angles))
+
+    # 카메라 이미지 각도 → base_link yaw 변환
+    # camera_color_optical_frame의 x축 방향을 base_link로 변환해서 회전 보정
+    try:
+        v = Vector3Stamped()
+        v.header.frame_id = cam_frame
+        v.header.stamp = rclpy.time.Time().to_msg()
+        # 카메라 이미지 x축 방향 벡터
+        v.vector.x = math.cos(math.radians(cam_angle_deg))
+        v.vector.y = math.sin(math.radians(cam_angle_deg))
+        v.vector.z = 0.0
+        v_base = tf_buffer.transform(v, base_frame, timeout=Duration(seconds=timeout_sec))
+        base_angle_deg = math.degrees(math.atan2(v_base.vector.y, v_base.vector.x))
+        # 0~90도 정규화 (박스 대칭성)
+        base_angle_deg = base_angle_deg % 90
+        return round(base_angle_deg, 1)
+    except Exception:
+        return None
 
 
 def filter_detections(dets):
@@ -273,7 +341,6 @@ class PerceptionNode(Node):
         filtered = filter_detections(raw_dets)
 
         ch, cw = color.shape[:2]
-        now_stamp = self.get_clock().now().to_msg()
         objs = []
         for d in filtered:
             cx_norm = (d["x_min"] + d["x_max"]) / 2
@@ -310,6 +377,11 @@ class PerceptionNode(Node):
                     throttle_duration_sec=5.0)
                 continue
 
+            # ── 박스 각도 계산 (base_link 기준 yaw) ──
+            angle_deg = _compute_box_angle_base(
+                color, d, self.tf_buffer,
+                CAMERA_OPTICAL_FRAME, BASE_FRAME, TF_TIMEOUT_SEC)
+
             objs.append({
                 "label": d["label"],
                 "bbox": [d["x_min"], d["y_min"], d["x_max"], d["y_max"]],
@@ -317,6 +389,7 @@ class PerceptionNode(Node):
                 "center_3d": xyz,
                 "depth_m": round(float(depth_m), 3) if depth_m else None,
                 "confidence": round(float(d.get("confidence", 0.0)), 3),
+                "angle_base_deg": angle_deg,
             })
 
         msg = String()
