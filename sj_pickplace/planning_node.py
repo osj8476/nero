@@ -11,6 +11,15 @@ planning_node.py  (IK 안정화 패치)
    - descend/ascend: tolerance_orientation=0.05 (파지 직전/직후는 정밀하게)
 4. POSES_FILE 경로를 XDG_DATA_HOME 기반으로 변경 (Jetson/PC 모두 호환)
 5. force_reset 타이밍 개선: move_to_pose 직전에만 호출
+
+[2026-07 각도보정 제거]
+- joint5 값을 읽어 joint7 자리에 넣는 방식(2.5/5 yaw 보정 / 4.5/5 원복)의
+  조인트 제어 기반 각도보정이 실패하여 관련 코드를 전부 제거함.
+  (perception_node의 angle_base_deg 계산도 함께 제거됨)
+- _find_object_with_angle() 대신 각도 없이 위치만 반환하는
+  _find_object()를 사용하도록 되돌림.
+- 각도보정 자체가 필요없다는 뜻은 아니며, 추후 조인트 제어가 아닌 다른
+  방식(예: place 단계에서만 보정, 그리퍼 자체 회전 등)으로 재도입 검토 예정.
 """
 
 import json
@@ -300,7 +309,7 @@ class PlanningNode(Node):
 
         if action == 'pick':
             label = cmd.get('target_label', '')
-            pos, self._box_angle_deg = self._find_object_with_angle(label)
+            pos = self._find_object(label)
             if pos is None:
                 self.get_logger().warn(f"'{label}' 못 찾음.")
                 with self.lock:
@@ -394,23 +403,9 @@ class PlanningNode(Node):
                 return obj.get('center_3d')
         return None
 
-    def _find_object_with_angle(self, label):
-        for obj in self.latest_objects:
-            if obj.get('label') == label:
-                return obj.get('center_3d'), obj.get('angle_base_deg', None)
-        return None, None
-
     # ── 시퀀스 ────────────────────────────────────────────────────────────────
     def _pick_sequence(self, pos, quat, is_side=False):
         try:
-            # approach 전 현재 joint5 각도 저장 — top 그립 시 파지 후 원복에 사용
-            j7_original = None
-            if not is_side:
-                js = self.latest_joint_state
-                if js is not None:
-                    name_to_pos = dict(zip(js.name, js.position))
-                    j7_original = name_to_pos.get('joint5', None)
-
             # side 그립은 IK를 시도하기 전에 먼저 도달 가능 영역인지 검사한다.
             # (전수조사 결과 dist<0.32는 거의 항상 IK 실패 -> ABORTED 3회 재시도로
             #  30초씩 허비하는 대신 즉시 거부하고 사유를 알려준다)
@@ -450,7 +445,6 @@ class PlanningNode(Node):
 
             # ── top 그립: approach 쿼터니언을 수직 고정 (roll=π, pitch=0, yaw=0) ──
             # IK 안정성을 위해 approach는 항상 정수직 자세로 접근
-            # yaw 보정은 approach 후 joint5로만 수행
             if not is_side:
                 quat = _euler_to_quat(math.pi, 0.0, 0.0)
                 self.get_logger().info('[top] approach 쿼터니언 수직 고정 (roll=180°, pitch=0, yaw=0)')
@@ -465,34 +459,6 @@ class PlanningNode(Node):
             self._gripper(SIM_GRIPPER_OPEN, GRIPPER_OPEN)
             time.sleep(GRIPPER_DELAY)
 
-            # ── [top 전용] 2.5/5: joint5 yaw 보정 ──────────────────────────
-            if not is_side and hasattr(self, '_box_angle_deg') and self._box_angle_deg is not None:
-                try:
-                    js = self.latest_joint_state
-                    if js is not None:
-                        name_to_pos = dict(zip(js.name, js.position))
-                        j7_original = name_to_pos.get('joint5', None)
-                        if j7_original is not None:
-                            j7_target = j7_original + math.radians(self._box_angle_deg)
-                            self.get_logger().info(
-                                f'[2.5/5] joint5 yaw 보정: {math.degrees(j7_original):.1f}° '
-                                f'→ {math.degrees(j7_target):.1f}° '
-                                f'(박스각도 {self._box_angle_deg:.1f}°)')
-                            joint_names = ['joint1','joint2','joint3','joint4',
-                                           'joint5','joint6','joint7']
-                            positions = [float(name_to_pos.get(jn, 0.0)) for jn in joint_names]
-                            positions[6] = j7_target
-                            jmsg = JointState()
-                            jmsg.header.stamp = self.get_clock().now().to_msg()
-                            jmsg.name = joint_names
-                            jmsg.position = positions
-                            self.pub_gripper.publish(jmsg)
-                            time.sleep(0.8)
-                except Exception as e:
-                    self.get_logger().warn(f'joint5 yaw 보정 실패 (무시): {e}')
-                    j7_original = None
-            # ─────────────────────────────────────────────────────────────────
-
             if is_side:
                 self.get_logger().info('3/5: 내려가기 (descend) — side는 approach와 동일 높이, 재확인만')
             else:
@@ -505,28 +471,6 @@ class PlanningNode(Node):
             self.get_logger().info('4/5: 그리퍼 닫기')
             self._gripper(SIM_GRIPPER_CLOSE, GRIPPER_CLOSE)
             time.sleep(GRIPPER_DELAY)
-
-            # ── [top 전용] 4.5/5: joint5 원복 ──────────────────────────────
-            if not is_side and j7_original is not None:
-                try:
-                    js = self.latest_joint_state
-                    if js is not None:
-                        name_to_pos = dict(zip(js.name, js.position))
-                        joint_names = ['joint1','joint2','joint3','joint4',
-                                       'joint5','joint6','joint7']
-                        positions = [float(name_to_pos.get(jn, 0.0)) for jn in joint_names]
-                        positions[6] = j7_original
-                        jmsg = JointState()
-                        jmsg.header.stamp = self.get_clock().now().to_msg()
-                        jmsg.name = joint_names
-                        jmsg.position = positions
-                        self.pub_gripper.publish(jmsg)
-                        time.sleep(0.5)
-                        self.get_logger().info(
-                            f'[4.5/5] joint5 원복: {math.degrees(j7_original):.1f}°')
-                except Exception as e:
-                    self.get_logger().warn(f'joint5 원복 실패 (무시): {e}')
-            # ─────────────────────────────────────────────────────────────────
 
             self.get_logger().info('5/5: 들어올리기 (lift) — joint-space (빙글 방지)')
             ok = self._move(px, py, lift_z, quat, tol_ori=TOL_ORI_LOOSE)
