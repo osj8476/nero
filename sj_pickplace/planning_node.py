@@ -58,6 +58,8 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from builtin_interfaces.msg import Duration
 from rclpy.action import ActionClient
 
+from std_srvs.srv import Empty as EmptySrv
+
 try:
     from agx_arm_msgs.msg import AgxArmStatus
     HAVE_ARM_STATUS_MSG = True
@@ -77,6 +79,16 @@ MOTION_STATUS_NAMES = {0: "SUCCESS", 1: "FAILED", 255: "UNKNOWN"}
 REAL_MOVE_TIMEOUT = 8.0
 REAL_MOVE_POLL_SEC = 0.1
 REAL_MOVE_SETTLE_SEC = 0.3  # 퍼블리시 직후 arm_status가 갱신되기까지 최소 대기
+
+# ── 안전장치: 조인트 급회전("빙글 도는 문제") 감지 ────────────────────────────
+# [배경] MoveIt2/실물 IK가 예상 밖의 조인트 해로 튀면서 순식간에 큰 각도로
+# 회전한 사례가 있었음(로봇 파손 위험). /feedback/joint_states를 실시간
+# 감시해서, 어느 조인트든 이 속도(deg/s)를 넘으면 즉시 emergency_stop 호출.
+# ⚠ 이 임계값은 실측 튜닝 필요: 너무 낮으면 정상 동작도 오탐으로 멈추고,
+#   너무 높으면 실제 위험 상황을 못 잡음. 처음엔 넉넉하게 잡고(150 deg/s),
+#   정상 동작 중 최대 속도를 로그로 관찰해서 좁혀나갈 것.
+JOINT_JUMP_MAX_DEG_PER_SEC = 150.0
+JOINT_JUMP_MIN_DT_SEC = 0.02  # 이보다 짧은 간격의 샘플은 노이즈로 보고 무시
 
 # ── 그리퍼 상수 ───────────────────────────────────────────────────────────────
 GRIPPER_OPEN  = 0.08
@@ -122,15 +134,37 @@ SIDE_PITCH_DEG  = 90      # side 그립 손목 pitch (그리퍼를 눕히는 각
 TOP_ANGLE_PITCH_DEG = 90.0   # 고정값 (실측상 항상 top-down으로 귀결됨)
 
 
-def _top_down_angle_quat(angle_deg: float) -> list:
+def _top_down_angle_quat(x: float, y: float, angle_deg: float) -> list:
     """
-    박스 각도(angle_deg, base_link 기준 0~90도)를 반영한 top-down 쿼터니언.
+    top-down 유지(pitch=90) + 위치추종 yaw 반영 쿼터니언.
 
-    roll=-angle_deg, pitch=90, yaw=0 으로 요청하면, 실물 펌웨어 기준
-    실제로는 top-down 자세(roll≈180,pitch≈0)를 유지하면서 접근축 기준
-    yaw만 angle_deg만큼 회전한 자세로 귀결됨 (2026-07 실측 검증).
+    [2026-07 최종 채택 — 실측 근거]
+    처음엔 (roll=-angle_deg, pitch=90, yaw=0) 절대 고정 자세를 썼는데, 이건
+    위치와 무관하게 손목의 절대 방향을 고정하라는 요구라 7DOF 팔 입장에서
+    기구학적으로 무리한 요구였음. 넓은 워크스페이스 스윕(x,y grid x angle)
+    실측 결과 성공률 24%, 그것도 산발적(경계가 없음, 5cm 옆이 뒤집힘).
+
+    yaw에 물체 위치 추종항(atan2(y,x))을 섞자 성공률이 67.7%로 뛰고,
+    무엇보다 도달가능 영역이 side 그립처럼 매끈한 거리 기반 패턴으로
+    바뀜(0.2m 이내 0%, 0.4m 근처 97%, 0.6m 이상 급감) — 진짜 물리적 한계에
+    가까워진 것으로 판단.
+
+    [트레이드오프 — 반드시 인지할 것]
+    실측 검증된 관계식: 실제 그리퍼 yaw = -90° + angle_deg + atan2(y,x)
+    즉 박스 각도(angle_deg) 자체는 그대로 반영되지만(differential은 유지),
+    거기에 물체 위치에 따른 추가 회전(atan2(y,x))이 항상 얹힌다. 그 결과
+    "박스 각도만큼 정확히 정렬해서 잡는다"는 목적은 깨지고, 실제로는
+    물체 위치에 따라 그때그때 다른 절대각으로 잡게 됨 (육안 확인: 90도
+    지시했는데 실측 140도 근처로 잡히는 등). 오차를 20도로 제한하는
+    절충안도 실측해봤으나(top_angle_adaptive_sweep.py 결과), 회귀 208건 중
+    206건이 60~180도의 추가 회전이 필요해서 20도 여유로는 거의 못 건짐 —
+    중간 지대가 없는 이분법적 문제라 절충이 사실상 무의미했음.
+    따라서 지금은 "정확한 각도 정렬"보다 "일단 안정적으로 집는 것"을
+    우선하여 이 공식을 채택함. 각도 정렬이 다시 필요해지면 완전히 다른
+    접근(예: 사전 룩업 테이블 기반 거부/재배치)이 필요하다.
     """
-    return _euler_to_quat(math.radians(-angle_deg), math.radians(TOP_ANGLE_PITCH_DEG), 0.0)
+    position_yaw = math.atan2(y, x)
+    return _euler_to_quat(math.radians(-angle_deg), math.radians(90), position_yaw)
 
 
 # ── 그리퍼 TCP 오프셋 (gripper_flange → 손가락 중간 지점까지 거리) ───────────
@@ -291,9 +325,11 @@ class PlanningNode(Node):
         self._cb = ReentrantCallbackGroup()
 
         self.latest_joint_state = None
+        self._prev_joint_snapshot = None   # (dict{name:pos}, monotonic_time)
+        self._safety_tripped = False
+        self._emergency_stop_client = self.create_client(EmptySrv, 'emergency_stop')
         self.create_subscription(
-            JointState, '/feedback/joint_states',
-            lambda msg: setattr(self, 'latest_joint_state', msg), 10)
+            JointState, '/feedback/joint_states', self._on_joint_state_safety_check, 10)
 
         self.latest_arm_status = None
         self._arm_status_available = False
@@ -369,6 +405,26 @@ class PlanningNode(Node):
 
     def on_command(self, msg):
         self.get_logger().info(f'[CMD] 수신: {msg.data[:80]}')
+
+        # ── 안전 잠금 확인: clear_safety 외 모든 명령 거부 ──────────────────
+        if self._safety_tripped:
+            try:
+                cmd_peek = json.loads(msg.data)
+            except Exception:
+                cmd_peek = {}
+            if cmd_peek.get('action') != 'clear_safety':
+                self.get_logger().error(
+                    '🚨 안전 잠금 상태라 명령을 거부합니다. '
+                    '로봇 상태 육안 확인 후 {"action":"clear_safety"} 로 해제하세요.')
+                return
+            else:
+                self._safety_tripped = False
+                with self.lock:
+                    self.busy = False
+                self.get_logger().warn('✅ 안전 잠금 해제됨 (clear_safety).')
+                self._publish_result('success', 'safety_cleared')
+                return
+
         with self.lock:
             if self.busy:
                 self.get_logger().warn('작업 중. 명령 무시.')
@@ -440,10 +496,7 @@ class PlanningNode(Node):
                 # (물체를 든 채로 억지로 비틀지 않기 위함). pick 이력이 없으면
                 # angle=0으로 처리.
                 angle_deg = self._box_angle_deg if self._box_angle_deg is not None else 0.0
-                quat = _top_down_angle_quat(angle_deg)
-                self.get_logger().info(
-                    f'[place] 박스각도 반영 쿼터니언 사용: angle={angle_deg}° -> '
-                    f'quat={[round(v,3) for v in quat]}')
+                quat = _top_down_angle_quat(pos['x'], pos['y'], angle_deg)
             self.get_logger().info(
                 f'PLACE 시작 @ {pos} | 자세: {"side" if is_side else "top"} '
                 f'{[round(v,3) for v in quat]}')
@@ -458,12 +511,25 @@ class PlanningNode(Node):
                     self.busy = False
                 return
             grasp_dir = cmd.get('grasp_dir', None)
+            is_side = False
             if grasp_dir:
                 quat = GRASP_DIR_MAP.get(grasp_dir, QUAT_HOME)
                 if quat == SIDE_TAG:
+                    is_side = True
                     quat = _side_quat_for(pos)
             else:
-                quat = QUAT_HOME
+                quat = None  # 아래에서 top 계열 기본값으로 채움
+
+            # ── 2026-07 수정 ──────────────────────────────────────────────
+            # move 액션은 pick/place와 달리 검증된 각도보정 공식을 쓰도록
+            # 고친 적이 없어서, grasp_dir 미지정 시 QUAT_HOME(회전 없음),
+            # 명시 시 옛날 QUAT_TOP_DOWN 상수(광범위 NO_SOLUTION 확인됨)를
+            # 그대로 쓰고 있었음 — pick/place와 동일한 구멍. side가 아니면
+            # 무조건 검증된 (roll=-angle,pitch=90,yaw=0) 공식으로 덮어쓴다.
+            if not is_side:
+                angle_deg = self._box_angle_deg if self._box_angle_deg is not None else 0.0
+                quat = _top_down_angle_quat(pos['x'], pos['y'], angle_deg)
+
             self.get_logger().info(f'MOVE 시작 @ {pos} | 자세: {quat}')
             threading.Thread(
                 target=self._move_sequence, args=(pos, quat), daemon=True).start()
@@ -489,6 +555,51 @@ class PlanningNode(Node):
             with self.lock:
                 self.busy = False
 
+    # ── 안전장치: 조인트 급회전 감지 ──────────────────────────────────────────
+    def _on_joint_state_safety_check(self, msg: JointState):
+        self.latest_joint_state = msg
+        now = time.monotonic()
+        current = dict(zip(msg.name, msg.position))
+
+        if self._prev_joint_snapshot is not None:
+            prev, prev_time = self._prev_joint_snapshot
+            dt = now - prev_time
+            if dt >= JOINT_JUMP_MIN_DT_SEC:
+                for jname, pos in current.items():
+                    if jname not in prev or jname == 'gripper':
+                        continue
+                    delta_deg = abs(math.degrees(pos - prev[jname]))
+                    speed_deg_s = delta_deg / dt
+                    if speed_deg_s > JOINT_JUMP_MAX_DEG_PER_SEC and not self._safety_tripped:
+                        self.get_logger().error(
+                            f'🚨 [안전정지] {jname} 급회전 감지: '
+                            f'{delta_deg:.1f}° in {dt*1000:.0f}ms '
+                            f'({speed_deg_s:.0f}°/s > 임계값 {JOINT_JUMP_MAX_DEG_PER_SEC}°/s)')
+                        self._trigger_emergency_stop(
+                            reason=f'{jname} {speed_deg_s:.0f}°/s 급회전 감지')
+
+        self._prev_joint_snapshot = (current, now)
+
+    def _trigger_emergency_stop(self, reason: str):
+        """emergency_stop 서비스 호출 + 이후 모든 이동 명령 거부하는 안전 잠금."""
+        self._safety_tripped = True
+        with self.lock:
+            self.busy = True  # 이후 on_command가 새 명령을 아예 안 받도록 잠금
+        self.get_logger().error(f'🚨🚨🚨 EMERGENCY STOP 발동: {reason}')
+        try:
+            if self._emergency_stop_client.wait_for_service(timeout_sec=1.0):
+                self._emergency_stop_client.call_async(EmptySrv.Request())
+                self.get_logger().error('emergency_stop 서비스 호출 완료.')
+            else:
+                self.get_logger().error(
+                    'emergency_stop 서비스 응답 없음! agx_arm_ctrl_single_node 상태 즉시 확인 필요.')
+        except Exception as e:
+            self.get_logger().error(f'emergency_stop 서비스 호출 중 예외: {e}')
+        self.get_logger().error(
+            '⚠ 안전 잠금 상태입니다. 로봇 상태를 육안으로 확인한 뒤, '
+            '"clear_safety" 액션으로 잠금을 해제해야 다음 명령을 받습니다.')
+        self._publish_result('emergency_stop', reason)
+
     # ── 유틸 ──────────────────────────────────────────────────────────────────
     def _find_object(self, label):
         for obj in self.latest_objects:
@@ -512,9 +623,9 @@ class PlanningNode(Node):
             #  "중간 전환 -> IK 재계산 -> 조인트 튐"을 구조적으로 피하기 위함)
             if not is_side:
                 angle_deg = self._box_angle_deg if self._box_angle_deg is not None else 0.0
-                quat = _top_down_angle_quat(angle_deg)
+                quat = _top_down_angle_quat(pos['x'], pos['y'], angle_deg)
                 self.get_logger().info(
-                    f'[top] 박스각도 반영 쿼터니언 고정: angle={angle_deg}° -> '
+                    f'[top] 위치추종+박스각도 쿼터니언 고정: angle={angle_deg}° -> '
                     f'quat={[round(v,3) for v in quat]} (approach~lift 내내 동일 유지)')
 
             # side 그립은 IK를 시도하기 전에 먼저 도달 가능 영역인지 검사한다.
@@ -579,9 +690,12 @@ class PlanningNode(Node):
 
             self.get_logger().info('5/5: 들어올리기 (lift) — joint-space (빙글 방지)')
             if not is_side:
-                lift_quat = _top_down_angle_quat(0.0)
+                # 위치추종 공식으로 통일 (angle=0 -> 박스각도 성분은 없고 위치추종만 반영).
+                # 예전엔 순수 (roll=0,pitch=90,yaw=0)만 썼는데, 이건 검증 안 된
+                # 절대고정 계열이라 이번 채택 기준(위치추종)과 안 맞음 — 통일함.
+                lift_quat = _top_down_angle_quat(px, py, 0.0)
                 self.get_logger().info(
-                    f'[top] lift 각도보정 해제: quat={[round(v,3) for v in lift_quat]}로 전환')
+                    f'[top] lift 각도보정 해제(위치추종 유지): quat={[round(v,3) for v in lift_quat]}로 전환')
             else:
                 lift_quat = quat
 
@@ -624,7 +738,7 @@ class PlanningNode(Node):
             # 각도보정 쿼터니언으로 덮어써서 이 구멍을 원천 차단한다.
             if not is_side:
                 angle_deg = self._box_angle_deg if self._box_angle_deg is not None else 0.0
-                quat = _top_down_angle_quat(angle_deg)
+                quat = _top_down_angle_quat(pos['x'], pos['y'], angle_deg)
                 self.get_logger().info(
                     f'[place-top] 각도보정 쿼터니언 고정: angle={angle_deg}° -> '
                     f'quat={[round(v,3) for v in quat]}')
@@ -711,6 +825,14 @@ class PlanningNode(Node):
             self.get_logger().info(
                 f'  → [실물] joint 이동 시도 {attempt}/{MOVE_MAX_ATTEMPTS}: '
                 f'{[round(p,3) for p in positions]}')
+            # ── 2026-07 버그 수정 ──────────────────────────────────────────
+            # 새 명령 발행 전에 이전 상태값을 반드시 비워야 한다. 안 그러면
+            # 직전 명령(예: home)의 SUCCESS 상태가 아직 남아있는 걸 그대로
+            # 읽어서, 팔이 실제로 움직이기도 전에 "성공"으로 오판하는 문제가
+            # 있었음 (이 로봇 arm_status에 "이동 중" 상태가 따로 없어서
+            # SUCCESS/FAILED 둘 중 이전 값이 그대로 남아있을 수 있음).
+            self.latest_arm_status = None
+            publish_time = time.time()
             self._publish_joint_positions(positions, joint_names)
 
             time.sleep(REAL_MOVE_SETTLE_SEC)
@@ -721,9 +843,26 @@ class PlanningNode(Node):
                 if status is not None:
                     last_status = status
                     if status.motion_status == 0:  # SUCCESS
+                        elapsed = time.time() - publish_time
+                        if elapsed < 0.5:
+                            self.get_logger().warn(
+                                f'  ⚠ [실물] {elapsed*1000:.0f}ms만에 성공 확인됨 — '
+                                f'실제 이동이 반영 안 된 이전 상태값일 가능성 있음. '
+                                f'로봇이 실제로 움직였는지 육안 확인 권장.')
                         return True
                     if status.motion_status == 1:  # FAILED
-                        break
+                        # ── 2026-07 버그 수정 ────────────────────────────
+                        # 이 로봇 arm_status에는 "이동 중" 상태가 따로 없어서,
+                        # 목표에 아직 도착 못 한 정상 진행 중에도
+                        # motion_status=FAILED로 보일 수 있음이 실측으로
+                        # 확인됨 (arm_status=NORMAL인데 motion_status=FAILED
+                        # 였다가, 재시도 없이 그냥 뒀으면 알아서 성공했을
+                        # 상황을 성급하게 실패 처리하던 문제). arm_status가
+                        # NORMAL(에러 없음)이면 "아직 진행 중"으로 보고 계속
+                        # 기다린다. NO_SOLUTION/SINGULARITY_POINT 등 진짜
+                        # 에러 코드일 때만 즉시 실패로 끊는다.
+                        if status.arm_status != 0:
+                            break
                 time.sleep(REAL_MOVE_POLL_SEC)
 
             if last_status is not None:
@@ -849,6 +988,11 @@ class PlanningNode(Node):
                 self.get_logger().info(
                     f'  → [실물] move 시도 {attempt}/{MOVE_MAX_ATTEMPTS} '
                     f'({x:.3f},{y:.3f},{z:.3f}) quat={[round(v,3) for v in quat]}')
+                # ── 2026-07 버그 수정: 직전 명령의 남은 상태값을 오독하는 것을
+                # 막기 위해, 발행 직전에 반드시 초기화한다 (아래 _move_joints_
+                # real_wait와 동일한 이유 — 자세한 설명은 그쪽 주석 참고). ──
+                self.latest_arm_status = None
+                publish_time = time.time()
                 pose.header.stamp = self.get_clock().now().to_msg()
                 self.pub_move.publish(pose)
 
@@ -860,9 +1004,19 @@ class PlanningNode(Node):
                     if status is not None:
                         last_status = status
                         if status.motion_status == 0:  # SUCCESS
+                            elapsed = time.time() - publish_time
+                            if elapsed < 0.5:
+                                self.get_logger().warn(
+                                    f'  ⚠ [실물] {elapsed*1000:.0f}ms만에 성공 확인됨 — '
+                                    f'실제 이동이 반영 안 된 이전 상태값일 가능성 있음. '
+                                    f'로봇이 실제로 움직였는지 육안 확인 권장.')
                             return True
                         if status.motion_status == 1:  # FAILED
-                            break
+                            # NORMAL(에러 없음)이면 아직 진행 중일 수 있음 —
+                            # _move_joints_real_wait와 동일한 이유로 계속 대기.
+                            # 진짜 에러 코드일 때만 즉시 끊는다.
+                            if status.arm_status != 0:
+                                break
                     time.sleep(REAL_MOVE_POLL_SEC)
 
                 if last_status is not None:
