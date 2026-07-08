@@ -167,6 +167,30 @@ def _top_down_angle_quat(x: float, y: float, angle_deg: float) -> list:
     return _euler_to_quat(math.radians(-angle_deg), math.radians(90), position_yaw)
 
 
+def _sim_top_down_angle_quat(angle_deg: float) -> list:
+    """
+    sim(MoveIt2) 전용 top-down + 박스각도 쿼터니언.
+
+    [2026-07 real vs sim 실측 비교로 확정]
+    real 펌웨어용 _top_down_angle_quat()(pitch=90, roll=-angle, yaw=위치추종)를
+    그대로 sim(MoveIt2)에 넣으면 "옆에서 잡는" 자세로 나옴이 rviz에서
+    확인됨(tf2_echo로 실측). 반대로 sim에서 검증된 이 공식(roll=0,
+    pitch=180, yaw=angle_deg)을 real 펌웨어에 넣었더니 이번엔 반대로
+    real 쪽이 side로 나옴(2026-07 real 스윕 스크립트로 확인,
+    top_angle_pitch180_sweep.py 안전확인 지점 테스트).
+
+    즉 real과 sim은 같은 물리적 목표(top-down)에 대해 서로 다른 쿼터니언
+    표현을 요구한다 — 통합 공식은 없고, 백엔드별로 반드시 분기해야 한다.
+    (원인 분석: real=90 쪽은 pitch=90 짐벌락 평면에서 얻어진 경험적
+    보정값이라 sim의 "정직한" IK 해석과 안 맞고, sim=180 쪽은 real
+    펌웨어 내부 IK가 커맨드 쿼터니언을 그대로 안 따르기 때문으로 추정 —
+    pyAgxArm 내부 IK 로직 확인 전까지는 확정 원인 아님.)
+
+    이 함수는 self.use_moveit2=True(sim) 경로에서만 사용해야 한다.
+    """
+    return _euler_to_quat(0.0, math.pi, math.radians(angle_deg))
+
+
 # ── 그리퍼 TCP 오프셋 (gripper_flange → 손가락 중간 지점까지 거리) ───────────
 # URDF: gripper_joint origin xyz="0 0 0.1358" → 그리퍼 전체 길이 13.58cm
 # 물체를 실제로 쥐는 지점은 손가락 끝이 아니라 손가락 중간(절반)이므로
@@ -495,8 +519,10 @@ class PlanningNode(Node):
                 # 그대로 이어받아, 잡은 자세 그대로 내려놓게 한다
                 # (물체를 든 채로 억지로 비틀지 않기 위함). pick 이력이 없으면
                 # angle=0으로 처리.
+                # (실제 최종 쿼터니언은 _place_sequence 안에서 다시 한번
+                #  _top_down_quat_for로 계산되므로, 여기 값은 로그용일 뿐임)
                 angle_deg = self._box_angle_deg if self._box_angle_deg is not None else 0.0
-                quat = _top_down_angle_quat(pos['x'], pos['y'], angle_deg)
+                quat = self._top_down_quat_for(pos, angle_deg)
             self.get_logger().info(
                 f'PLACE 시작 @ {pos} | 자세: {"side" if is_side else "top"} '
                 f'{[round(v,3) for v in quat]}')
@@ -523,12 +549,13 @@ class PlanningNode(Node):
             # ── 2026-07 수정 ──────────────────────────────────────────────
             # move 액션은 pick/place와 달리 검증된 각도보정 공식을 쓰도록
             # 고친 적이 없어서, grasp_dir 미지정 시 QUAT_HOME(회전 없음),
-            # 명시 시 옛날 QUAT_TOP_DOWN 상수(광범위 NO_SOLUTION 확인됨)를
-            # 그대로 쓰고 있었음 — pick/place와 동일한 구멍. side가 아니면
-            # 무조건 검증된 (roll=-angle,pitch=90,yaw=0) 공식으로 덮어쓴다.
+            # 명시 시 옛날 QUAT_TOP_DOWN 상수를 그대로 쓰고 있었음 —
+            # pick/place와 동일한 구멍. side가 아니면 무조건
+            # _top_down_quat_for로 덮어써서(real/sim 백엔드 분기 포함)
+            # pick/place와 동일한 자세 로직을 쓰도록 통일한다.
             if not is_side:
                 angle_deg = self._box_angle_deg if self._box_angle_deg is not None else 0.0
-                quat = _top_down_angle_quat(pos['x'], pos['y'], angle_deg)
+                quat = self._top_down_quat_for(pos, angle_deg)
 
             self.get_logger().info(f'MOVE 시작 @ {pos} | 자세: {quat}')
             threading.Thread(
@@ -613,6 +640,21 @@ class PlanningNode(Node):
                 return obj.get('center_3d'), obj.get('angle_base_deg', None)
         return None, None
 
+    # ── top-down 쿼터니언 백엔드 분기 ────────────────────────────────────────
+    def _top_down_quat_for(self, pos, angle_deg):
+        """
+        top 그립(side 아님)용 쿼터니언을 self.use_moveit2 여부로 분기해서 반환.
+
+        [2026-07] real과 sim은 같은 물리적 top-down 목표에 대해 서로 다른
+        쿼터니언을 요구함이 실측으로 확정됨 (자세한 근거는
+        _sim_top_down_angle_quat() 및 _top_down_angle_quat() 문서 참고).
+        pick/place/move 세 액션 모두 이 메서드를 거치도록 통일해서,
+        예전처럼 한쪽만 고치고 다른 쪽에 구멍이 남는 문제를 원천 차단한다.
+        """
+        if self.use_moveit2:
+            return _sim_top_down_angle_quat(angle_deg)
+        return _top_down_angle_quat(pos['x'], pos['y'], angle_deg)
+
     # ── 시퀀스 ────────────────────────────────────────────────────────────────
     def _pick_sequence(self, pos, quat, is_side=False):
         try:
@@ -623,9 +665,10 @@ class PlanningNode(Node):
             #  "중간 전환 -> IK 재계산 -> 조인트 튐"을 구조적으로 피하기 위함)
             if not is_side:
                 angle_deg = self._box_angle_deg if self._box_angle_deg is not None else 0.0
-                quat = _top_down_angle_quat(pos['x'], pos['y'], angle_deg)
+                quat = self._top_down_quat_for(pos, angle_deg)
+                backend = 'sim(pitch180)' if self.use_moveit2 else 'real(pitch90)'
                 self.get_logger().info(
-                    f'[top] 위치추종+박스각도 쿼터니언 고정: angle={angle_deg}° -> '
+                    f'[top:{backend}] 쿼터니언 고정: angle={angle_deg}° -> '
                     f'quat={[round(v,3) for v in quat]} (approach~lift 내내 동일 유지)')
 
             # side 그립은 IK를 시도하기 전에 먼저 도달 가능 영역인지 검사한다.
@@ -690,12 +733,11 @@ class PlanningNode(Node):
 
             self.get_logger().info('5/5: 들어올리기 (lift) — joint-space (빙글 방지)')
             if not is_side:
-                # 위치추종 공식으로 통일 (angle=0 -> 박스각도 성분은 없고 위치추종만 반영).
-                # 예전엔 순수 (roll=0,pitch=90,yaw=0)만 썼는데, 이건 검증 안 된
-                # 절대고정 계열이라 이번 채택 기준(위치추종)과 안 맞음 — 통일함.
-                lift_quat = _top_down_angle_quat(px, py, 0.0)
+                # 박스각도 성분 없이(angle=0) 순수 top-down만 유지.
+                # real/sim 백엔드 분기는 approach와 동일하게 _top_down_quat_for로 통일.
+                lift_quat = self._top_down_quat_for({'x': px, 'y': py}, 0.0)
                 self.get_logger().info(
-                    f'[top] lift 각도보정 해제(위치추종 유지): quat={[round(v,3) for v in lift_quat]}로 전환')
+                    f'[top] lift 각도보정 해제: quat={[round(v,3) for v in lift_quat]}로 전환')
             else:
                 lift_quat = quat
 
@@ -738,9 +780,10 @@ class PlanningNode(Node):
             # 각도보정 쿼터니언으로 덮어써서 이 구멍을 원천 차단한다.
             if not is_side:
                 angle_deg = self._box_angle_deg if self._box_angle_deg is not None else 0.0
-                quat = _top_down_angle_quat(pos['x'], pos['y'], angle_deg)
+                quat = self._top_down_quat_for(pos, angle_deg)
+                backend = 'sim(pitch180)' if self.use_moveit2 else 'real(pitch90)'
                 self.get_logger().info(
-                    f'[place-top] 각도보정 쿼터니언 고정: angle={angle_deg}° -> '
+                    f'[place-top:{backend}] 쿼터니언 고정: angle={angle_deg}° -> '
                     f'quat={[round(v,3) for v in quat]}')
 
             if is_side:
