@@ -6,9 +6,9 @@ visualize_3d_ros.py  (v3)
 - 노란색: base_link 기준 XYZ (실물 로봇 joint state 반영)
 
 실행:
-  source /opt/ros/jazzy/setup.bash
-  source ~/sj/ros2_ws/install/setup.bash
-  /usr/bin/python3 ~/sj/visualize_3d_ros.py
+  source /opt/ros/humble/setup.bash
+  source /home/bpdl/ros2_ws/install/setup.bash
+  python3 /home/bpdl/nero/visualize_3d_bpdl.py
 종료: q
 """
 
