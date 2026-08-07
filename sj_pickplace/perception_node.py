@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-perception_node.py  (박스 전용 단순화 버전 v2)
+perception_node.py  (박스 전용 단순화 버전 v3 — 각도보정 복원판)
 =================================================================================
 [변경 이력 vs 기존 nero_ai perception_node]
 - 멀티서버 클러스터(CLUSTER_N, 라운드로빈) 제거 → 박스 서버 하나에만 디스패치
@@ -15,6 +15,22 @@ perception_node.py  (박스 전용 단순화 버전 v2)
   eye-in-hand 구조이므로, 매 detection마다 그 순간의 실제 팔 자세를
   반영한 tf 변환이 필요함 (고정 오프셋 계산으로는 안 됨).
 
+[2026-07 각도보정 제거 -> 재도입]
+- 1차 시도: joint5/joint7 값을 직접 조작하는 방식의 조인트 제어 기반
+  각도보정은 기구학적으로 성립 불가(직렬 링크 특정 조인트만 돌리는 게
+  불가능)하여 실패, 관련 코드 전부 제거했었음.
+- 2차 시도: 이 파일의 angle_base_deg 계산(본 함수)은 유지한 채,
+  planning_node 쪽에서 "그리퍼가 top-down을 유지하면서 접근축 기준으로만
+  회전하는" 자세를 approach 단계 진입 전에 한 번만 계산해서 시퀀스 내내
+  고정 사용하는 방식으로 재설계함 (중간에 자세를 바꾸는 로직 없음).
+  실제 하드웨어(agx_arm_ctrl_single_node)에서 pitch=90°, yaw=0° 고정,
+  roll=-각도 로 15° 간격 스윕 검증 완료 (roll 0~-90° 전 구간 IK 성공,
+  실측 tf 결과가 항상 top-down 자세(roll≈180°,pitch≈0°) + 원하는 yaw
+  회전으로 정확히 일치함을 확인, 2026-07).
+- 이 재도입 버전에서 perception_node가 할 일은 변경 없음: 박스의
+  base_link 기준 yaw 각도(0~90도 정규화)를 계산해서 angle_base_deg로
+  실어 보내는 것까지가 이 노드의 책임.
+
 [환경변수]
   BOX_SERVER_URL  : 박스 서버 주소 (기본: http://127.0.0.1:8002/detect)
   BOX_HEALTH_URL  : 헬스체크 주소 (기본: http://127.0.0.1:8002/health)
@@ -28,6 +44,7 @@ perception_node.py  (박스 전용 단순화 버전 v2)
 import os
 import json
 import base64
+import math
 import threading
 import time
 from typing import Optional
@@ -44,7 +61,7 @@ from sensor_msgs.msg import Image, CameraInfo
 from geometry_msgs.msg import PointStamped, Vector3Stamped
 
 import tf2_ros
-import tf2_geometry_msgs  # noqa: F401  (PointStamped 변환 등록용)
+import tf2_geometry_msgs  # noqa: F401  (PointStamped/Vector3Stamped 변환 등록용)
 
 try:
     import pyrealsense2 as rs
@@ -83,67 +100,256 @@ CAMERA_OPTICAL_FRAME = os.environ.get("CAMERA_OPTICAL_FRAME", "camera_color_opti
 TF_TIMEOUT_SEC = float(os.environ.get("TF_TIMEOUT_SEC", "0.2"))
 
 
+def _transform_with_fallback(tf_buffer, msg, target_frame: str, timeout_sec: float,
+                              logger=None):
+    """지정된 stamp(msg.header.stamp)로 tf 조회를 먼저 시도한다.
 
-def _compute_box_angle_base(color: "np.ndarray", d: dict,
+    Isaac Sim(sim-time) 이미지 stamp와 tf 트리(wall-clock)의 시간 도메인이
+    어긋나 있으면(use_sim_time 미설정 등) 'extrapolation into the past'
+    예외가 항상 발생할 수 있다. 이 경우 최신 tf(=stamp를 '지금'으로 재설정)
+    로 한 번 더 시도해서, 프레임-tf 시점 불일치는 감수하더라도 파이프라인
+    전체가 죽지 않게 한다. 두 시도 모두 실패하면 예외를 그대로 올린다.
+
+    근본 해결책은 아님 -- clock 도메인 불일치 자체는 use_sim_time을 관련
+    노드 전부에 일관되게 설정하고 Isaac Sim이 /clock을 발행하도록 해야
+    고쳐진다 (CLAUDE.md/런치 스크립트 쪽에서 조치할 사항).
+    """
+    try:
+        return tf_buffer.transform(msg, target_frame, timeout=Duration(seconds=timeout_sec))
+    except Exception as e:
+        if logger is not None:
+            logger.warn(
+                f'stamp 기준 tf 조회 실패({e}) -> 최신 tf로 폴백 '
+                f'(sim-time/wall-clock 불일치 의심, use_sim_time 확인 필요)',
+                throttle_duration_sec=5.0)
+        msg.header.stamp = rclpy.time.Time().to_msg()
+        return tf_buffer.transform(msg, target_frame, timeout=Duration(seconds=timeout_sec))
+
+
+def _compute_box_angle_base(color: np.ndarray, d: dict,
                              tf_buffer, cam_frame: str, base_frame: str,
-                             timeout_sec: float = 0.2) -> "Optional[float]":
+                             timeout_sec: float = 0.2,
+                             depth: Optional[np.ndarray] = None,
+                             stamp=None,
+                             logger=None):
     """
     bbox ROI에서 박스의 base_link 기준 yaw 각도(도) 계산.
 
-    1. ROI에서 Canny 엣지 검출
-    2. Hough 직선으로 주요 선분 방향 추출
-    3. 카메라 이미지 평면 각도 → base_link yaw로 변환
+    [2026-07 수정] 기존엔 검출된 모든 선분(윗면/옆면/그림자/노이즈 구분 없이)의
+    각도를 단순 median 처리해서, 뷰(top/side/oblique) 전반에서 프레임마다
+    값이 크게 요동치는 문제가 있었음 (같은 박스, 같은 자세인데도 5~88도까지
+    널뛰기하는 것을 반복 측정으로 확인).
+
+    수정: median 대신, 선분들을 길이로 가중한 방향 히스토그램(0~90도, mod 90)을
+    만들어 가장 표를 많이 받은 "지배적 방향"을 찾고, 그 방향 근처(±5도) 선분들만
+    모아 가중 원형평균(circular mean)으로 대표각을 계산. 박스는 직육면체라 어느
+    뷰에서 봐도 모서리가 두 개의 주 방향(90도 관계)으로 모이므로, 다수결 방식이
+    노이즈/그림자/타면 모서리에 훨씬 덜 흔들림.
     """
-    import math
+    # stamp: 이 프레임이 실제로 캡처된 시각 (rclpy Time msg). None이면
+    # 기존처럼 "지금"을 씀 (하위호환용, 렉 있을 땐 쓰지 말 것).
+    _stamp = stamp if stamp is not None else rclpy.time.Time().to_msg()
+
     H, W = color.shape[:2]
     x1 = int(d["x_min"] * W); y1 = int(d["y_min"] * H)
     x2 = int(d["x_max"] * W); y2 = int(d["y_max"] * H)
-    roi = color[max(0,y1):min(H,y2), max(0,x1):min(W,x2)]
+    roi = color[max(0, y1):min(H, y2), max(0, x1):min(W, x2)]
     if roi.size == 0:
-        return None
+        return None, None
 
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+
+    # [2026-07 수정 v2] depth로 gray를 0으로 지우니, 그 마스크 경계선
+    # 자체가 Canny에 새 인공 edge로 잡혀서 매번 똑같이 13~15도로
+    # 수렴하는 '안정적으로 틀린' 결과가 나옴(마스크 경계는 프레임마다
+    # 거의 안 변해서 진짜 박스 edge의 노이즈보다 더 강한 가짜 신호가
+    # 됨). gray/edges는 원본 그대로 두고, depth는 검출된 선분을 사후
+    # 필터링하는 데만 쓴다(아래 border 필터 루프에서 사용).
+    depth_roi = None
+    center_depth = None
+    if depth is not None:
+        depth_roi = depth[max(0, y1):min(H, y2), max(0, x1):min(W, x2)]
+        if depth_roi.shape != gray.shape:
+            depth_roi = None
+        else:
+            valid = depth_roi[(depth_roi > 0.05) & (depth_roi < 5.0)]
+            if valid.size > 0:
+                center_depth = float(np.median(valid))
+            else:
+                depth_roi = None
+
     edges = cv2.Canny(gray, 50, 150)
-    lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=20,
-                             minLineLength=roi.shape[1]//4, maxLineGap=10)
+    lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=20,
+                             minLineLength=roi.shape[1] // 4, maxLineGap=10)
     if lines is None:
-        return None
+        return None, None
 
-    angles = []
-    for line in lines:
-        x_a, y_a, x_b, y_b = line[0]
-        angle = math.degrees(math.atan2(y_b - y_a, x_b - x_a))
-        # 0~90도로 정규화 (박스 대칭성)
-        angle = angle % 180
-        if angle > 90:
-            angle -= 90
-        angles.append(angle)
+    # (0~90도로 정규화된 각도, 선분 길이) 쌍 모으기
+    weighted = []
+    # [2026-07 수정] bbox crop 경계선(ROI 테두리) 자체가 이미지 좌표축에
+    # 정확히 평행한(0/90도) 가짜 직선으로 Hough에 잡혀서, 히스토그램에서
+    # 압도적으로 큰 표를 받아 진짜 박스 모서리를 이기는 현상이 확인됨
+    # (GT 90도/10도에서 심하게 틀리고 45도는 멀쩡했던 원인). ROI 가장자리
+    # margin 픽셀 이내에 끝점이 걸친 선분은 crop 아티팩트로 간주해 제외.
+    h_roi, w_roi = roi.shape[:2]
+    # [2026-07 수정] margin이 고정 3px이면, 카메라가 박스에 가까이
+    # 붙어 bbox가 박스를 거의 딱 맞게 감쌀 때(실측: depth_m=0.209,
+    # top-down 근접) 박스의 진짜 모서리 선분들까지 전부 "가짜 테두리"로
+    # 오인돼 걸러지고, weighted가 통째로 비어 angle_base_deg=None이
+    # 되는 문제가 확인됨. ROI 크기에 비례한(작은 변 기준 2%) margin으로
+    # 바꿔 근접/원거리 어느 쪽에서도 일관된 여유를 갖게 한다.
+    margin = max(3, int(min(h_roi, w_roi) * 0.02))
+    def _is_border_artifact(xa, ya, xb, yb):
+        for x, y in [(xa, ya), (xb, yb)]:
+            if x <= margin or x >= w_roi - margin or y <= margin or y >= h_roi - margin:
+                return True
+        return False
 
-    if not angles:
-        return None
-
-    # 중앙값으로 대표 각도
-    cam_angle_deg = float(np.median(angles))
-
-    # 카메라 이미지 각도 → base_link yaw 변환
-    # camera_color_optical_frame의 x축 방향을 base_link로 변환해서 회전 보정
+    # [2026-07 수정] 박스 옆면의 수직(높이) 모서리가 depth 필터를 못
+    # 뚫고(옆면도 박스 표면이라 depth가 비슷함) 검출되어, 윗면 모서리와
+    # 경쟁하며 dominant bin을 가끔 뺏는 현상이 roi_debug.jpg로 실측
+    # 확인됨(GT 90/10도에서 유독 심함). world Z축(수직)이 지금 카메라
+    # 각도에서 이미지상 몇 도로 투영되는지 미리 계산해, 그 근처 각도의
+    # 선분은 '옆면 모서리 후보'로 보고 아예 배제한다.
+    vertical_img_angle = None
     try:
-        import rclpy.time
+        vz = Vector3Stamped()
+        vz.header.frame_id = base_frame
+        vz.header.stamp = _stamp
+        vz.vector.x = 0.0
+        vz.vector.y = 0.0
+        vz.vector.z = 1.0
+        vz_cam = _transform_with_fallback(tf_buffer, vz, cam_frame, timeout_sec, logger=logger)
+        _raw_v = math.degrees(math.atan2(vz_cam.vector.y, vz_cam.vector.x)) % 180
+        if _raw_v > 90:
+            _raw_v -= 90
+        vertical_img_angle = _raw_v
+    except Exception:
+        vertical_img_angle = None
+    VERTICAL_EXCLUDE_DEG = 15.0
+
+    def _collect_weighted(use_depth, use_vertical):
+        out = []
+        for line in lines:
+            x_a, y_a, x_b, y_b = line[0]
+            if _is_border_artifact(x_a, y_a, x_b, y_b):
+                continue
+            if use_depth and depth_roi is not None and center_depth is not None:
+                mx, my = (x_a + x_b) // 2, (y_a + y_b) // 2
+                my = min(max(my, 0), depth_roi.shape[0] - 1)
+                mx = min(max(mx, 0), depth_roi.shape[1] - 1)
+                mid_depth = depth_roi[my, mx]
+                if mid_depth <= 0.05 or abs(mid_depth - center_depth) > 0.03:
+                    continue
+            length = math.hypot(x_b - x_a, y_b - y_a)
+            angle = math.degrees(math.atan2(y_b - y_a, x_b - x_a)) % 180
+            if angle > 90:
+                angle -= 90
+            if use_vertical and vertical_img_angle is not None:
+                _diff = abs(angle - vertical_img_angle) % 90
+                _diff = min(_diff, 90 - _diff)
+                if _diff <= VERTICAL_EXCLUDE_DEG:
+                    continue
+            out.append((angle, length))
+        return out
+
+    # [2026-07 수정] strict 필터(테두리+깊이+수직배제)로 아무것도 안 남으면
+    # (실측: 진짜 박스 각도가 vertical_img_angle 배제범위와 겹칠 때
+    # 63~90도 근처에서 weighted가 통째로 비어 None 반환) 단계적으로
+    # 필터를 완화해 재시도한다.
+    weighted = _collect_weighted(use_depth=True, use_vertical=True)
+    if not weighted:
+        weighted = _collect_weighted(use_depth=True, use_vertical=False)
+    if not weighted:
+        weighted = _collect_weighted(use_depth=False, use_vertical=False)
+
+    if not weighted:
+        return None, None
+
+    # 1도 단위 히스토그램(0~89), 선분 길이로 가중 → 길고 뚜렷한 모서리일수록
+    # 더 큰 표를 받게 함 (짧은 노이즈성 edge는 자연히 묻힘)
+    def _circ_dist90(a, b):
+        diff = abs(a - b) % 90
+        return min(diff, 90 - diff)
+
+    def _circular_estimate(pairs, offset):
+        shifted = [((a + offset) % 90, l) for a, l in pairs]
+        bins = np.zeros(90)
+        for angle, length in shifted:
+            bins[int(angle) % 90] += length
+        kernel = np.array([0.25, 0.5, 1.0, 0.5, 0.25])
+        padded = np.concatenate([bins[-2:], bins, bins[:2]])
+        bins_smooth = np.convolve(padded, kernel, mode='same')[2:-2]
+        dominant_bin = int(np.argmax(bins_smooth))
+        sel = [(a, l) for a, l in shifted if _circ_dist90(a, dominant_bin) <= 5]
+        if not sel:
+            sel = shifted
+        total_w = sum(l for _, l in sel)
+        sin_sum = sum(l * math.sin(math.radians(a * 4)) for a, l in sel)
+        cos_sum = sum(l * math.cos(math.radians(a * 4)) for a, l in sel)
+        R = math.hypot(sin_sum, cos_sum) / total_w if total_w > 0 else 0.0
+        angle_deg = (math.degrees(math.atan2(sin_sum, cos_sum)) / 4.0 - offset) % 90
+        return angle_deg, R
+
+    angle_a, R_a = _circular_estimate(weighted, 0.0)
+    angle_b, R_b = _circular_estimate(weighted, 45.0)
+    cam_angle_deg = angle_a if R_a >= R_b else angle_b
+
+    # [2026-07 추가] 박스가 회전(yaw!=0,90)해 있으면 축정렬 bbox의
+    # 중심이 실제 박스 중심에서 어긋나는 문제가 실측으로 확인됨
+    # (calib_debug: rel_bearing이 물체마다 랜덤한 방향/크기로 흔들림).
+    # 이미 필터를 통과한(=진짜 박스 모서리로 판단된) 선분들의 끝점을
+    # 모아 minAreaRect로 회전된 사각형의 중심을 구해, 축정렬 bbox
+    # 중심보다 정확한 픽셀 좌표를 함께 반환한다.
+    refined_center_px = None
+    try:
+        pts = []
+        for line in lines:
+            xa, ya, xb, yb = line[0]
+            if not _is_border_artifact(xa, ya, xb, yb):
+                pts.append((xa, ya))
+                pts.append((xb, yb))
+        if len(pts) >= 4:
+            pts_arr = np.array(pts, dtype=np.float32)
+            rect = cv2.minAreaRect(pts_arr)
+            (rcx, rcy), (rw, rh), _rang = rect
+            # ROI 로컬 좌표 -> 원본 이미지 절대 픽셀 좌표
+            # [2026-07 수정] 선분이 한쪽 모서리에만 몰려있으면(예: 위쪽 변
+            # 하나만 검출되고 나머지 세 변은 놓침) minAreaRect가 그 선분
+            # 자체를 감싸는 얇은 사각형을 만들어, 중심이 박스 중앙이 아니라
+            # 한쪽 끝으로 쏠리는 문제가 roi_debug.jpg로 실측 확인됨. 폭/높이
+            # 둘 다 최소 크기 이상이어야(=실제로 사각형 형태를 이룸) 신뢰.
+            MIN_RECT_SIDE_PX = 10
+            if min(rw, rh) >= MIN_RECT_SIDE_PX:
+                refined_center_px = (int(rcx) + x1, int(rcy) + y1)
+    except Exception:
+        refined_center_px = None
+
+    if os.environ.get("DEBUG_SAVE_ROI", "0") == "1":
+        try:
+            dbg = cv2.cvtColor(roi, cv2.COLOR_GRAY2BGR) if roi.ndim == 2 else roi.copy()
+            for line in lines:
+                xa, ya, xb, yb = line[0]
+                cv2.line(dbg, (xa, ya), (xb, yb), (0, 0, 255), 1)
+            cv2.imwrite('/tmp/roi_debug.jpg', dbg)
+            cv2.imwrite('/tmp/edges_debug.jpg', edges)
+        except Exception:
+            pass
+
+    # 카메라 이미지 각도 → base_link yaw 변환 (기존과 동일)
+    try:
         v = Vector3Stamped()
         v.header.frame_id = cam_frame
-        v.header.stamp = rclpy.time.Time().to_msg()
-        # 카메라 이미지 x축 방향 벡터
+        v.header.stamp = _stamp
         v.vector.x = math.cos(math.radians(cam_angle_deg))
         v.vector.y = math.sin(math.radians(cam_angle_deg))
         v.vector.z = 0.0
-        from rclpy.duration import Duration
-        v_base = tf_buffer.transform(v, base_frame, timeout=Duration(seconds=timeout_sec))
+        v_base = _transform_with_fallback(tf_buffer, v, base_frame, timeout_sec, logger=logger)
         base_angle_deg = math.degrees(math.atan2(v_base.vector.y, v_base.vector.x))
-        # 0~90도 정규화 (박스 대칭성)
         base_angle_deg = base_angle_deg % 90
-        return round(base_angle_deg, 1)
+        return round(base_angle_deg, 1), refined_center_px
     except Exception:
-        return None
+        return None, refined_center_px
 
 
 def filter_detections(dets):
@@ -194,6 +400,14 @@ class PerceptionNode(Node):
         self.frame_lock = threading.Lock()
         self.latest_color: Optional[np.ndarray] = None
         self.latest_depth: Optional[np.ndarray] = None
+        self.latest_stamp = None
+        self._last_dispatched_stamp = None
+        # [2026-08 추가] 박스서버 요청이 밀릴 때(GPU 경합 등) 이전 요청이
+        # 안 끝났는데 새 요청을 또 스레드로 띄우던 게 /detected_objects
+        # 0.5~0.6Hz까지 떨어뜨린 원인으로 실측 확인됨(perception_node_sim.py와
+        # 동일 원인/동일 패치). 이전 요청 처리 중이면 dispatch를 건너뛴다.
+        self._inflight = False
+        self._inflight_lock = threading.Lock()
 
         if not self._wait_for_box_server():
             self.get_logger().error(
@@ -273,8 +487,10 @@ class PerceptionNode(Node):
                     self.pub_image.publish(img_msg)
                     self._cam_info.header = img_msg.header
                     self.pub_info.publish(self._cam_info)
+
                     self.latest_color = color_np
                     self.latest_depth = depth_np
+                    self.latest_stamp = img_msg.header.stamp   # 방금 publish한 stamp 재사용
             except Exception as e:
                 self.get_logger().warn(f'프레임 수신 실패: {e}')
                 time.sleep(0.05)
@@ -299,12 +515,35 @@ class PerceptionNode(Node):
                 return
             color = self.latest_color.copy()
             depth = self.latest_depth.copy()
+            stamp = self.latest_stamp
+
+        # 카메라가 dispatch(DISPATCH_RATE_HZ)보다 느리면 같은 프레임이
+        # latest_color/depth에 그대로 남아있음 -> 중복 처리/전송 방지.
+        if stamp is not None and self._last_dispatched_stamp is not None \
+                and stamp.sec == self._last_dispatched_stamp.sec \
+                and stamp.nanosec == self._last_dispatched_stamp.nanosec:
+            return
+        with self._inflight_lock:
+            if self._inflight:
+                # 이전 박스서버 요청이 아직 처리 중 -> 이번 프레임은 건너뛴다.
+                return
+            self._inflight = True
+
+        self._last_dispatched_stamp = stamp
 
         threading.Thread(
-            target=self._send_and_publish, args=(color, depth), daemon=True
+            target=self._send_and_publish, args=(color, depth, stamp), daemon=True
         ).start()
 
-    def _send_and_publish(self, color: np.ndarray, depth: np.ndarray):
+    def _send_and_publish(self, color: np.ndarray, depth: np.ndarray, stamp=None):
+        _stamp = stamp if stamp is not None else rclpy.time.Time().to_msg()
+        try:
+            self._send_and_publish_impl(color, depth, _stamp)
+        finally:
+            with self._inflight_lock:
+                self._inflight = False
+
+    def _send_and_publish_impl(self, color: np.ndarray, depth: np.ndarray, _stamp):
         try:
             # 원본 크기(640x480)로 전송 — 다운스케일 시 탐지 누락 방지
             ok, buf = cv2.imencode('.jpg', color, [cv2.IMWRITE_JPEG_QUALITY, 90])
@@ -327,7 +566,6 @@ class PerceptionNode(Node):
         filtered = filter_detections(raw_dets)
 
         ch, cw = color.shape[:2]
-        now_stamp = self.get_clock().now().to_msg()
         objs = []
         for d in filtered:
             cx_norm = (d["x_min"] + d["x_max"]) / 2
@@ -335,24 +573,40 @@ class PerceptionNode(Node):
             cx_px = int(cx_norm * cw)
             cy_px = int(cy_norm * ch)
 
-            depth_m = self._sample_depth(depth, cx_px, cy_px)
+            # [2026-07 수정] 회전된 박스 중심 보정 (축정렬 bbox 중심 대신
+            # minAreaRect 중심 사용). depth 샘플링보다 먼저 실행.
+            angle_deg, refined_center_px = _compute_box_angle_base(
+                color, d, self.tf_buffer,
+                CAMERA_OPTICAL_FRAME, BASE_FRAME, TF_TIMEOUT_SEC, depth=depth,
+                stamp=_stamp, logger=self.get_logger())
+            if refined_center_px is not None:
+                rx, ry = refined_center_px
+                if 0 <= rx < cw and 0 <= ry < ch:
+                    cx_px, cy_px = rx, ry
+                    cx_norm, cy_norm = rx / cw, ry / ch
 
-            # ── 픽셀+depth → 카메라 광학 좌표계 3D 점 (핀홀 역투영) ──
-            pt_cam = pixel_to_camera_xyz(cx_px, cy_px, depth_m)
+            # [2026-07 수정] 단일 중심픽셀+depth 1개 방식은 카메라가 비스듬한
+            # 각도로 볼 때 원근왜곡으로 2D 중심이 실제 3D 중심과 어긋나는(Y축
+            # -25~-35mm 계통오차 실측 확인) 문제가 있어, bbox 영역 안 여러
+            # 점의 depth를 읽어 3D로 역투영한 뒤 평균(centroid)을 쓴다.
+            _bx1, _by1 = int(d['x_min'] * cw), int(d['y_min'] * ch)
+            _bx2, _by2 = int(d['x_max'] * cw), int(d['y_max'] * ch)
+            depth_m, pt_cam = self._multi_point_3d_centroid(depth, _bx1, _by1, _bx2, _by2)
             if pt_cam is None:
                 continue  # depth 무효하거나 intrinsics 미설정 → 이 물체는 스킵
 
             # ── 카메라 좌표계 점 → base_link (eye-in-hand이므로 매번 tf 조회) ──
             pt_stamped = PointStamped()
             pt_stamped.header.frame_id = CAMERA_OPTICAL_FRAME
-            pt_stamped.header.stamp = rclpy.time.Time().to_msg()
+            pt_stamped.header.stamp = _stamp
             pt_stamped.point.x = pt_cam["x"]
             pt_stamped.point.y = pt_cam["y"]
             pt_stamped.point.z = pt_cam["z"]
 
             try:
-                pt_base = self.tf_buffer.transform(
-                    pt_stamped, BASE_FRAME, timeout=Duration(seconds=TF_TIMEOUT_SEC))
+                pt_base = _transform_with_fallback(
+                    self.tf_buffer, pt_stamped, BASE_FRAME, TF_TIMEOUT_SEC,
+                    logger=self.get_logger())
                 xyz = {
                     "x": round(pt_base.point.x, 3),
                     "y": round(pt_base.point.y, 3),
@@ -360,14 +614,10 @@ class PerceptionNode(Node):
                 }
             except Exception as e:
                 self.get_logger().warn(
-                    f'tf 변환 실패 ({CAMERA_OPTICAL_FRAME} -> {BASE_FRAME}): {e}',
+                    f'tf 변환 실패 ({CAMERA_OPTICAL_FRAME} -> {BASE_FRAME}), 폴백도 실패: {e}',
                     throttle_duration_sec=5.0)
                 continue
 
-            # ── 박스 각도 계산 (base_link 기준 yaw) ──
-            angle_deg = _compute_box_angle_base(
-                color, d, self.tf_buffer,
-                CAMERA_OPTICAL_FRAME, BASE_FRAME, TF_TIMEOUT_SEC)
 
             objs.append({
                 "label": d["label"],
@@ -384,6 +634,53 @@ class PerceptionNode(Node):
         self.pub.publish(msg)
 
     @staticmethod
+    @staticmethod
+    def _multi_point_3d_centroid(depth, x1, y1, x2, y2):
+        """[2026-07 추가] 단일 중심픽셀+depth 1개 샘플 방식은, 카메라가
+        비스듬한 각도로 내려다볼 때 원근왜곡 때문에 2D 중심이 실제 3D
+        박스 중심과 어긋나는(계통 오차 Y축 -25~-35mm 실측 확인) 문제가
+        있었음. bbox 영역 안을 격자로 나눠 각 점의 depth를 읽고 각각을
+        카메라 좌표계 3D 점으로 역투영한 뒤, 그 점들의 실제 3D 평균
+        (centroid)을 구한다 -- 원근왜곡에 안 흔들리는 진짜 3D 중심.
+        depth_m(대표값, median)과 카메라좌표 3D dict를 반환. 실패 시
+        (None, None).
+        """
+        GRID = 5  # 5x5 = 25개 샘플 지점
+        h, w = depth.shape
+        x1c, x2c = max(0, x1), min(w, x2)
+        y1c, y2c = max(0, y1), min(h, y2)
+        if x2c <= x1c or y2c <= y1c:
+            return None, None
+
+        pts_cam = []
+        depths = []
+        for gi in range(GRID):
+            for gj in range(GRID):
+                # 가장자리(원근왜곡/노이즈가 심한 경계)를 피해 안쪽 80% 영역만 샘플링
+                fx_ratio = 0.1 + 0.8 * gi / (GRID - 1)
+                fy_ratio = 0.1 + 0.8 * gj / (GRID - 1)
+                px = int(x1c + fx_ratio * (x2c - x1c))
+                py = int(y1c + fy_ratio * (y2c - y1c))
+                px = min(max(px, 0), w - 1)
+                py = min(max(py, 0), h - 1)
+                d = depth[py, px]
+                if not (0.05 < d < 2.0):
+                    continue
+                pt = pixel_to_camera_xyz(px, py, float(d))
+                if pt is None:
+                    continue
+                pts_cam.append(pt)
+                depths.append(float(d))
+
+        if not pts_cam:
+            return None, None
+
+        mean_x = sum(p["x"] for p in pts_cam) / len(pts_cam)
+        mean_y = sum(p["y"] for p in pts_cam) / len(pts_cam)
+        mean_z = sum(p["z"] for p in pts_cam) / len(pts_cam)
+        depth_repr = float(np.median(depths))
+        return depth_repr, {"x": mean_x, "y": mean_y, "z": mean_z}
+
     def _sample_depth(depth: np.ndarray, cx: int, cy: int) -> Optional[float]:
         h, w = depth.shape
         x0, x1 = max(0, cx - 2), min(w, cx + 3)

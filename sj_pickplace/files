@@ -1,0 +1,10017 @@
+1.끊긴 로그 이어서 (234번 줄 이후, lift가 최종 성공했는지 실패로 끝났는지)
+
+-> 이후 같은 로그 반복 후 lift는 실패했지만 place는 성공했다는 문구 와 함께 종료됨. 별 로그 없음
+
+
+
+
+2.descend 성공 직후 ~ lift 시작 전 사이의 joint_states (지금 준 스냅샷은 lift가 이미 실패하고 있는 도중 시점이라, "출발점"이 아니라 "이미 실패 반복 중인 상태"임 — 진짜 필요한 건 lift 시도 시작 직전의 시작 상태)
+3. 그리퍼 뒤집히는 순간 로그는 아직 비어있음 — ros2 topic echo 백그라운드로 5~6개나 띄워놓은 흔적만 있고 실제 캡처된 내용이 없음. 이건 다시 재현해서 /tmp/joint_log.txt 내용 자체를 잘라서 보내줘야 함.
+
+-> 그리퍼 뒤집히는 순간 + 마지막 실패까지의 로그 / 중간에 짤렷을수도있음
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 45832449
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 55859685
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 65866041
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 75822473
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 85944226
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 95828523
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 105763985
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 115816068
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 125823786
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 136120279
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 145831930
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 155981075
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 165855042
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 175842923
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 186386691
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 195843523
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 206606844
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 217740382
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 225827736
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 235800178
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 245995069
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 255813151
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 265885140
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 275922896
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 285804798
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 295849426
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 306424242
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 315811994
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 325829741
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 335787526
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 345807017
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 355848599
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 366081372
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 375827719
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 385792146
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 395931001
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 405811410
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 415852221
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 426421257
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 435842682
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 445828509
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 455829856
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 465821765
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 475802022
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 485849445
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 495848458
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 505851077
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 515810154
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 528043683
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 535837193
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 548623102
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 556502414
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 565860049
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 576442399
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 588535003
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 595846085
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 605809380
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 618637017
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 625862369
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 635902959
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 645824275
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 655853094
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 666750357
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 676645654
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 685872462
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 695871625
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 705846312
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 715810639
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 729557656
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 738608975
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 745810711
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 755808021
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 765777648
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 776529156
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 786857970
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 795873741
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 805774729
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 817343757
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 825830122
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 837148087
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 845822375
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 855878766
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 865810201
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 875844650
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 885880832
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 895830792
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 905771675
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 915807817
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 925784968
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 937879806
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 945814062
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 955839243
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 968629299
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 975879668
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 985815251
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208863
+    nanosec: 995847556
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 5921579
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 16540899
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 27095377
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 35812546
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 45863917
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 55815760
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 65830622
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 75796402
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 86319361
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 95900947
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 105865975
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 115828699
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 125768139
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 135845680
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 145803785
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 157609648
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 165852775
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 175817092
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 185782421
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 195869559
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 206078036
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 215829211
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 225841258
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 235805094
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 245815428
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 255862581
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 266051009
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 275805291
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 285819622
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 296076570
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 305812056
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 315844822
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 325803158
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 335850611
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 345812433
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 355843456
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 365827720
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 376631047
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 385819483
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 397087524
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 405782071
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 416501780
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 425810042
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 435836656
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 445814448
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 455911505
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 465848480
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 475793491
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 485792814
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 495819799
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 505834080
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 515820108
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 525812558
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 535787835
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 545767711
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 556537424
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 565828204
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 575814231
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 585824395
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 595803700
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 605818622
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 615830148
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 625959165
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 635798296
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 645831513
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 655804877
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 665820049
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 676011193
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 687099516
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 696359056
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 705838721
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 718790121
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 725822118
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 735891452
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 745838667
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 755805299
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 767793495
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 775831686
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 785850396
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 795843176
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 806816563
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 815888420
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 826165135
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 835822293
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 845798272
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 855795181
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 865970274
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 876229556
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 887653802
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 895818621
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 905833313
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 915783233
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 925826899
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 935821032
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 945800658
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 955842501
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 969135764
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 975822211
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 985800745
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208864
+    nanosec: 995858257
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208865
+    nanosec: 6380023
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208865
+    nanosec: 15905945
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208865
+    nanosec: 25991059
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208865
+    nanosec: 35803831
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208865
+    nanosec: 45814284
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208865
+    nanosec: 55830729
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208865
+    nanosec: 66242358
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208865
+    nanosec: 75878177
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208865
+    nanosec: 85855638
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208865
+    nanosec: 96907322
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208865
+    nanosec: 105811593
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208865
+    nanosec: 115796249
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208865
+    nanosec: 125835256
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208865
+    nanosec: 135920010
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208865
+    nanosec: 145992831
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208865
+    nanosec: 156680650
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208865
+    nanosec: 166011324
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208865
+    nanosec: 175874290
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208865
+    nanosec: 186805256
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208865
+    nanosec: 195771434
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+header:
+  stamp:
+    sec: 1785208865
+    nanosec: 205828486
+  frame_id: base_link
+name:
+- joint2
+- joint3
+- joint5
+- joint6
+- joint1
+- joint4
+- joint7
+- gripper_joint1
+- gripper_joint2
+position:
+- 1.0254
+- 1.0549
+- 1.9637
+- 0.95
+- 1.8087
+- 1.1982
+- -1.1951
+- 0.05
+- -0.05
+velocity:
+- -0.0138
+- 0.0019
+- -0.0075
+- 0.001
+- -0.001
+- -0.0006
+- 0.0
+- 0.0
+- 0.0
+effort:
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+- .nan
+---
+
+
+
+
+
+
+Jacobian rank를 실제로 찍어볼 거면, _fk_gripper_pos 확장하는 김에 moveit_commander나 KDL로 현재 joint state에서의 Jacobian 조건수(condition number) 한 번 로그 찍는 임시 디버그 코드 넣는 것도 고려해볼 만함 (지금 당장 할 필요는 없고, 5.1 작업할 때 같이 고려).

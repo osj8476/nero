@@ -28,10 +28,21 @@ from sensor_msgs.msg import JointState
 from mcp.server.fastmcp import FastMCP
 
 # ── 타임아웃 설정 ──────────────────────────────────────────────────────────────
-TIMEOUT_PICK  = 31.0
-TIMEOUT_PLACE = 16.0
+TIMEOUT_PICK  = 75.0  # [2026-07 수정] IK 후보비교, 재조회 재시도,
+# calib_debug tf lookup 등이 추가되며 pick 시퀀스가 예전보다 느려짐
+# (실측: 로봇은 성공했는데 MCP가 31초 타임아웃으로 먼저 실패 처리한
+# 사례 확인). 넉넉하게 상향.
+TIMEOUT_PLACE = 60.0  # [2026-07 수정] place가 approach->align->descend
+# 4단계 구조로 바뀌고 재시도까지 겹치면 40초 이상 걸리는 것이 실측
+# 확인됨(16초는 MCP가 로봇 완료 전에 먼저 포기해서 중복 명령/재시도
+# 루프를 만드는 원인이었음). pick과 비슷한 수준으로 넉넉하게 상향.
 TIMEOUT_MOVE  = 11.0
 TIMEOUT_HOME  = 16.0
+
+# [2026-07 추가] 박스 실측 치수 지원 전까지 임시 고정값 (추후 A안:
+# depth 기반 실측으로 교체 예정). 현재 테스트 환경 박스 높이 기준.
+DEFAULT_BOX_HEIGHT_M = 0.05
+TIMEOUT_SCAN  = 60.0  # joint1 스윕 시간 고려 (6스텝 * 약 8초)
 
 # ── 포즈 저장 경로 (XDG 기반 — Jetson/PC 모두 호환) ───────────────────────────
 # 오버라이드: export NERO_POSES_FILE=~/sj/saved_poses.json  (Jetson 기존 경로 유지 시)
@@ -80,8 +91,13 @@ class RosBridgeNode(Node):
             String, '/detected_objects', self._on_objects, qos)
         self.sub_result = self.create_subscription(
             String, '/pick_result', self._on_result, qos)
+        # [2026-07 수정] /feedback/joint_states는 sim 환경에서 아무도
+        # 발행하지 않는 실물 전용 토픽이라(오늘 FK/IK 조회 버그 원인으로
+        # 실측 확인됨), get_joint_positions/save_pose/move_joints_relative가
+        # 전부 실패하는 문제가 있었음. sim에서 실제로 살아있는
+        # /joint_states로 교체.
         self.sub_joints = self.create_subscription(
-            JointState, '/feedback/joint_states', self._on_joint_state, qos)
+            JointState, '/joint_states', self._on_joint_state, qos)
 
         self._objects_lock = threading.Lock()
         self._latest_objects: list = []
@@ -160,6 +176,12 @@ class RosBridgeNode(Node):
 _ros_node: Optional[RosBridgeNode] = None
 _ros_ready = threading.Event()
 
+# [2026-07 추가] 마지막 scan_for_boxes 결과 캐시. get_scanned_boxes가
+# ROS 왕복 없이 즉시 응답할 수 있게 하기 위함 (로봇이 움직이지 않는
+# 물체는 재스캔 없이도 이 캐시로 충분히 정확함).
+_last_scanned_boxes: list = []
+_last_scan_stamp: float = 0.0
+
 
 def _ros_spin_thread():
     global _ros_node
@@ -196,15 +218,37 @@ def list_detected_objects() -> str:
     로봇에게 무언가를 시키기 전에 반드시 먼저 이 도구를 호출해서
     실제로 어떤 물체가 장면에 있는지 확인하라.
 
+    ⚠ 중요 — 좌표/치수 해석 시 반드시 지켜야 할 규칙:
+    1. center_3d는 물체의 "기하학적 중심점" 좌표다 (바닥면이 아니다).
+       즉 center_3d.z는 물체 바닥이 아니라 물체 중앙 높이다.
+    2. box_height_m은 "중심에서 바닥까지의 거리"가 아니라
+       "직육면체 한 변(높이 방향)의 전체 길이"다. 따라서:
+       - 이 물체의 바닥 높이 = center_3d.z - box_height_m / 2
+       - 이 물체의 윗면 높이 = center_3d.z + box_height_m / 2
+       - 이 물체 "위에" 다른 박스를 쌓으려면, 쌓을 박스의 중심 z를
+         (이 물체의 윗면 높이) + (쌓을 박스의 box_height_m / 2) 로 계산해야 한다.
+       - box_height_m은 현재 모든 물체에 고정값 0.05m가 채워진다.
+         이 값은 신뢰할 수 있는 고정 상수다. 스캔 결과에 물체가
+         안 보이거나 애매하더라도, 높이를 재확인하기 위해 재스캔하거나
+         go_home으로 복귀하지 마라. 물체 자체가 안 보이는 것과 높이
+         불확실성은 별개 문제이며, 후자를 이유로 전자의 조치를 반복
+         호출하지 마라.
+
     Returns:
-        {"objects": [{"label": "cup", "center_3d": {"x":0.31,"y":-0.04,"z":0.1}}, ...],
+        {"objects": [{"label": "cup", "center_3d": {"x":0.31,"y":-0.04,"z":0.1},
+                       "angle_base_deg": 45.0, "box_height_m": 0.05}, ...],
          "age_sec": 0.18}
+        angle_base_deg는 물체(주로 박스류)의 base_link 기준 회전각(0~90도)이다.
+        해당 없으면 null.
         objects 가 빈 배열이면 현재 인식된 물체가 없다.
     """
     _ensure_ros()
     objects, stamp = _ros_node.get_objects()
     age = round(time.time() - stamp, 2) if stamp > 0 else -1.0
-    slim = [{'label': o.get('label', '?'), 'center_3d': o.get('center_3d', {})}
+    slim = [{'label': o.get('label', '?'),
+             'center_3d': o.get('center_3d', {}),
+             'angle_base_deg': o.get('angle_base_deg', None),
+             'box_height_m': DEFAULT_BOX_HEIGHT_M}
             for o in objects]
     return json.dumps({'objects': slim, 'age_sec': age}, ensure_ascii=False)
 
@@ -307,7 +351,67 @@ def move_to_saved_pose(name: str) -> str:
 
 
 @mcp.tool()
-def pick_object(target_label: str, grasp_dir: str = 'auto') -> str:
+def scan_for_boxes(target_label: str = 'box') -> str:
+    """로봇 팔을 좌우로 훑으며(joint1 스윕) 현재 시야 밖에 있는
+    물체까지 찾아서 좌표를 기억해둔다. list_detected_objects로 물체를
+    못 찾았을 때 이 도구를 호출한 뒤, pick_object를 from_scan=True로
+    호출하면 스캔 중 발견한 위치로 집으러 갈 수 있다. 완료까지 블로킹
+    (수십 초 소요).
+
+    ⚠ 중요: 결과의 boxes 배열에 각 물체의 정확한 좌표(x,y,z)가 이미
+    포함되어 있다. 이 물체들은 로봇이 스스로 움직이지 않는 한 위치가
+    바뀌지 않으므로, 이후 place_object 등에 좌표가 필요할 때
+    list_detected_objects로 다시 확인하지 말고 여기서 받은 boxes 값을
+    그대로 사용하라. 특히 pick_object 실행 중에는 로봇 팔(카메라)이
+    계속 움직이므로, pick 전후로 list_detected_objects를 다시 부르면
+    카메라 각도가 달라져 다른(부정확한) 좌표를 받게 될 수 있다.
+
+    Args:
+        target_label: 찾을 물체 라벨 (기본값 'box')
+
+    Returns:
+        성공: {"status": "success", "reason": "scan_complete:N",
+               "boxes": [{"x":0.22,"y":0.19,"z":0.022,
+                          "confidence":0.78,"angle_base_deg":45.0,
+                          "label":"box"}, ...]}
+               (N=발견한 개수, boxes 각 항목의 x/y/z는 물체 중심좌표)
+        실패: {"status": "failed"|"timeout", "reason": "..."}
+    """
+    global _last_scanned_boxes, _last_scan_stamp
+    _ensure_ros()
+    payload = {'action': 'scan_box', 'target_label': target_label.strip().lower()}
+    _ros_node.publish_command(payload)
+    result = _ros_node.wait_for_result(timeout=TIMEOUT_SCAN)
+    if result.get('status') == 'success' and 'boxes' in result:
+        _last_scanned_boxes = result['boxes']
+        _last_scan_stamp = time.time()
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+def get_scanned_boxes() -> str:
+    """가장 최근 scan_for_boxes 실행 결과(발견된 물체 좌표 목록)를
+    ROS 재조회 없이 즉시 반환한다. scan_for_boxes를 이미 호출해서 물체
+    위치를 확인해둔 뒤, place_object 등에 그 좌표가 다시 필요할 때
+    list_detected_objects 대신 이 도구를 사용하라 (로봇이 스스로 움직이지
+    않는 한 물체 위치는 바뀌지 않으므로 재스캔/재조회가 불필요하다).
+
+    scan_for_boxes를 아직 한 번도 호출하지 않았다면 빈 목록을 반환한다.
+
+    Returns:
+        {"boxes": [{"x":0.22,"y":0.19,"z":0.022,"confidence":0.78,
+                    "angle_base_deg":45.0,"label":"box"}, ...],
+         "age_sec": 12.3}
+        age_sec는 마지막 scan_for_boxes 호출 이후 경과 시간(초).
+        boxes가 빈 배열이면 아직 스캔한 적이 없다.
+    """
+    age = round(time.time() - _last_scan_stamp, 2) if _last_scan_stamp > 0 else -1.0
+    return json.dumps({'boxes': _last_scanned_boxes, 'age_sec': age}, ensure_ascii=False)
+
+
+@mcp.tool()
+def pick_object(target_label: str, grasp_dir: str = 'auto',
+                 from_scan: bool = False, box_index: int = None) -> str:
     """지정한 물체를 로봇 팔로 집어 올린다. pick 완료까지 블로킹.
 
     Args:
@@ -318,26 +422,61 @@ def pick_object(target_label: str, grasp_dir: str = 'auto') -> str:
             "side"        : 앞에서 수평으로
             "side_left"   : 왼쪽에서 수평으로
             "side_right"  : 오른쪽에서 수평으로
+        from_scan: True면 scan_for_boxes로 미리 찾아둔 좌표를 사용한다
+            (현재 카메라 시야 밖에 있는 물체도 집을 수 있음). scan_for_boxes를
+            먼저 호출해서 물체를 찾아둔 경우에만 True로 설정하라.
+        box_index: [신규] from_scan=True일 때, get_scanned_boxes()/이전
+            pick_object 응답의 remaining_scanned_boxes 배열에서 몇 번째
+            항목(0부터 시작)을 집을지 명시적으로 지정한다. 생략하면
+            큐 맨 앞 항목을 집는다(하위호환, 아래 경고 참고).
+
+    ⚠ 여러 박스를 다루는 작업(특히 쌓기)에서는 box_index를 반드시
+    명시하라. box_index를 생략하면 "큐 맨 앞 항목"을 집는데, 이미 다른
+    스캔된 박스의 (x,y) 위에 무언가를 place한 뒤 그 자리를 다시
+    "다음 큐 항목"으로 착각해서 엉뚱한(방금 쌓은) 박스를 다시 집어버리는
+    사고가 실측 확인됐다(2026-07-22). box_index로 명시하면 이 문제가
+    구조적으로 발생하지 않는다.
+
+    ⚠ from_scan=True로 pick하면, 결과의 remaining_scanned_boxes에
+    "이번에 집은 것을 제외한 나머지 스캔된 물체들"의 좌표가 이미 담겨
+    돌아온다. 이어서 다른 스캔된 물체를 다루려면(예: 방금 집은 물체를
+    남은 물체 위에 쌓기), list_detected_objects나 scan_for_boxes를
+    다시 호출하지 말고 이 필드를 그대로 사용하라(인덱스는 이 배열
+    기준으로 다시 매겨짐 -- 원래 스캔 인덱스가 아님). pick 실행 중에는
+    로봇 팔(카메라)이 계속 움직이므로, 재조회하면 다른(부정확한)
+    좌표를 받게 될 위험이 있다. 특히 물체를 쥔 채로 scan_for_boxes를
+    다시 호출하는 것은 팔이 크게 움직이며 충돌 위험이 있으니 절대
+    하지 말 것.
 
     Returns:
-        성공: {"status": "success", "reason": "pick_complete", "target_label": "..."}
+        성공: {"status": "success", "reason": "pick_complete",
+               "target_label": "...",
+               "remaining_scanned_boxes": [{"x":..,"y":..,"z":..,
+                   "confidence":..,"angle_base_deg":..,"label":".."}, ...]}
+               (from_scan=True였을 때만 remaining_scanned_boxes가 채워짐)
         실패: {"status": "failed"|"rejected"|"timeout", "reason": "..."}
     """
     _ensure_ros()
     target_label = target_label.strip().lower()
 
-    objects, _ = _ros_node.get_objects()
-    available = {o.get('label', '').lower() for o in objects}
-    if available and target_label not in available:
-        return json.dumps({
-            'status': 'rejected',
-            'reason': f"'{target_label}' 은(는) 현재 장면에 없습니다. "
-                      f"인식된 물체: {sorted(available)}",
-        }, ensure_ascii=False)
+    if not from_scan:
+        objects, _ = _ros_node.get_objects()
+        available = {o.get('label', '').lower() for o in objects}
+        if available and target_label not in available:
+            return json.dumps({
+                'status': 'rejected',
+                'reason': f"'{target_label}' 은(는) 현재 장면에 없습니다. "
+                          f"인식된 물체: {sorted(available)}. "
+                          f"카메라 시야 밖에 있을 수 있으니 scan_for_boxes를 먼저 시도해보라.",
+            }, ensure_ascii=False)
 
     payload = {'action': 'pick', 'target_label': target_label}
     if grasp_dir and grasp_dir != 'auto':
         payload['grasp_dir'] = grasp_dir
+    if from_scan:
+        payload['from_scan'] = True
+        if box_index is not None:
+            payload['box_index'] = box_index
     _ros_node.publish_command(payload)
     result = _ros_node.wait_for_result(timeout=TIMEOUT_PICK)
     result['target_label'] = target_label
@@ -352,8 +491,33 @@ def place_object(x: float, y: float, z: float, grasp_dir: str = 'auto') -> str:
         x, y, z: 내려놓을 위치 (base_link 기준, 미터)
         grasp_dir: 내려놓을 때 자세. pick_object 와 동일한 값 사용 권장.
 
+    ⚠ 요청한 좌표가 로봇의 국소 도달불가 지점(singularity)이거나 비정상적
+    으로 높은 z일 경우, 서버가 자동으로 근처 좌표(±0.05m y시프트 또는
+    z 하향)로 재시도한다. 성공 시 결과의 place_pos가 실제로 놓인 좌표로
+    바뀌어 있을 수 있다 — 이 경우 requested_place_pos 필드에 원래 요청
+    좌표가 별도로 담긴다. 다음 작업(예: 이 박스 위에 쌓기)의 기준 좌표는
+    반드시 place_pos(실제 좌표)를 써야 한다.
+
+    ⚠ [폐루프 검증] status="success"라고 해서 물체가 실제로 목표 위치에
+    안착했다는 보장은 아니다. 그리퍼가 열리는 순간 물체가 미끄러지거나
+    다른 물체에 부딪혀 튕겨나갈 수 있다. 서버가 lift 직후 카메라로 재확인한
+    결과가 placement_verified 필드에 담긴다:
+      - true  : 목표 위치 근처에서 물체가 실제로 확인됨. 안심하고 다음
+                작업(그 위에 쌓기 등) 진행 가능.
+      - false : 목표 위치에서 물체를 못 찾았거나 크게 벗어남
+                (verification_reason에 구체적 사유). 이 물체를 기준으로
+                후속 작업(쌓기 등)을 계속하지 말고, list_detected_objects로
+                실제 위치를 재확인하거나 사용자에게 알려라.
+      - null(필드 자체가 없거나 값이 None) : perception 데이터가 오래돼
+                판정 불가. 확실하지 않으니 필요하면 list_detected_objects로
+                직접 재확인하라.
+
     Returns:
-        성공: {"status": "success", "reason": "place_complete", "place_pos": {...}}
+        성공: {"status": "success", "reason": "place_complete",
+               "place_pos": {...},
+               "requested_place_pos": {...}  (좌표가 자동 보정된 경우만 포함),
+               "placement_verified": true|false|null,
+               "verification_reason": "..."}
         실패: {"status": "failed"|"timeout", "reason": "..."}
     """
     _ensure_ros()
@@ -363,68 +527,18 @@ def place_object(x: float, y: float, z: float, grasp_dir: str = 'auto') -> str:
         payload['grasp_dir'] = grasp_dir
     _ros_node.publish_command(payload)
     result = _ros_node.wait_for_result(timeout=TIMEOUT_PLACE)
-    result['place_pos'] = place_pos
+    # [신규] planning_node가 도달 불가 지점을 감지해 좌표를 자동으로
+    # 시프트했을 수 있다 (approach/descend 실패 시 ±0.05m y시프트 또는
+    # z 하향 재시도, nero_robot_place_reachability memory 기반). 실제로
+    # 어디 놓였는지를 place_pos에 반영해서, Claude가 요청 좌표와 실제
+    # 좌표가 다르다는 걸 놓치지 않게 한다.
+    if 'actual_place_pos' in result and result['actual_place_pos'] != place_pos:
+        result['requested_place_pos'] = place_pos
+        result['place_pos'] = result['actual_place_pos']
+    else:
+        result['place_pos'] = place_pos
     return json.dumps(result, ensure_ascii=False)
 
-
-@mcp.tool()
-def pick_and_place(target_label: str, x: float, y: float, z: float,
-                   grasp_dir: str = 'auto') -> str:
-    """물체를 집은 뒤 지정 좌표에 내려놓는다. 전체 완료까지 블로킹.
-
-    pick 완료를 확인한 뒤 place 를 발행하므로,
-    pick 실패 시 place 를 보내지 않고 즉시 실패를 반환한다.
-
-    Args:
-        target_label: 집을 물체 라벨 (예: "cup"). 영어 소문자.
-        x, y, z: 내려놓을 위치 (base_link 기준, 미터)
-        grasp_dir: 파지 방향 ("auto"|"top"|"side"|"side_left"|"side_right")
-
-    Returns:
-        성공: {"status": "success", "reason": "place_complete",
-               "target_label": "...", "place_pos": {...}}
-        실패: {"status": "failed"|"rejected"|"timeout", "reason": "...",
-               "failed_at": "pick"|"place"}
-    """
-    _ensure_ros()
-    target_label = target_label.strip().lower()
-    place_pos    = {'x': x, 'y': y, 'z': z}
-
-    objects, _ = _ros_node.get_objects()
-    available = {o.get('label', '').lower() for o in objects}
-    if available and target_label not in available:
-        return json.dumps({
-            'status': 'rejected',
-            'reason': f"'{target_label}' 은(는) 현재 장면에 없습니다. "
-                      f"인식된 물체: {sorted(available)}",
-        }, ensure_ascii=False)
-
-    pick_cmd = {'action': 'pick', 'target_label': target_label}
-    if grasp_dir and grasp_dir != 'auto':
-        pick_cmd['grasp_dir'] = grasp_dir
-    _ros_node.publish_command(pick_cmd)
-    pick_result = _ros_node.wait_for_result(timeout=TIMEOUT_PICK)
-
-    if pick_result.get('status') != 'success':
-        pick_result['failed_at'] = 'pick'
-        pick_result['target_label'] = target_label
-        return json.dumps(pick_result, ensure_ascii=False)
-
-    place_cmd = {'action': 'place', 'place_pos': place_pos}
-    if grasp_dir and grasp_dir != 'auto':
-        place_cmd['grasp_dir'] = grasp_dir
-    _ros_node.publish_command(place_cmd)
-    place_result = _ros_node.wait_for_result(timeout=TIMEOUT_PLACE)
-
-    if place_result.get('status') != 'success':
-        place_result['failed_at'] = 'place'
-        place_result['target_label'] = target_label
-        place_result['place_pos']    = place_pos
-        return json.dumps(place_result, ensure_ascii=False)
-
-    place_result['target_label'] = target_label
-    place_result['place_pos']    = place_pos
-    return json.dumps(place_result, ensure_ascii=False)
 
 
 @mcp.tool()

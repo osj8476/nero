@@ -21,12 +21,11 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            # 실제 노드들
             'perception_node  = sj_pickplace.perception_node:main',
+            'perception_node_sim = sj_pickplace.perception_node_sim:main',
             'planning_node    = sj_pickplace.planning_node:main',
             'mcp_robot_server = sj_pickplace.mcp_robot_server:main',
             'command_parser   = sj_pickplace.command_parser:main',
-            # 게이밍박스 없이 검증용
             'fake_perception  = sj_pickplace.fake_perception:main',
         ],
     },
