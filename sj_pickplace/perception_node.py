@@ -92,7 +92,16 @@ CAM_EXPOSURE = int(os.environ.get("CAM_EXPOSURE", "500"))
 
 # 오탐 필터
 MIN_BBOX_SIZE = 0.02
-DEDUP_THRESH  = 0.08
+
+# [2026-08 포팅] 기존엔 2D bbox 중심좌표만으로 dedup(DEDUP_THRESH=0.08)했는데,
+# 쌓여있는 두 박스는 top-down 근처 각도에서 x,y footprint가 거의 겹쳐서
+# "같은 박스"로 오인되어 위/아래 중 하나가 통째로 사라지는 문제가 실측
+# 확인됨(placement_verification이 새로 놓인 박스를 못 찾아 verified=false/null로
+# 오판하는 원인). perception_node_sim.py가 동일 문제를 먼저 겪고 depth까지
+# 포함한 3D 위치 기준 dedup(_dedup_3d)으로 고쳐뒀던 걸 여기로 포팅한다 --
+# x,y가 가깝더라도 z(depth)가 이 임계값보다 멀면 쌓인 별개 박스로 보고 유지.
+DEDUP_XY_THRESH_M = float(os.environ.get("DEDUP_XY_THRESH_M", "0.03"))
+DEDUP_Z_THRESH_M  = float(os.environ.get("DEDUP_Z_THRESH_M", "0.025"))
 
 # tf 변환 대상 프레임 (URDF에서 tcp_link 하위에 붙인 광학 프레임과 일치해야 함)
 BASE_FRAME = os.environ.get("BASE_FRAME", "base_link")
@@ -353,23 +362,41 @@ def _compute_box_angle_base(color: np.ndarray, d: dict,
 
 
 def filter_detections(dets):
-    """크기 필터 + 중복 제거."""
+    """크기 필터만 적용한다 (중복 제거는 depth 조회 이후 _dedup_3d로 미룸 --
+    2D 단계에서는 쌓인 박스와 진짜 중복을 구분할 depth 정보가 없기 때문).
+    """
+    return [
+        d for d in dets
+        if (d["x_max"] - d["x_min"]) >= MIN_BBOX_SIZE
+        and (d["y_max"] - d["y_min"]) >= MIN_BBOX_SIZE
+    ]
+
+
+def _dedup_3d(objs, xy_thresh=DEDUP_XY_THRESH_M, z_thresh=DEDUP_Z_THRESH_M):
+    """3D 위치(x, y, z) 기준으로 진짜 중복 검출만 제거한다.
+
+    2D bbox 겹침만으로 판단하면, 쌓여있는 박스(화면상 x,y는 거의 겹치지만
+    depth/z는 서로 다른 별개 물체)까지 하나로 합쳐버리는 문제가 있어서,
+    반드시 z(depth)까지 같이 비교해야 한다.
+    - x,y,z가 전부 임계값 안으로 가까우면 → 같은 박스의 중복 검출로 보고 병합
+      (이 경우 confidence가 더 높은 detection을 남긴다)
+    - x,y는 가깝지만 z가 임계값보다 멀면 → 쌓여있는 별개 박스로 보고 둘 다 유지
+    """
+    objs_sorted = sorted(objs, key=lambda o: -o.get("confidence", 0.0))
     filtered = []
-    for d in dets:
-        w = d["x_max"] - d["x_min"]
-        h = d["y_max"] - d["y_min"]
-        if w < MIN_BBOX_SIZE or h < MIN_BBOX_SIZE:
-            continue
-        cx = d["x_min"] + w / 2
-        cy = d["y_min"] + h / 2
-        too_close = any(
-            abs(cx - (f["x_min"] + (f["x_max"] - f["x_min"]) / 2)) < DEDUP_THRESH
-            and abs(cy - (f["y_min"] + (f["y_max"] - f["y_min"]) / 2)) < DEDUP_THRESH
-            and f["label"] == d["label"]
-            for f in filtered
-        )
-        if not too_close:
-            filtered.append(d)
+    for o in objs_sorted:
+        p = o["center_3d"]
+        is_dup = False
+        for f in filtered:
+            fp = f["center_3d"]
+            if (abs(p["x"] - fp["x"]) < xy_thresh
+                    and abs(p["y"] - fp["y"]) < xy_thresh
+                    and abs(p["z"] - fp["z"]) < z_thresh
+                    and f["label"] == o["label"]):
+                is_dup = True
+                break
+        if not is_dup:
+            filtered.append(o)
     return filtered
 
 
@@ -628,6 +655,11 @@ class PerceptionNode(Node):
                 "confidence": round(float(d.get("confidence", 0.0)), 3),
                 "angle_base_deg": angle_deg,
             })
+
+        # ── 3D 위치 기준 최종 dedup ──────────────────────────────────
+        # x,y,z 전부 가까운 것만 같은 박스의 중복 검출로 보고 병합한다.
+        # 쌓여있는 박스처럼 z(depth)가 다르면 그대로 유지된다.
+        objs = _dedup_3d(objs)
 
         msg = String()
         msg.data = json.dumps({"objects": objs}, ensure_ascii=False)

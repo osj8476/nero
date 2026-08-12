@@ -92,39 +92,14 @@ IMAGE_TOPIC       = os.environ.get("IMAGE_TOPIC", "/camera/color/image_raw")
 DEPTH_TOPIC        = os.environ.get("DEPTH_TOPIC", "/camera/depth/image_raw")
 CAMERA_INFO_TOPIC  = os.environ.get("CAMERA_INFO_TOPIC", "/camera/camera_info")
 
-# perception_node.py에 정의된 함수 재사용 (동일 패키지 내 import)
+# perception_node.py에 정의된 함수 재사용 (동일 패키지 내 import).
+# [2026-08] _dedup_3d는 perception_node.py로 포팅/통합됨 -- 이 파일에서
+# 로직을 중복 유지하면 나중에 두 구현이 갈라질 위험이 있어 공용 구현을
+# 그대로 가져다 쓴다. 이 노드 고유의 DEDUP_XY_THRESH_M/DEDUP_Z_THRESH_M
+# 값은 그대로 이 파일에서 관리하고, 호출 시 인자로 넘긴다.
 from sj_pickplace.perception_node import (   # noqa: E402
-    _compute_box_angle_base, _transform_with_fallback,
+    _compute_box_angle_base, _transform_with_fallback, _dedup_3d,
 )
-
-
-def _dedup_3d(objs, xy_thresh=DEDUP_XY_THRESH_M, z_thresh=DEDUP_Z_THRESH_M):
-    """3D 위치(x, y, z) 기준으로 진짜 중복 검출만 제거한다.
-
-    2D bbox 겹침만으로 판단하면, 쌓여있는 박스(화면상 x,y는 거의 겹치지만
-    depth/z는 서로 다른 별개 물체)까지 하나로 합쳐버리는 문제가 있어서,
-    반드시 z(depth)까지 같이 비교해야 한다.
-    - x,y,z가 전부 임계값 안으로 가까우면 → 같은 박스의 중복 검출로 보고 병합
-      (이 경우 confidence가 더 높은 detection을 남긴다)
-    - x,y는 가깝지만 z가 임계값보다 멀면 → 쌓여있는 별개 박스로 보고 둘 다 유지
-    """
-    # confidence 높은 순으로 정렬해서, 중복 제거 시 더 신뢰도 높은 detection이 남도록 함
-    objs_sorted = sorted(objs, key=lambda o: -o.get("confidence", 0.0))
-    filtered = []
-    for o in objs_sorted:
-        p = o["center_3d"]
-        is_dup = False
-        for f in filtered:
-            fp = f["center_3d"]
-            if (abs(p["x"] - fp["x"]) < xy_thresh
-                    and abs(p["y"] - fp["y"]) < xy_thresh
-                    and abs(p["z"] - fp["z"]) < z_thresh
-                    and f["label"] == o["label"]):
-                is_dup = True
-                break
-        if not is_dup:
-            filtered.append(o)
-    return filtered
 
 
 class PerceptionNodeSim(Node):
@@ -369,7 +344,7 @@ class PerceptionNodeSim(Node):
             # ── 3D 위치 기준 최종 dedup ──────────────────────────────────
             # x,y,z 전부 가까운 것만 같은 박스의 중복 검출로 보고 병합한다.
             # 쌓여있는 박스처럼 z(depth)가 다르면 그대로 유지된다.
-            objs = _dedup_3d(objs)
+            objs = _dedup_3d(objs, xy_thresh=DEDUP_XY_THRESH_M, z_thresh=DEDUP_Z_THRESH_M)
 
             msg = String()
             msg.data = json.dumps({"objects": objs}, ensure_ascii=False)

@@ -72,6 +72,15 @@ grasp_kinematics.py
 import math
 
 
+class SequenceRejected(RuntimeError):
+    """pick/place가 물리적으로 도달불가로 사전 거부됨 (side reachability 등).
+    일반 RuntimeError(실행 중 실패)와 구분해서 'failed' 대신 'rejected'로
+    보고하기 위한 마커 클래스.
+    [2026-08 이관] 원래 planning_node.py에 정의돼 있었으나, task_planner.py
+    (ROS 비의존 순수 모듈)가 이 예외를 잡아야 해서 이곳으로 옮김
+    (planning_node.py를 import하면 순환참조 발생). 동작/의미 변경 없음."""
+
+
 # ── side 그립 전용 상수 (대규모 IK 그리드 전수조사 결과) ──────────────────
 SIDE_MIN_DIST = 0.32     # 이 거리 미만이면 IK 시도 없이 즉시 거부
 SIDE_PITCH_DEG = 90      # side 그립 손목 pitch (그리퍼를 눕히는 각도)

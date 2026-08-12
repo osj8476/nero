@@ -80,8 +80,11 @@ from .grasp_kinematics import (
     QUAT_HOME, QUAT_SIDE_FRONT, SIDE_TAG, GRASP_DIR_MAP, LABEL_GRASP_HINT,
     quat_angle_diff, top_down_angle_quat, sim_top_down_angle_quat,
     side_quat_for, side_reachability_check, auto_grasp_quat,
-    resolve_grasp_quat, YawCandidateSelector,
+    resolve_grasp_quat, YawCandidateSelector, SequenceRejected,
 )
+# [신설] stack_boxes의 pick 단계 경량 백트래킹 플래너 (ROS 비의존, 순수 함수).
+# 상세: task_planner.py 모듈 docstring 참고.
+from .task_planner import run_stack_plan, DEFAULT_MAX_BACKTRACK_ATTEMPTS
 # [신설] 폐루프(closed-loop) place 검증 -- 그리퍼를 열고 물러난 뒤 실제로
 # 목표 위치에 물체가 안착했는지 perception으로 재확인한다.
 # 상세: placement_verification.py 모듈 docstring 참고.
@@ -168,6 +171,8 @@ SCAN_DEDUP_DIST_M = 0.05
 # auto_grasp_quat -> 전부 grasp_kinematics.py로 이관 (파일 상단 import 참고).
 # 호출부는 grasp_kinematics.resolve_grasp_quat() 하나로 통합됨
 # (기존 on_command 3곳의 거의 동일한 중복 분기 로직 대체).
+# [이관] SequenceRejected -> grasp_kinematics.SequenceRejected (import 참고,
+# task_planner.py가 이 예외를 잡아야 해서 순환참조 방지 목적으로 이동함).
 class PlanningNode(Node):
     def __init__(self):
         super().__init__('planning_node')
@@ -442,6 +447,51 @@ class PlanningNode(Node):
         elif action == 'home':
             self.get_logger().info('HOME 시작')
             threading.Thread(target=self._home_sequence, daemon=True).start()
+        elif action == 'stack':
+            target_label = cmd.get('target_label', 'box').strip().lower()
+            box_indices = cmd.get('box_indices', [])
+            base_pos = cmd.get('base_pos')
+            box_height_m = cmd.get('box_height_m', 0.05)
+            grasp_dir = cmd.get('grasp_dir', None)
+            allow_reorder = cmd.get('allow_reorder', False)
+            if not box_indices or base_pos is None:
+                self.get_logger().warn("'stack' 명령에 box_indices 또는 base_pos 없음.")
+                with self.lock:
+                    self.busy = False
+                return
+            _label_matches = [b for b in self._scanned_boxes if b.get('label') == target_label]
+            box_refs, invalid = [], []
+            for idx in box_indices:
+                if isinstance(idx, int) and 0 <= idx < len(_label_matches):
+                    box_refs.append(_label_matches[idx])
+                else:
+                    invalid.append(idx)
+            if invalid or not box_refs:
+                reason = (f"잘못된 box_indices: {invalid} "
+                           f"(라벨 '{target_label}' 매칭 {len(_label_matches)}개)")
+                self.get_logger().warn(f'[stack] {reason}')
+                self._publish_result('rejected', reason)
+                with self.lock:
+                    self.busy = False
+                return
+            # [신설] allow_reorder=True일 때만 fallback pool을 채운다 --
+            # _label_matches는 원래 box_refs를 좁힌 뒤 버려지던 변수였으나,
+            # 여기서는 "지정되지 않은 나머지 같은 라벨 박스" 후보군으로
+            # 재활용한다 (task_planner.run_stack_plan의 pick 백트래킹용).
+            fallback_pool = (
+                [b for b in _label_matches if b not in box_refs]
+                if allow_reorder else []
+            )
+            self.get_logger().info(
+                f'STACK 시작: label={target_label} box_indices={box_indices} '
+                f'base={base_pos} height={box_height_m} allow_reorder={allow_reorder} '
+                f'fallback_pool={len(fallback_pool)}개')
+            t = threading.Thread(
+                target=self._stack_sequence,
+                args=(target_label, box_refs, base_pos, box_height_m, grasp_dir,
+                      fallback_pool, allow_reorder))
+            t.daemon = False
+            t.start()
         else:
             self.get_logger().warn(f"알 수 없는 action: '{action}'")
             with self.lock:
@@ -523,210 +573,216 @@ class PlanningNode(Node):
             return sim_top_down_angle_quat(angle_deg)
         return top_down_angle_quat(pos['x'], pos['y'], angle_deg)
     # ── 시퀀스 ────────────────────────────────────────────────────────────────
+    def _do_pick(self, pos, quat, is_side=False, label='', skip_reacquire=False, angle_deg=0.0):
+        if is_side:
+            ok, reason = side_reachability_check(pos)
+            if not ok:
+                self.get_logger().warn(f'PICK 거부: {reason}')
+                raise SequenceRejected(reason)
+        if is_side:
+            dx, dy = pos['x'], pos['y']
+            dist = math.sqrt(dx*dx + dy*dy) or 1.0
+            px = dx - (dx / dist) * SIDE_TCP_OFFSET
+            py = dy - (dy / dist) * SIDE_TCP_OFFSET
+            offset_desc = f'side(TCP오프셋 {SIDE_TCP_OFFSET}m 적용)'
+        else:
+            px = pos['x']
+            py = pos['y']
+            offset_desc = 'top(z)'
+        if is_side:
+            approach_z = pos['z']
+            descend_z  = pos['z']
+            lift_z     = pos['z'] + LIFT_Z      # top과 동일한 상승폭
+        else:
+            pz = pos['z']
+            approach_z = pz + APPROACH_Z + TOP_TCP_OFFSET
+            descend_z  = pz + DESCEND_Z + TOP_TCP_OFFSET
+            descend_z  = max(descend_z, DESCEND_MIN_FLANGE_Z)
+            lift_z     = pz + LIFT_Z + TOP_TCP_OFFSET
+        # [2026-07 추가] approach 진입 전 joint1만 먼저 물체 방향으로
+        # 회전. 스캔이 끝난 자세(예: joint1=145°)에서 바로 approach를
+        # 시도하면, 물체 방향까지의 큰 차이를 approach의 나머지
+        # 조인트(top-down 자세 유지)와 동시에 풀어야 해서 IK가 훨씬
+        # 어려워지는 것이 실측+로그 분석으로 확인됨. joint1만 먼저
+        # 물체 쪽으로 돌려 "쉬운 시작 상태"를 만든다.
+        # BEARING_OFFSET_DEG: joint1 명령각과 실측 물체 방향(atan2)
+        # 사이 오프셋. 스캔 실측 2개 지점(-155°→46°, 145°→-39°)의
+        # 평균 약 188°(범위 176~201°)로 확인됨. 카메라가 팔 끝에
+        # top-down으로 장착되어 "정면"의 의미가 base 기준과 반대에
+        # 가깝게 어긋나는 것으로 추정 — 완벽한 정렬이 목적이 아니라
+        # IK 부담을 줄이는 사전 회전이므로 이 정도 오차는 허용.
+        target_bearing = math.atan2(pos['y'], pos['x']) - math.radians(BEARING_OFFSET_DEG)
+        target_bearing = math.atan2(math.sin(target_bearing), math.cos(target_bearing))
+        js = self.latest_joint_state_sim
+        if js is not None:
+            joint_names = ['joint1','joint2','joint3','joint4','joint5','joint6','joint7']
+            current = dict(zip(js.name, js.position))
+            pre_target = [current.get(jn, 0.0) for jn in joint_names]
+            pre_target[0] = target_bearing
+            self.get_logger().info(
+                f'[pre-rotate] joint1을 물체 방향 근처'
+                f'({math.degrees(target_bearing):.1f}\xb0)로 사전 회전...')
+            if self.use_moveit2:
+                self.moveit2.force_reset_executing_state()
+                self.moveit2.max_velocity = 0.3
+                self.moveit2.max_acceleration = 0.3
+                self.moveit2.pipeline_id = ''
+                self.moveit2.planner_id = ''
+                self.moveit2.move_to_configuration(pre_target)
+                time.sleep(0.5)
+                deadline = time.time() + MOVE_TIMEOUT
+                while time.time() < deadline:
+                    if (not self.moveit2._MoveIt2__is_motion_requested and
+                            not self.moveit2._MoveIt2__is_executing):
+                        break
+                    time.sleep(0.1)
+                # [2026-08 수정, 코드리뷰 발견] 이전엔 motion_suceeded를
+                # 확인 안 하고 무조건 approach로 넘어갔음 -- pre-rotate가
+                # 조용히 실패해도 원인 불명의 "approach가 왜 이렇게 크게
+                # 도나"로만 보였음. 하드게이트(중단)는 걸지 않음 --
+                # pre-rotate는 순수 최적화라 실패해도 approach 자체의
+                # 재시도/OMPL 폴백이 이어받을 수 있음(handoff 6절 원칙).
+                if not self.moveit2.motion_suceeded:
+                    self.get_logger().warn(
+                        '[pre-rotate] 이동 실패/중단 (motion_suceeded=False) -- '
+                        '사전회전 안 된 자세에서 approach 시작함. '
+                        'approach 자체의 재시도/OMPL 폴백에 맡기고 계속 진행.')
+            else:
+                self._move_joints_real_wait(pre_target)
+        else:
+            self.get_logger().warn('[pre-rotate] latest_joint_state_sim=None, 사전 회전 스킵')
+        self.get_logger().info(
+            f'1/6: 접근 (approach) | {offset_desc}')
+        if not is_side:
+            _approach_angle_deg = 0.0
+            quat = self._top_down_quat_for(pos, _approach_angle_deg)
+            # [2026-07 수정] yaw tolerance=3.14(완전 자유)가 너무
+            # 넓어서, IK가 gripper_flange와 link6이 충돌하는 극단적인
+            # yaw 해를 고르는 경우가 실측 확인됨. 1.6(±91.7도)으로
+            # 좁혀 자기충돌 유발 여지를 줄인다.
+            approach_tol_ori = (TOL_ORI_TIGHT, TOL_ORI_TIGHT, 1.6)
+            backend = 'sim(pitch180)' if self.use_moveit2 else 'real(pitch90)'
+            self.get_logger().info(
+                f'[top:{backend}] approach는 yaw 자유(위치만 정렬) -> '
+                f'quat={[round(v,3) for v in quat]}')
+            ok = self._move(px, py, approach_z, quat, tol_ori=approach_tol_ori, planner_chain=['PTP', 'LIN'])
+        else:
+            ok = self._move(px, py, approach_z, quat, tol_ori=TOL_ORI_LOOSE, planner_chain=['PTP', 'LIN'])
+        if not ok:
+            raise RuntimeError('approach 이동 실패 (재시도 초과)')
+        self.get_logger().info('2/6: 그리퍼 열기')
+        self._gripper(SIM_GRIPPER_OPEN, GRIPPER_OPEN)
+        time.sleep(GRIPPER_DELAY)
+        _current_top_angle_deg = None  # side 그립이면 None 유지 (align 단계 자체가 없음)
+        if not is_side:
+            if skip_reacquire:
+                angle_deg_refined = angle_deg
+                self.get_logger().info(
+                    f'[override] align 각도 재조회 스킵, override 값 사용: {angle_deg_refined}\xb0')
+            else:
+                angle_deg_refined = None
+                for _retry in range(3):
+                    _, angle_deg_refined = self._find_object_with_angle(label)
+                    if angle_deg_refined is not None:
+                        break
+                    time.sleep(0.3)
+            if angle_deg_refined is not None:
+                best_deg, quat = self._pick_best_yaw_candidate(
+                    pos, angle_deg_refined, ik_check_z=approach_z)
+                self.get_logger().info(
+                    f'[top] 3/6: 정렬(align) 재조회각도={angle_deg_refined}\xb0 -> '
+                    f'선택각도={best_deg:.1f}\xb0 quat={[round(v,3) for v in quat]}')
+                ok = self._move(px, py, approach_z, quat, tol_ori=TOL_ORI_LOOSE, planner_chain=['PTP', 'LIN'])
+                if not ok:
+                    raise RuntimeError('align 이동 실패 (재시도 초과)')
+                _current_top_angle_deg = best_deg
+            else:
+                self.get_logger().warn('[top] 각도 재조회 실패, yaw=0 유지')
+                _current_top_angle_deg = _approach_angle_deg
+            time.sleep(0.3)
+            try:
+                _refreshed_pos = pos if skip_reacquire else \
+                    self._find_object_with_angle(label)[0]
+                _cam_tf = self.tf_buffer.lookup_transform(
+                    'base_link', 'camera_color_optical_frame',
+                    rclpy.time.Time(), timeout=RclpyDuration(seconds=0.2))
+                _cq = _cam_tf.transform.rotation
+                _cam_yaw = math.degrees(math.atan2(
+                    2*(_cq.w*_cq.z + _cq.x*_cq.y), 1 - 2*(_cq.y*_cq.y + _cq.z*_cq.z)))
+                _p = _refreshed_pos if _refreshed_pos is not None else pos
+                _dist = math.hypot(_p.get('x', 0.0), _p.get('y', 0.0))
+                _bearing = math.degrees(math.atan2(_p.get('y', 0.0), _p.get('x', 0.0)))
+                self.get_logger().info(
+                    f'[calib_debug] align완료후 cam_yaw={_cam_yaw:.1f} | '
+                    f'obj_pos=({_p.get("x",0):.3f},{_p.get("y",0):.3f},{_p.get("z",0):.3f}) | '
+                    f'obj_dist={_dist:.3f}m obj_bearing={_bearing:.1f} | '
+                    f'rel_bearing={_bearing - _cam_yaw:.1f}')
+            except Exception as e:
+                self.get_logger().warn(f'[calib_debug] align완료후 tf 조회 실패: {e}')
+            if _refreshed_pos is not None:
+                px = _refreshed_pos.get('x', px)
+                py = _refreshed_pos.get('y', py)
+                self.get_logger().info(
+                    f'[top] descend 목표 위치 갱신: ({px:.4f}, {py:.4f})')
+                # [2026-08 수정, 코드리뷰 발견] real 백엔드는
+                # top_down_angle_quat(x,y,angle_deg)가 yaw=atan2(y,x)로
+                # 위치에 의존하는데, 위에서 px,py만 갱신하고 quat은
+                # 갱신 전 pos 기준 값이 그대로 남아있었음. sim은 quat이
+                # 위치와 무관해 문제가 안 드러났지만, real에서는 descend
+                # 커맨드의 위치와 orientation이 서로 다른 시점 값으로
+                # 섞여서 나가는 버그였음. 갱신된 위치로 quat도 재계산.
+                quat = self._top_down_quat_for(
+                    {'x': px, 'y': py, 'z': _refreshed_pos.get('z', pos.get('z', 0.0))},
+                    _current_top_angle_deg)
+
+        if is_side:
+            self.get_logger().info('4/6: 내려가기 (descend) — side는 approach와 동일 높이, 재확인만')
+        else:
+            self.get_logger().info('4/6: 내려가기 (descend) — tight tolerance (+ 실패 시 완화 폴백)')
+        if not is_side:
+            ok = self._move_descend_with_tilt_fallback(px, py, descend_z, quat)
+        else:
+            ok = self._move(px, py, descend_z, quat, tol_ori=TOL_ORI_LOOSE, planner_chain=['LIN'])
+        if not ok:
+            raise RuntimeError('descend 이동 실패 (재시도 초과, tolerance 완화 폴백까지 실패)')
+        self.get_logger().info('5/6: 그리퍼 닫기')
+        self._gripper(SIM_GRIPPER_CLOSE, GRIPPER_CLOSE)
+        time.sleep(GRIPPER_DELAY)
+        self.get_logger().info('6/6: 들어올리기 (lift) — joint-space (빙글 방지)')
+        if not is_side:
+            lift_quat = quat
+        else:
+            lift_quat = quat
+        lift_candidates = [lift_z, pos['z'] + 0.06 + (0 if is_side else TOP_TCP_OFFSET),
+               pos['z'] + 0.03 + (0 if is_side else TOP_TCP_OFFSET)]
+        ok = False
+        for i, lz in enumerate(lift_candidates):
+            if i > 0:
+                self.get_logger().warn(
+                    f'  lift 높이 낮춰서 재시도: {lz:.3f}m (원래 목표 {lift_z:.3f}m)')
+            ok = self._move(px, py, lz, lift_quat, tol_ori=TOL_ORI_TIGHT, planner_chain=['LIN'])
+            if ok:
+                break
+        if not ok:
+            raise RuntimeError('lift 이동 실패 (모든 높이 재시도 초과)')
+        return _current_top_angle_deg
     def _pick_sequence(self, pos, quat, is_side=False, label='', skip_reacquire=False, angle_deg=0.0):
         try:
-            if is_side:
-                ok, reason = side_reachability_check(pos)
-                if not ok:
-                    self.get_logger().warn(f'PICK 거부: {reason}')
-                    self._publish_result('rejected', reason)
-                    return
-            if is_side:
-                dx, dy = pos['x'], pos['y']
-                dist = math.sqrt(dx*dx + dy*dy) or 1.0
-                px = dx - (dx / dist) * SIDE_TCP_OFFSET
-                py = dy - (dy / dist) * SIDE_TCP_OFFSET
-                offset_desc = f'side(TCP오프셋 {SIDE_TCP_OFFSET}m 적용)'
-            else:
-                px = pos['x']
-                py = pos['y']
-                offset_desc = 'top(z)'
-            if is_side:
-                approach_z = pos['z']
-                descend_z  = pos['z']
-                lift_z     = pos['z'] + LIFT_Z      # top과 동일한 상승폭
-            else:
-                pz = pos['z']
-                approach_z = pz + APPROACH_Z + TOP_TCP_OFFSET
-                descend_z  = pz + DESCEND_Z + TOP_TCP_OFFSET
-                descend_z  = max(descend_z, DESCEND_MIN_FLANGE_Z)
-                lift_z     = pz + LIFT_Z + TOP_TCP_OFFSET
-            # [2026-07 추가] approach 진입 전 joint1만 먼저 물체 방향으로
-            # 회전. 스캔이 끝난 자세(예: joint1=145°)에서 바로 approach를
-            # 시도하면, 물체 방향까지의 큰 차이를 approach의 나머지
-            # 조인트(top-down 자세 유지)와 동시에 풀어야 해서 IK가 훨씬
-            # 어려워지는 것이 실측+로그 분석으로 확인됨. joint1만 먼저
-            # 물체 쪽으로 돌려 "쉬운 시작 상태"를 만든다.
-            # BEARING_OFFSET_DEG: joint1 명령각과 실측 물체 방향(atan2)
-            # 사이 오프셋. 스캔 실측 2개 지점(-155°→46°, 145°→-39°)의
-            # 평균 약 188°(범위 176~201°)로 확인됨. 카메라가 팔 끝에
-            # top-down으로 장착되어 "정면"의 의미가 base 기준과 반대에
-            # 가깝게 어긋나는 것으로 추정 — 완벽한 정렬이 목적이 아니라
-            # IK 부담을 줄이는 사전 회전이므로 이 정도 오차는 허용.
-            target_bearing = math.atan2(pos['y'], pos['x']) - math.radians(BEARING_OFFSET_DEG)
-            target_bearing = math.atan2(math.sin(target_bearing), math.cos(target_bearing))
-            js = self.latest_joint_state_sim
-            if js is not None:
-                joint_names = ['joint1','joint2','joint3','joint4','joint5','joint6','joint7']
-                current = dict(zip(js.name, js.position))
-                pre_target = [current.get(jn, 0.0) for jn in joint_names]
-                pre_target[0] = target_bearing
-                self.get_logger().info(
-                    f'[pre-rotate] joint1을 물체 방향 근처'
-                    f'({math.degrees(target_bearing):.1f}\xb0)로 사전 회전...')
-                if self.use_moveit2:
-                    self.moveit2.force_reset_executing_state()
-                    self.moveit2.max_velocity = 0.3
-                    self.moveit2.max_acceleration = 0.3
-                    self.moveit2.pipeline_id = ''
-                    self.moveit2.planner_id = ''
-                    self.moveit2.move_to_configuration(pre_target)
-                    time.sleep(0.5)
-                    deadline = time.time() + MOVE_TIMEOUT
-                    while time.time() < deadline:
-                        if (not self.moveit2._MoveIt2__is_motion_requested and
-                                not self.moveit2._MoveIt2__is_executing):
-                            break
-                        time.sleep(0.1)
-                    # [2026-08 수정, 코드리뷰 발견] 이전엔 motion_suceeded를
-                    # 확인 안 하고 무조건 approach로 넘어갔음 -- pre-rotate가
-                    # 조용히 실패해도 원인 불명의 "approach가 왜 이렇게 크게
-                    # 도나"로만 보였음. 하드게이트(중단)는 걸지 않음 --
-                    # pre-rotate는 순수 최적화라 실패해도 approach 자체의
-                    # 재시도/OMPL 폴백이 이어받을 수 있음(handoff 6절 원칙).
-                    if not self.moveit2.motion_suceeded:
-                        self.get_logger().warn(
-                            '[pre-rotate] 이동 실패/중단 (motion_suceeded=False) -- '
-                            '사전회전 안 된 자세에서 approach 시작함. '
-                            'approach 자체의 재시도/OMPL 폴백에 맡기고 계속 진행.')
-                else:
-                    self._move_joints_real_wait(pre_target)
-            else:
-                self.get_logger().warn('[pre-rotate] latest_joint_state_sim=None, 사전 회전 스킵')
-            self.get_logger().info(
-                f'1/6: 접근 (approach) | {offset_desc}')
-            if not is_side:
-                _approach_angle_deg = 0.0
-                quat = self._top_down_quat_for(pos, _approach_angle_deg)
-                # [2026-07 수정] yaw tolerance=3.14(완전 자유)가 너무
-                # 넓어서, IK가 gripper_flange와 link6이 충돌하는 극단적인
-                # yaw 해를 고르는 경우가 실측 확인됨. 1.6(±91.7도)으로
-                # 좁혀 자기충돌 유발 여지를 줄인다.
-                approach_tol_ori = (TOL_ORI_TIGHT, TOL_ORI_TIGHT, 1.6)
-                backend = 'sim(pitch180)' if self.use_moveit2 else 'real(pitch90)'
-                self.get_logger().info(
-                    f'[top:{backend}] approach는 yaw 자유(위치만 정렬) -> '
-                    f'quat={[round(v,3) for v in quat]}')
-                ok = self._move(px, py, approach_z, quat, tol_ori=approach_tol_ori, planner_chain=['PTP', 'LIN'])
-            else:
-                ok = self._move(px, py, approach_z, quat, tol_ori=TOL_ORI_LOOSE, planner_chain=['PTP', 'LIN'])
-            if not ok:
-                raise RuntimeError('approach 이동 실패 (재시도 초과)')
-            self.get_logger().info('2/6: 그리퍼 열기')
-            self._gripper(SIM_GRIPPER_OPEN, GRIPPER_OPEN)
-            time.sleep(GRIPPER_DELAY)
-            if not is_side:
-                if skip_reacquire:
-                    angle_deg_refined = angle_deg
-                    self.get_logger().info(
-                        f'[override] align 각도 재조회 스킵, override 값 사용: {angle_deg_refined}\xb0')
-                else:
-                    angle_deg_refined = None
-                    for _retry in range(3):
-                        _, angle_deg_refined = self._find_object_with_angle(label)
-                        if angle_deg_refined is not None:
-                            break
-                        time.sleep(0.3)
-                if angle_deg_refined is not None:
-                    best_deg, quat = self._pick_best_yaw_candidate(
-                        pos, angle_deg_refined, ik_check_z=approach_z)
-                    self.get_logger().info(
-                        f'[top] 3/6: 정렬(align) 재조회각도={angle_deg_refined}\xb0 -> '
-                        f'선택각도={best_deg:.1f}\xb0 quat={[round(v,3) for v in quat]}')
-                    ok = self._move(px, py, approach_z, quat, tol_ori=TOL_ORI_LOOSE, planner_chain=['PTP', 'LIN'])
-                    if not ok:
-                        raise RuntimeError('align 이동 실패 (재시도 초과)')
-                    _current_top_angle_deg = best_deg
-                else:
-                    self.get_logger().warn('[top] 각도 재조회 실패, yaw=0 유지')
-                    _current_top_angle_deg = _approach_angle_deg
-                time.sleep(0.3)
-                try:
-                    _refreshed_pos = pos if skip_reacquire else \
-                        self._find_object_with_angle(label)[0]
-                    _cam_tf = self.tf_buffer.lookup_transform(
-                        'base_link', 'camera_color_optical_frame',
-                        rclpy.time.Time(), timeout=RclpyDuration(seconds=0.2))
-                    _cq = _cam_tf.transform.rotation
-                    _cam_yaw = math.degrees(math.atan2(
-                        2*(_cq.w*_cq.z + _cq.x*_cq.y), 1 - 2*(_cq.y*_cq.y + _cq.z*_cq.z)))
-                    _p = _refreshed_pos if _refreshed_pos is not None else pos
-                    _dist = math.hypot(_p.get('x', 0.0), _p.get('y', 0.0))
-                    _bearing = math.degrees(math.atan2(_p.get('y', 0.0), _p.get('x', 0.0)))
-                    self.get_logger().info(
-                        f'[calib_debug] align완료후 cam_yaw={_cam_yaw:.1f} | '
-                        f'obj_pos=({_p.get("x",0):.3f},{_p.get("y",0):.3f},{_p.get("z",0):.3f}) | '
-                        f'obj_dist={_dist:.3f}m obj_bearing={_bearing:.1f} | '
-                        f'rel_bearing={_bearing - _cam_yaw:.1f}')
-                except Exception as e:
-                    self.get_logger().warn(f'[calib_debug] align완료후 tf 조회 실패: {e}')
-                if _refreshed_pos is not None:
-                    px = _refreshed_pos.get('x', px)
-                    py = _refreshed_pos.get('y', py)
-                    self.get_logger().info(
-                        f'[top] descend 목표 위치 갱신: ({px:.4f}, {py:.4f})')
-                    # [2026-08 수정, 코드리뷰 발견] real 백엔드는
-                    # top_down_angle_quat(x,y,angle_deg)가 yaw=atan2(y,x)로
-                    # 위치에 의존하는데, 위에서 px,py만 갱신하고 quat은
-                    # 갱신 전 pos 기준 값이 그대로 남아있었음. sim은 quat이
-                    # 위치와 무관해 문제가 안 드러났지만, real에서는 descend
-                    # 커맨드의 위치와 orientation이 서로 다른 시점 값으로
-                    # 섞여서 나가는 버그였음. 갱신된 위치로 quat도 재계산.
-                    quat = self._top_down_quat_for(
-                        {'x': px, 'y': py, 'z': _refreshed_pos.get('z', pos.get('z', 0.0))},
-                        _current_top_angle_deg)
-            
-            if is_side:
-                self.get_logger().info('4/6: 내려가기 (descend) — side는 approach와 동일 높이, 재확인만')
-            else:
-                self.get_logger().info('4/6: 내려가기 (descend) — tight tolerance (+ 실패 시 완화 폴백)')
-            if not is_side:
-                ok = self._move_descend_with_tilt_fallback(px, py, descend_z, quat)
-            else:
-                ok = self._move(px, py, descend_z, quat, tol_ori=TOL_ORI_LOOSE, planner_chain=['LIN'])
-            if not ok:
-                raise RuntimeError('descend 이동 실패 (재시도 초과, tolerance 완화 폴백까지 실패)')
-            self.get_logger().info('5/6: 그리퍼 닫기')
-            self._gripper(SIM_GRIPPER_CLOSE, GRIPPER_CLOSE)
-            time.sleep(GRIPPER_DELAY)
-            self.get_logger().info('6/6: 들어올리기 (lift) — joint-space (빙글 방지)')
-            if not is_side:
-                lift_quat = quat
-            else:
-                lift_quat = quat
-            lift_candidates = [lift_z, pos['z'] + 0.06 + (0 if is_side else TOP_TCP_OFFSET),
-                   pos['z'] + 0.03 + (0 if is_side else TOP_TCP_OFFSET)]
-            ok = False
-            for i, lz in enumerate(lift_candidates):
-                if i > 0:
-                    self.get_logger().warn(
-                        f'  lift 높이 낮춰서 재시도: {lz:.3f}m (원래 목표 {lift_z:.3f}m)')
-                ok = self._move(px, py, lz, lift_quat, tol_ori=TOL_ORI_TIGHT, planner_chain=['LIN'])
-                if ok:
-                    break
-            if not ok:
-                raise RuntimeError('lift 이동 실패 (모든 높이 재시도 초과)')
+            align_angle_deg = self._do_pick(pos, quat, is_side, label, skip_reacquire, angle_deg)
             self.get_logger().info('✅ PICK 완료')
             self._publish_result(
                 'success', 'pick_complete',
-                extra={'remaining_scanned_boxes': self._scanned_boxes})
+                extra={'remaining_scanned_boxes': self._scanned_boxes,
+                       'align_angle_deg': align_angle_deg})
+        except SequenceRejected as e:
+            self._publish_result('rejected', str(e))
         except Exception as e:
             self.get_logger().error(f'PICK 오류: {e}')
             self._publish_result('failed', str(e))
         finally:
             with self.lock:
                 self.busy = False
-    def _place_sequence(self, pos, quat, is_side=False):
+    def _do_place(self, pos, quat, is_side=False) -> dict:
         """[2026-08 재설계] 실패 시 좌표를 자동으로 시프트해가며 재시도한다.
         근거: nero_robot_place_reachability memory (2026-07-30~08-03 실측).
           - approach/descend 실패는 특정 (x,y) 국소 도달불가 영역(singularity)일
@@ -739,61 +795,65 @@ class PlanningNode(Node):
         직접 판단해서 순차 호출하던 것 -- 서버가 대신 처리하므로 Claude는
         place_object를 한 번만 호출하면 된다 (토큰/지연시간 절감).
         """
-        try:
-            # [신설] 폐루프 검증용 -- place 시작 전(그리퍼가 아직 아무것도
-            # 안 놓은 상태) 장면을 스냅샷. 쌓기 시나리오에서 베이스 박스를
-            # "새로 놓인 물체"로 착각하지 않으려면 이 스냅샷이 필수다
-            # (placement_verification.py 모듈 docstring "쌓기 시 오탐 방지"
-            # 참고). approach/descend 재시도 중에는 장면이 안 바뀌므로
-            # 후보 좌표를 여러 번 시도해도 이 스냅샷 하나를 계속 재사용한다.
-            before_objects = list(self.latest_objects)
-            if is_side:
-                # side는 좌표 시프트 재시도 대상이 아님(원본과 동일) --
-                # 도달불가 판정은 여기서 즉시 'rejected'로 보고하고 종료.
-                ok, reason = side_reachability_check(pos)
-                if not ok:
-                    self.get_logger().warn(f'PLACE 거부: {reason}')
-                    self._publish_result('rejected', reason)
-                    return
-            candidates = [dict(pos)]
-            if not is_side:
-                shifted_plus = dict(pos); shifted_plus['y'] = pos['y'] + 0.05
-                shifted_minus = dict(pos); shifted_minus['y'] = pos['y'] - 0.05
-                candidates += [shifted_plus, shifted_minus]
-                if pos['z'] > 0.20:
-                    for dz in (0.05, 0.10, 0.15):
-                        lowered = dict(pos); lowered['z'] = pos['z'] - dz
-                        candidates.append(lowered)
+        # [신설] 폐루프 검증용 -- place 시작 전(그리퍼가 아직 아무것도
+        # 안 놓은 상태) 장면을 스냅샷. 쌓기 시나리오에서 베이스 박스를
+        # "새로 놓인 물체"로 착각하지 않으려면 이 스냅샷이 필수다
+        # (placement_verification.py 모듈 docstring "쌓기 시 오탐 방지"
+        # 참고). approach/descend 재시도 중에는 장면이 안 바뀌므로
+        # 후보 좌표를 여러 번 시도해도 이 스냅샷 하나를 계속 재사용한다.
+        before_objects = list(self.latest_objects)
+        if is_side:
+            # side는 좌표 시프트 재시도 대상이 아님(원본과 동일) --
+            # 도달불가 판정은 여기서 즉시 'rejected'로 보고하고 종료.
+            ok, reason = side_reachability_check(pos)
+            if not ok:
+                self.get_logger().warn(f'PLACE 거부: {reason}')
+                raise SequenceRejected(reason)
+        candidates = [dict(pos)]
+        if not is_side:
+            shifted_plus = dict(pos); shifted_plus['y'] = pos['y'] + 0.05
+            shifted_minus = dict(pos); shifted_minus['y'] = pos['y'] - 0.05
+            candidates += [shifted_plus, shifted_minus]
+            if pos['z'] > 0.20:
+                for dz in (0.05, 0.10, 0.15):
+                    lowered = dict(pos); lowered['z'] = pos['z'] - dz
+                    candidates.append(lowered)
 
-            last_err = None
-            for i, cand in enumerate(candidates):
-                try:
-                    verification = self._try_place_at(cand, quat, is_side, before_objects)
-                    if i > 0:
-                        self.get_logger().warn(
-                            f'  PLACE: 원래 목표 {pos} 실패 -> 대체 좌표 {cand}로 성공')
-                    self.get_logger().info('✅ PLACE 완료')
-                    # [신설] verified=False여도 여기서 재시도하지 않는다 --
-                    # 그리퍼는 이미 물체를 놓고 물러난 상태라, 좌표를 바꿔서
-                    # 다시 움직여봐야 애초에 잡고 있는 물체가 없어 의미가
-                    # 없다. 검증 결과는 그대로 Claude에게 보고해서 판단을
-                    # 맡긴다 (재감지 후 다시 pick&place 하거나, 사용자에게
-                    # 알리거나).
-                    self._publish_result(
-                        'success', 'place_complete',
-                        extra={
-                            'actual_place_pos': cand,
-                            'placement_verified': verification['verified'],
-                            'verification_reason': verification['reason'],
-                        })
-                    return
-                except RuntimeError as e:
-                    last_err = e
+        last_err = None
+        for i, cand in enumerate(candidates):
+            try:
+                verification = self._try_place_at(cand, quat, is_side, before_objects)
+                if i > 0:
                     self.get_logger().warn(
-                        f'  PLACE 후보 {i+1}/{len(candidates)} {cand} 실패: {e}')
-                    continue
-            self.get_logger().error(f'PLACE 오류: 모든 후보 좌표 소진 ({last_err})')
-            self._publish_result('failed', f'모든 대체 좌표 실패: {last_err}')
+                        f'  PLACE: 원래 목표 {pos} 실패 -> 대체 좌표 {cand}로 성공')
+                self.get_logger().info('✅ PLACE 완료')
+                # [신설] verified=False여도 여기서 재시도하지 않는다 --
+                # 그리퍼는 이미 물체를 놓고 물러난 상태라, 좌표를 바꿔서
+                # 다시 움직여봐야 애초에 잡고 있는 물체가 없어 의미가
+                # 없다. 검증 결과는 그대로 Claude에게 보고해서 판단을
+                # 맡긴다 (재감지 후 다시 pick&place 하거나, 사용자에게
+                # 알리거나).
+                return {
+                    'actual_place_pos': cand,
+                    'placement_verified': verification['verified'],
+                    'verification_reason': verification['reason'],
+                }
+            except RuntimeError as e:
+                last_err = e
+                self.get_logger().warn(
+                    f'  PLACE 후보 {i+1}/{len(candidates)} {cand} 실패: {e}')
+                continue
+        self.get_logger().error(f'PLACE 오류: 모든 후보 좌표 소진 ({last_err})')
+        raise RuntimeError(f'모든 대체 좌표 실패: {last_err}')
+
+    def _place_sequence(self, pos, quat, is_side=False):
+        try:
+            result_extra = self._do_place(pos, quat, is_side)
+            self._publish_result('success', 'place_complete', extra=result_extra)
+        except SequenceRejected as e:
+            self._publish_result('rejected', str(e))
+        except RuntimeError as e:
+            self._publish_result('failed', str(e))
         finally:
             with self.lock:
                 self.busy = False
@@ -965,6 +1025,88 @@ class PlanningNode(Node):
                     '  [verify] 재확인 자세 이동 실패, 1차 검증 결과 그대로 유지')
         return verification
 
+    def _stack_sequence(self, target_label, box_refs, base_pos, box_height_m, grasp_dir,
+                         fallback_pool=None, allow_reorder=False):
+        """box_refs를 순서대로(맨 아래부터) base_pos 위치에 쌓는다.
+        box_refs의 각 원소는 self._scanned_boxes 안의 실제 dict 레퍼런스 --
+        stack_boxes 호출 시작 시점에 한 번만 인덱스를 해석해뒀으므로(box_index
+        혼동 방지 원칙과 동일한 이유), 이후로는 인덱스 재조회 없이 이 레퍼런스로
+        큐에서 제거한다.
+
+        [2026-08 재작성] 실제 tier 진행/후보 재선택 로직은 task_planner.
+        run_stack_plan()(ROS 비의존 순수 함수)으로 이관됨. 이 메서드는
+        _do_pick/_do_place/큐 제거를 콜백으로 주입하고, 반환된 결과를
+        로그로 남긴 뒤 그대로 퍼블리시하는 얇은 어댑터로만 남는다.
+        pick 실패 시 fallback_pool에서 대체 후보를 시도할 수 있지만
+        (allow_reorder=True일 때만), place 실패 또는 placement_verified
+        =False에서의 무조건 중단은 이관 전과 완전히 동일하다.
+        """
+        fallback_pool = fallback_pool or []
+        try:
+            def _remove_from_queue(box):
+                try:
+                    self._scanned_boxes.remove(box)
+                except ValueError:
+                    pass
+
+            result = run_stack_plan(
+                requested_boxes=box_refs,
+                fallback_pool=fallback_pool,
+                target_label=target_label,
+                grasp_dir=grasp_dir,
+                base_pos=base_pos,
+                box_height_m=box_height_m,
+                pick_fn=lambda pos, quat, is_side, label, skip_reacquire, angle_deg:
+                    self._do_pick(pos, quat, is_side, label, skip_reacquire, angle_deg),
+                place_fn=lambda pos, quat, is_side: self._do_place(pos, quat, is_side),
+                remove_fn=_remove_from_queue,
+                min_reach_r_m=MIN_REACH_R_M,
+                boundary_r_m=BOUNDARY_R_M,
+                allow_reorder=allow_reorder,
+            )
+
+            tier_results = result['tiers']
+            for tr in tier_results:
+                tag = f"tier {tr['tier']}/{len(box_refs)-1}"
+                if tr['stage'] == 'pick' and tr['status'] != 'success':
+                    log_fn = self.get_logger().warn if tr['status'] == 'rejected' else self.get_logger().error
+                    log_fn(f"[stack] {tag} pick {tr['status']}: {tr['reason']}")
+                elif tr['stage'] == 'place' and tr['status'] != 'success':
+                    log_fn = self.get_logger().warn if tr['status'] == 'rejected' else self.get_logger().error
+                    log_fn(f"[stack] {tag} place {tr['status']}: {tr['reason']}")
+                else:
+                    sub_note = ''
+                    if tr.get('substituted'):
+                        bu = tr.get('box_used') or {}
+                        sub_note = (f" (대체됨 -> "
+                                    f"({bu.get('x', 0):.3f},{bu.get('y', 0):.3f},{bu.get('z', 0):.3f}))")
+                    self.get_logger().info(f"[stack] {tag} place 성공{sub_note}")
+                    if tr.get('placement_verified') is False:
+                        self.get_logger().warn(
+                            f"[stack] {tag} placement_verified=False -- "
+                            f"다음 tier를 이 위에 쌓는 건 위험해서 여기서 중단.")
+
+            for sc in result['skipped_candidates']:
+                b = sc.get('box') or {}
+                prefilter_note = ' [사전필터]' if sc.get('prefiltered') else ''
+                self.get_logger().info(
+                    f"[stack] tier {sc['tier']} 후보 제외{prefilter_note}: "
+                    f"({b.get('x', 0):.3f},{b.get('y', 0):.3f},{b.get('z', 0):.3f}) -- {sc['reason']}")
+
+            overall = result['status']
+            self.get_logger().info(
+                f'✅ STACK 종료 ({overall}, {len(tier_results)}/{len(box_refs)} tier, '
+                f'backtrack_attempts_used={result["backtrack_attempts_used"]})')
+            self._publish_result(
+                overall, 'stack_complete' if overall == 'success' else 'stack_partial',
+                extra={'tiers': tier_results,
+                       'skipped_candidates': result['skipped_candidates'],
+                       'backtrack_attempts_used': result['backtrack_attempts_used'],
+                       'remaining_scanned_boxes': self._scanned_boxes})
+        finally:
+            with self.lock:
+                self.busy = False
+
     def _move_sequence(self, pos, quat):
         try:
             self.get_logger().info(
@@ -1131,7 +1273,12 @@ class PlanningNode(Node):
             key_map = {'j1':'joint1','j2':'joint2','j3':'joint3','j4':'joint4',
                        'j5':'joint5','j6':'joint6','j7':'joint7'}
             try:
-                js_msg = self.latest_joint_state
+                # [2026-08 수정] self.latest_joint_state는 실물 전용
+                # /feedback/joint_states에서만 채워져 sim에서는 항상 None ->
+                # 아래 except로 떨어져 미지정 관절이 전부 0으로 리셋되는 버그
+                # 실측 확인됨. 코드베이스 다른 곳과 동일하게 latest_joint_state_sim
+                # (/joint_states, 실물에서도 relay로 채워짐) 사용으로 통일.
+                js_msg = self.latest_joint_state_sim
                 name_to_pos = dict(zip(js_msg.name, js_msg.position))
                 positions = [float(name_to_pos.get(jn, 0.0)) for jn in joint_names]
             except Exception:
