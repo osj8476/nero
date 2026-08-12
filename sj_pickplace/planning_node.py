@@ -675,6 +675,12 @@ class PlanningNode(Node):
             current = dict(zip(js.name, js.position))
             pre_target = [current.get(jn, 0.0) for jn in joint_names]
             pre_target[0] = target_bearing
+            # home(all-zero)에서 joint1만 돌리면 특이점(SINGULARITY_POINT) 발생.
+            # 팔이 거의 뻗은 상태(joint2≈0, joint4≈0)이면 전형적 작업 자세로
+            # 미리 구부려 특이점을 회피한다.
+            if abs(pre_target[1]) < 0.15 and abs(pre_target[3]) < 0.15:
+                pre_target[1] = 0.6   # ~34°
+                pre_target[3] = 1.0   # ~57°
             self.get_logger().info(
                 f'[pre-rotate] joint1을 물체 방향 근처'
                 f'({math.degrees(target_bearing):.1f}\xb0)로 사전 회전...')
@@ -1267,6 +1273,37 @@ class PlanningNode(Node):
 
     def _move_sequence(self, pos, quat):
         try:
+            target_bearing = math.atan2(pos['y'], pos['x']) - math.radians(BEARING_OFFSET_DEG)
+            target_bearing = math.atan2(math.sin(target_bearing), math.cos(target_bearing))
+            js = self.latest_joint_state_sim
+            if js is not None:
+                joint_names = ['joint1','joint2','joint3','joint4','joint5','joint6','joint7']
+                current = dict(zip(js.name, js.position))
+                pre_target = [current.get(jn, 0.0) for jn in joint_names]
+                pre_target[0] = target_bearing
+                if abs(pre_target[1]) < 0.15 and abs(pre_target[3]) < 0.15:
+                    pre_target[1] = 0.6
+                    pre_target[3] = 1.0
+                self.get_logger().info(
+                    f'[move pre-rotate] joint1 → {math.degrees(target_bearing):.1f}°')
+                if self.use_moveit2:
+                    self.moveit2.force_reset_executing_state()
+                    self.moveit2.max_velocity = 0.3
+                    self.moveit2.max_acceleration = 0.3
+                    self.moveit2.pipeline_id = ''
+                    self.moveit2.planner_id = ''
+                    self.moveit2.move_to_configuration(pre_target)
+                    time.sleep(0.5)
+                    deadline = time.time() + MOVE_TIMEOUT
+                    while time.time() < deadline:
+                        if (not self.moveit2._MoveIt2__is_motion_requested and
+                                not self.moveit2._MoveIt2__is_executing):
+                            break
+                        time.sleep(0.1)
+                else:
+                    self._move_joints_real_wait(pre_target)
+            else:
+                self.get_logger().warn('[move pre-rotate] joint_state 없음, 사전 회전 스킵')
             self.get_logger().info(
                 f"1/1: 이동 → ({pos['x']:.3f}, {pos['y']:.3f}, {pos['z']:.3f})")
             ok = self._move(pos['x'], pos['y'], pos['z'], quat,
