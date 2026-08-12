@@ -1,2 +1,6 @@
 __pycache__/
 tools/api.txt
+build/
+install/
+log/
+.thumbs/
