@@ -98,7 +98,7 @@ ARM_STATUS_NAMES = {
 }
 MOTION_STATUS_NAMES = {0: "SUCCESS", 1: "FAILED", 255: "UNKNOWN"}
 # 실물 모드에서 _move()가 도착 확인을 기다리는 최대 시간(초)
-REAL_MOVE_TIMEOUT = 8.0
+REAL_MOVE_TIMEOUT = 120.0
 REAL_MOVE_POLL_SEC = 0.1
 REAL_MOVE_SETTLE_SEC = 0.3  # 퍼블리시 직후 arm_status가 갱신되기까지 최소 대기
 # ── 안전장치: 조인트 급회전("빙글 도는 문제") 감지 ────────────────────────────
@@ -203,12 +203,15 @@ class PlanningNode(Node):
             JointState, '/joint_states',
             lambda msg: setattr(self, 'latest_joint_state_sim', msg), 10)
         self.latest_arm_status = None
+        self.latest_arm_status_recv_time = 0.0
         self._arm_status_available = False
         if HAVE_ARM_STATUS_MSG:
             try:
+                def _on_arm_status(msg):
+                    self.latest_arm_status = msg
+                    self.latest_arm_status_recv_time = time.time()
                 self.create_subscription(
-                    AgxArmStatus, '/feedback/arm_status',
-                    lambda msg: setattr(self, 'latest_arm_status', msg), 10)
+                    AgxArmStatus, '/feedback/arm_status', _on_arm_status, 10)
                 self._arm_status_available = True
             except Exception as e:
                 self.get_logger().warn(
@@ -225,9 +228,10 @@ class PlanningNode(Node):
         self.sub_cmd = self.create_subscription(
             String, '/arm_command', self.on_command,
             qos_best_effort, callback_group=self._cb)
-        self.pub_move    = self.create_publisher(PoseStamped, '/control/move_p', qos_reliable)
+        self.pub_move    = self.create_publisher(PoseStamped, '/control/move_p',      qos_reliable)
         self.pub_gripper = self.create_publisher(JointState,  '/control/joint_states', qos_reliable)
-        self.pub_result  = self.create_publisher(String,      '/pick_result', qos_reliable)
+        self.pub_move_j  = self.create_publisher(JointState,  '/control/move_j',       qos_reliable)
+        self.pub_result  = self.create_publisher(String,      '/pick_result',           qos_reliable)
         self.moveit2 = self.moveit2_gripper = None
         if self.use_moveit2:
             from pymoveit2 import MoveIt2
@@ -619,6 +623,12 @@ class PlanningNode(Node):
             current = dict(zip(js.name, js.position))
             pre_target = [current.get(jn, 0.0) for jn in joint_names]
             pre_target[0] = target_bearing
+            # home(all-zero)에서 joint1만 돌리면 특이점(SINGULARITY_POINT) 발생.
+            # 팔이 거의 뻗은 상태(joint2≈0, joint4≈0)이면 전형적 작업 자세로
+            # 미리 구부려 특이점을 회피한다.
+            if abs(pre_target[1]) < 0.15 and abs(pre_target[3]) < 0.15:
+                pre_target[1] = 0.6   # ~34°
+                pre_target[3] = 1.0   # ~57°
             self.get_logger().info(
                 f'[pre-rotate] joint1을 물체 방향 근처'
                 f'({math.degrees(target_bearing):.1f}\xb0)로 사전 회전...')
@@ -654,18 +664,48 @@ class PlanningNode(Node):
         self.get_logger().info(
             f'1/6: 접근 (approach) | {offset_desc}')
         if not is_side:
-            _approach_angle_deg = 0.0
-            quat = self._top_down_quat_for(pos, _approach_angle_deg)
-            # [2026-07 수정] yaw tolerance=3.14(완전 자유)가 너무
-            # 넓어서, IK가 gripper_flange와 link6이 충돌하는 극단적인
-            # yaw 해를 고르는 경우가 실측 확인됨. 1.6(±91.7도)으로
-            # 좁혀 자기충돌 유발 여지를 줄인다.
             approach_tol_ori = (TOL_ORI_TIGHT, TOL_ORI_TIGHT, 1.6)
-            backend = 'sim(pitch180)' if self.use_moveit2 else 'real(pitch90)'
-            self.get_logger().info(
-                f'[top:{backend}] approach는 yaw 자유(위치만 정렬) -> '
-                f'quat={[round(v,3) for v in quat]}')
-            ok = self._move(px, py, approach_z, quat, tol_ori=approach_tol_ori, planner_chain=['PTP', 'LIN'])
+            # 실물: position_yaw 공식은 IK 안정성을 위해 유지하되,
+            # 사용자 절대각(angle_deg)을 radial 기준 상대각으로 변환해서 사용.
+            # jaw 방향 수학: euler(-angle_rel, 90°, position_yaw)의 jaw = position_yaw + angle_rel
+            # → angle_rel = angle_deg - position_yaw_deg 로 변환하면 jaw = angle_deg(절대) ✓
+            if not self.use_moveit2:
+                _position_yaw_deg = math.degrees(math.atan2(pos.get('y', 0.0), pos.get('x', 0.0)))
+                _angle_rel = (angle_deg - _position_yaw_deg) % 180.0
+                _primary = _angle_rel
+                _secondary = (_primary + 90.0) % 180.0
+                _approach_angle_cands = [_primary, _secondary]
+            else:
+                _approach_angle_cands = [angle_deg]
+            ok = False
+            quat = None
+            for _cand_deg in _approach_angle_cands:
+                _cand_quat = self._top_down_quat_for(pos, _cand_deg)
+                _backend = 'sim(pitch180)' if self.use_moveit2 else f'real(top_down angle={_cand_deg:.0f}°)'
+                self.get_logger().info(
+                    f'[top:{_backend}] approach 시도 -> '
+                    f'quat={[round(v,3) for v in _cand_quat]}')
+                ok = self._move(px, py, approach_z, _cand_quat,
+                                tol_ori=approach_tol_ori, planner_chain=['PTP', 'LIN'])
+                if ok:
+                    quat = _cand_quat
+                    _approach_angle_deg = _cand_deg
+                    break
+            # 실물: QUAT_TOP_DOWN 최후 수단
+            if not ok and not self.use_moveit2:
+                _fallback_quat = list(QUAT_TOP_DOWN)
+                self.get_logger().warn(
+                    f'[top:real] approach angle=0/90 모두 NO_SOLUTION → QUAT_TOP_DOWN 폴백 '
+                    f'(시각적 방향 부정확) quat={[round(v,3) for v in _fallback_quat]}')
+                ok = self._move(px, py, approach_z, _fallback_quat,
+                                tol_ori=approach_tol_ori, planner_chain=['PTP', 'LIN'])
+                if ok:
+                    quat = _fallback_quat
+                    _approach_angle_deg = 0.0  # QUAT_TOP_DOWN은 각도 무관; 0으로 마킹
+            # 실물 모드: IK 사전검사 불가 → approach에서 성공한 quat을 align에 그대로 전달.
+            # 이렇게 하지 않으면 _pick_best_yaw_candidate가 항상 angle=0°를 반환해
+            # approach가 angle=90°로 성공한 위치에서 align이 FAIL한다.
+            _align_quat_override = quat if (not self.use_moveit2 and ok) else None
         else:
             ok = self._move(px, py, approach_z, quat, tol_ori=TOL_ORI_LOOSE, planner_chain=['PTP', 'LIN'])
         if not ok:
@@ -687,14 +727,26 @@ class PlanningNode(Node):
                         break
                     time.sleep(0.3)
             if angle_deg_refined is not None:
-                best_deg, quat = self._pick_best_yaw_candidate(
-                    pos, angle_deg_refined, ik_check_z=approach_z)
-                self.get_logger().info(
-                    f'[top] 3/6: 정렬(align) 재조회각도={angle_deg_refined}\xb0 -> '
-                    f'선택각도={best_deg:.1f}\xb0 quat={[round(v,3) for v in quat]}')
-                ok = self._move(px, py, approach_z, quat, tol_ori=TOL_ORI_LOOSE, planner_chain=['PTP', 'LIN'])
-                if not ok:
-                    raise RuntimeError('align 이동 실패 (재시도 초과)')
+                if _align_quat_override is not None:
+                    # approach와 동일한 quat 사용 → 암이 이미 올바른 위치·방향에 있으므로
+                    # move 명령 없이 스킵. 중복 move는 불필요한 궤적(z 살짝 내려갔다 복귀 등)
+                    # 을 유발하고 순서가 틀려 보이는 문제의 원인.
+                    # _current_top_angle_deg를 _approach_angle_deg로 세팅해야
+                    # descend 단계의 quat 재계산도 approach와 일치한다.
+                    best_deg, quat = _approach_angle_deg, _align_quat_override
+                    self.get_logger().info(
+                        f'[top] 3/6: 정렬(align) 스킵 — approach quat 유지 '
+                        f'angle={_approach_angle_deg:.0f}° '
+                        f'quat={[round(v,3) for v in quat]}')
+                else:
+                    best_deg, quat = self._pick_best_yaw_candidate(
+                        pos, angle_deg_refined, ik_check_z=approach_z)
+                    self.get_logger().info(
+                        f'[top] 3/6: 정렬(align) 재조회각도={angle_deg_refined}\xb0 -> '
+                        f'선택각도={best_deg:.1f}\xb0 quat={[round(v,3) for v in quat]}')
+                    ok = self._move(px, py, approach_z, quat, tol_ori=TOL_ORI_LOOSE, planner_chain=['PTP', 'LIN'])
+                    if not ok:
+                        raise RuntimeError('align 이동 실패 (재시도 초과)')
                 _current_top_angle_deg = best_deg
             else:
                 self.get_logger().warn('[top] 각도 재조회 실패, yaw=0 유지')
@@ -724,16 +776,12 @@ class PlanningNode(Node):
                 py = _refreshed_pos.get('y', py)
                 self.get_logger().info(
                     f'[top] descend 목표 위치 갱신: ({px:.4f}, {py:.4f})')
-                # [2026-08 수정, 코드리뷰 발견] real 백엔드는
-                # top_down_angle_quat(x,y,angle_deg)가 yaw=atan2(y,x)로
-                # 위치에 의존하는데, 위에서 px,py만 갱신하고 quat은
-                # 갱신 전 pos 기준 값이 그대로 남아있었음. sim은 quat이
-                # 위치와 무관해 문제가 안 드러났지만, real에서는 descend
-                # 커맨드의 위치와 orientation이 서로 다른 시점 값으로
-                # 섞여서 나가는 버그였음. 갱신된 위치로 quat도 재계산.
-                quat = self._top_down_quat_for(
-                    {'x': px, 'y': py, 'z': _refreshed_pos.get('z', pos.get('z', 0.0))},
-                    _current_top_angle_deg)
+                # 실물: approach quat(또는 QUAT_TOP_DOWN 폴백)을 그대로 유지.
+                # 재계산하면 QUAT_TOP_DOWN 폴백 케이스에서 잘못된 quat으로 교체됨.
+                if self.use_moveit2:
+                    quat = self._top_down_quat_for(
+                        {'x': px, 'y': py, 'z': _refreshed_pos.get('z', pos.get('z', 0.0))},
+                        _current_top_angle_deg)
 
         if is_side:
             self.get_logger().info('4/6: 내려가기 (descend) — side는 approach와 동일 높이, 재확인만')
@@ -1109,6 +1157,37 @@ class PlanningNode(Node):
 
     def _move_sequence(self, pos, quat):
         try:
+            target_bearing = math.atan2(pos['y'], pos['x']) - math.radians(BEARING_OFFSET_DEG)
+            target_bearing = math.atan2(math.sin(target_bearing), math.cos(target_bearing))
+            js = self.latest_joint_state_sim
+            if js is not None:
+                joint_names = ['joint1','joint2','joint3','joint4','joint5','joint6','joint7']
+                current = dict(zip(js.name, js.position))
+                pre_target = [current.get(jn, 0.0) for jn in joint_names]
+                pre_target[0] = target_bearing
+                if abs(pre_target[1]) < 0.15 and abs(pre_target[3]) < 0.15:
+                    pre_target[1] = 0.6
+                    pre_target[3] = 1.0
+                self.get_logger().info(
+                    f'[move pre-rotate] joint1 → {math.degrees(target_bearing):.1f}°')
+                if self.use_moveit2:
+                    self.moveit2.force_reset_executing_state()
+                    self.moveit2.max_velocity = 0.3
+                    self.moveit2.max_acceleration = 0.3
+                    self.moveit2.pipeline_id = ''
+                    self.moveit2.planner_id = ''
+                    self.moveit2.move_to_configuration(pre_target)
+                    time.sleep(0.5)
+                    deadline = time.time() + MOVE_TIMEOUT
+                    while time.time() < deadline:
+                        if (not self.moveit2._MoveIt2__is_motion_requested and
+                                not self.moveit2._MoveIt2__is_executing):
+                            break
+                        time.sleep(0.1)
+                else:
+                    self._move_joints_real_wait(pre_target)
+            else:
+                self.get_logger().warn('[move pre-rotate] joint_state 없음, 사전 회전 스킵')
             self.get_logger().info(
                 f"1/1: 이동 → ({pos['x']:.3f}, {pos['y']:.3f}, {pos['z']:.3f})")
             ok = self._move(pos['x'], pos['y'], pos['z'], quat,
@@ -1124,12 +1203,14 @@ class PlanningNode(Node):
             with self.lock:
                 self.busy = False
     def _publish_joint_positions(self, positions, joint_names=None):
+        """조인트 이동 명령. /control/move_j 로 발행해 speed_percent와 모션플래닝을 따른다.
+        (예전 /control/joint_states 는 직접 위치 쓰기라 속도제어/특이점 처리 없음.)"""
         joint_names = joint_names or ['joint1','joint2','joint3','joint4','joint5','joint6','joint7']
         js = JointState()
         js.header.stamp = self.get_clock().now().to_msg()
         js.name = joint_names
         js.position = [float(p) for p in positions]
-        self.pub_gripper.publish(js)
+        self.pub_move_j.publish(js)
     def _move_joints_real_wait(self, positions, joint_names=None) -> bool:
         if not self._arm_status_available:
             self._publish_joint_positions(positions, joint_names)
@@ -1145,19 +1226,22 @@ class PlanningNode(Node):
             time.sleep(REAL_MOVE_SETTLE_SEC)
             deadline = time.time() + REAL_MOVE_TIMEOUT
             last_status = None
+            saw_in_progress = False
             while time.time() < deadline:
                 status = self.latest_arm_status
-                if status is not None:
+                # publish 후 settle 기간 이내 수신된 상태는 이전 상태값 — 무시
+                if status is not None and self.latest_arm_status_recv_time > publish_time + REAL_MOVE_SETTLE_SEC:
                     last_status = status
-                    if status.motion_status == 0:  # SUCCESS
-                        elapsed = time.time() - publish_time
-                        if elapsed < 0.5:
-                            self.get_logger().warn(
-                                f'  ⚠ [실물] {elapsed*1000:.0f}ms만에 성공 확인됨 — '
-                                f'실제 이동이 반영 안 된 이전 상태값일 가능성 있음. '
-                                f'로봇이 실제로 움직였는지 육안 확인 권장.')
+                    elapsed = time.time() - publish_time
+                    if status.motion_status != 0:  # 비-SUCCESS = 이동 중
+                        saw_in_progress = True
+                    if status.motion_status == 0 and (saw_in_progress or elapsed > 2.0):
+                        # 이동 완료: in_progress 후 SUCCESS, 또는 2s 경과 후 SUCCESS (빠른/가까운 이동 폴백)
+                        suffix = '' if saw_in_progress else ' [폴백: 2s 경과]'
+                        self.get_logger().info(
+                            f'  ✓ [실물] joint 이동 완료 ({elapsed*1000:.0f}ms){suffix}')
                         return True
-                    if status.motion_status == 1:  # FAILED
+                    if saw_in_progress and status.motion_status == 1:  # FAILED
                         if status.arm_status != 0:
                             break
                 time.sleep(REAL_MOVE_POLL_SEC)
@@ -1359,9 +1443,12 @@ class PlanningNode(Node):
                 if not ok:
                     raise RuntimeError('home 이동 실패 (재시도 초과)')
             else:
-                ok = self._move_joints_real_wait([0.0] * 7)
-                if not ok:
-                    raise RuntimeError('home 조인트 이동 실패 (재시도 초과)')
+                while True:
+                    ok = self._move_joints_real_wait([0.0] * 7)
+                    if ok:
+                        break
+                    self.get_logger().warn('  홈 조인트 이동 실패, 2초 후 재시도 (성공까지 무한 반복)...')
+                    time.sleep(2.0)
             self._gripper(SIM_GRIPPER_OPEN, GRIPPER_OPEN)
             time.sleep(GRIPPER_DELAY)
             # [신규, 2026-08] settle delay -- 홈 직후 첫 pick_object가 매번
@@ -1673,19 +1760,22 @@ class PlanningNode(Node):
                 time.sleep(REAL_MOVE_SETTLE_SEC)
                 deadline = time.time() + REAL_MOVE_TIMEOUT
                 last_status = None
+                saw_in_progress = False
                 while time.time() < deadline:
                     status = self.latest_arm_status
-                    if status is not None:
+                    # publish 후 settle 기간 이내 수신된 상태는 이전 상태값 — 무시
+                    if status is not None and self.latest_arm_status_recv_time > publish_time + REAL_MOVE_SETTLE_SEC:
                         last_status = status
-                        if status.motion_status == 0:  # SUCCESS
-                            elapsed = time.time() - publish_time
-                            if elapsed < 0.5:
-                                self.get_logger().warn(
-                                    f'  ⚠ [실물] {elapsed*1000:.0f}ms만에 성공 확인됨 — '
-                                    f'실제 이동이 반영 안 된 이전 상태값일 가능성 있음. '
-                                    f'로봇이 실제로 움직였는지 육안 확인 권장.')
+                        elapsed = time.time() - publish_time
+                        if status.motion_status != 0:  # 비-SUCCESS = 이동 중
+                            saw_in_progress = True
+                        if status.motion_status == 0 and (saw_in_progress or elapsed > 2.0):
+                            # 이동 완료: in_progress 후 SUCCESS, 또는 2s 경과 후 SUCCESS (빠른 이동 폴백)
+                            suffix = '' if saw_in_progress else ' [폴백: 2s 경과]'
+                            self.get_logger().info(
+                                f'  ✓ [실물] move 완료 ({elapsed*1000:.0f}ms){suffix}')
                             return True
-                        if status.motion_status == 1:  # FAILED
+                        if saw_in_progress and status.motion_status == 1:  # FAILED
                             if status.arm_status != 0:
                                 break
                     time.sleep(REAL_MOVE_POLL_SEC)
