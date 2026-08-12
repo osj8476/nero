@@ -155,7 +155,7 @@ if [ "$ENABLE_SAFETY_MAP" = true ]; then
 fi
 
 echo "0) Isaac Sim 실행 + USD 로드"
-run_bg "0_isaacsim" "'$ISAACSIM_PATH' --open '$USD_PATH'"
+run_bg "0_isaacsim" "'$ISAACSIM_PATH' --open '$USD_PATH' --ext-folder $HOME/Documents/isaac-sim-mcp/ --enable isaac.sim.mcp_extension"
 echo "   Isaac Sim 창이 뜨면 반드시 ▶ 재생 버튼을 눌러주세요 (ActionGraph는 재생 중에만 동작)."
 sleep 25   # Isaac Sim 자체 부팅이 오래 걸림 — 환경에 따라 늘려야 할 수 있음
 
