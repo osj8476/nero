@@ -188,9 +188,76 @@ IK 시도 없이 즉시 거부하는 컷오프 — 아래 IK 스캔 결과를 �
      문서(그립 각도 계산)가 아니라 그쪽(pick 시퀀스 오케스트레이션)
      책임이라 본문은 거기 있음.
 
+## top_down_angle_quat 공식 & 절대각 변환 (2026-08-12)
+
+### 공식
+```python
+# grasp_kinematics.py
+def top_down_angle_quat(x, y, angle_deg):
+    position_yaw = math.atan2(y, x)
+    return euler_to_quat(math.radians(-angle_deg), math.radians(90), position_yaw)
+```
+
+`position_yaw = atan2(y, x)` 는 "로봇 베이스→물체 방향"을 yaw로 반영한다.
+이 항이 없으면(yaw=0) 특정 위치(예: (-0.4, 0.1))에서 AGX IK solver가
+NO_SOLUTION을 반환함 — IK 안정성을 위해 의도적으로 유지한다.
+
+**왜 docstring은 `yaw=0`이 정답이라고 했나?** (2026-08 재검토)
+docstring §채택된접근의 "pitch=90 후 roll 스윕 전 구간 IK 성공"은
+근거리에서 검증한 결과로, 원거리(0.4m+)까지 성립하지 않는다.
+실제로 `yaw=0` 변경 시 동일하게 NO_SOLUTION 발생 확인 — 공식 원복.
+
+### 절대 좌표계 기준 각도 입력 (planning_node.py)
+
+사용자(MCP 또는 pick 명령)는 절대 좌표계 각도(월드 프레임 기준)를 넘긴다.
+`top_down_angle_quat`의 내부 기준은 radial(베이스→물체 방향)이므로,
+호출 전에 변환이 필요하다:
+
+```python
+# planning_node.py — approach 후보 계산
+_position_yaw_deg = math.degrees(math.atan2(pos['y'], pos['x']))
+_angle_rel = (angle_deg_abs - _position_yaw_deg) % 180.0
+_approach_angle_cands = [_angle_rel, (_angle_rel + 90.0) % 180.0]
+```
+
+**수학적 근거**: `euler(-angle_rel, 90°, position_yaw)` 의 jaw 방향(월드 프레임) =
+`position_yaw + angle_rel` = `position_yaw + (angle_abs - position_yaw)` = `angle_abs` ✓
+
+그리퍼가 절대 좌표 기준 정확히 요청한 각도를 향하면서,
+position_yaw는 IK 안정성을 위해 보존된다.
+
+### 실물 approach 다중 후보 + 폴백 (planning_node.py)
+
+1. `angle_rel` 시도 → 성공이면 이 quat을 align/descend/lift 전 구간 유지
+2. `angle_rel + 90°` 시도 (그리퍼 대칭)
+3. 두 후보 모두 NO_SOLUTION → `QUAT_TOP_DOWN` 상수 폴백
+   (시각적으로 top-down이 아닌 방향이지만 IK는 전 구간 성공)
+
+approach에서 성공한 quat을 `_align_quat_override`로 align 단계에 그대로
+전달해 방향 일관성을 유지한다 (re-compute하면 QUAT_TOP_DOWN 폴백이
+덮어씌워지는 버그 있었음 — 2026-08 수정).
+
+### 시뮬 vs 실물 frame 불일치
+
+| | 공식 | pitch | 탑다운 축 |
+|--|------|-------|----------|
+| 시뮬(MoveIt2) | `euler(0, 180°, angle_deg)` | 180° | Z축 아래 |
+| 실물(AGX) | `euler(-angle_rel, 90°, position_yaw)` | 90° | X축 아래 |
+
+같은 Nero 7DOF 로봇이지만 gripper_flange 좌표계 정의가 90° 다르다.
+시뮬 URDF(`nero_with_camera.urdf`)의 `gripper_flange_joint`가
+`rpy="-1.5708 0 -1.5708"`로 정의돼 있어 발생한 차이.
+실물에서 pitch=180° = QUAT_TOP_DOWN ≈ `[0,1,0,0]` 으로 그리퍼가
+"옆으로 누운" 방향이 되는 이유.
+
+### QUAT_TOP_DOWN 상수
+`[0.008, 0.999, 0.023, 0.037]` — 실물에서 IK가 전 구간 성공하도록
+실측 캘리브레이션된 고정 쿼터니언. 시뮬 공식 `euler(0, 180°, 0) ≈ [0,1,0,0]`
+과 거의 동일. **시각적으로 top-down이 아닌 것처럼 보이지만**
+실제로는 pick에 지장 없음 (arm이 -Z 방향으로 내려가므로).
+
 ## 관련 문서
 - `.claude/skills/grasp-kinematics-design/SKILL.md` — 설계 이력,
-  폐기된 접근(joint5 중간 yaw 트위스트, 런타임 ACM 조작 등), 채택된
-  `(roll=-angle, pitch=90, yaw=0)` top-down 컨벤션의 근거
+  폐기된 접근(joint5 중간 yaw 트위스트, 런타임 ACM 조작 등)
 - [[mcp_pickplace_architecture]] — 실제 IK/모션 실행은 planning_node.py
 - [[repo_layout]] — 이 도구들이 `nero/`에만 있고 `ros2_ws`엔 없는 이유
