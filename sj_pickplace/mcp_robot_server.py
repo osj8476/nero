@@ -417,7 +417,9 @@ def get_scanned_boxes() -> str:
 
 @mcp.tool()
 def pick_object(target_label: str, grasp_dir: str = 'auto',
-                 from_scan: bool = False, box_index: int = None) -> str:
+                 from_scan: bool = False, box_index: int = None,
+                 x: float = None, y: float = None, z: float = None,
+                 angle_deg: float = None) -> str:
     """지정한 물체를 로봇 팔로 집어 올린다. pick 완료까지 블로킹.
 
     Args:
@@ -482,7 +484,11 @@ def pick_object(target_label: str, grasp_dir: str = 'auto',
     payload = {'action': 'pick', 'target_label': target_label}
     if grasp_dir and grasp_dir != 'auto':
         payload['grasp_dir'] = grasp_dir
-    if from_scan:
+    if x is not None and y is not None and z is not None:
+        payload['override_pos'] = {'x': x, 'y': y, 'z': z}
+        if angle_deg is not None:
+            payload['override_angle_deg'] = angle_deg
+    elif from_scan:
         payload['from_scan'] = True
         if box_index is not None:
             payload['box_index'] = box_index
