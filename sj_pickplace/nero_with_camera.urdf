@@ -405,11 +405,11 @@
   </link>
   <!-- <xacro:if value="${add_plug}">
       <xacro:usb_plug parent="${name}_link" name="${name}_usb_plug">
-        <origin xyz="${d435_cam_mount_from_center_offset - 0.02095} ${-d435_cam_depth_py - 0.0353} 0" rpy="0 0 0"/>
+        <origin xyz="0.04427500 -0.01667467 0.10579102" rpy="-0.13443062 -0.05251231 1.36245384"/>
       </xacro:usb_plug>
     </xacro:if> -->
   <joint name="d435_camera_joint" type="fixed">
-    <origin rpy="0.0 -1.22 0.0" xyz="-0.031 -0.028 0.0018"/>
+    <origin rpy="0.0 -1.22 0.0" xyz="-0.031 0.012 0.0018"/>
     <parent link="camera_stand_link"/>
     <child link="d435_camera_link"/>
   </joint>

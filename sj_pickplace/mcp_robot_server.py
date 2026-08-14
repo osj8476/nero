@@ -181,6 +181,7 @@ class RosBridgeNode(Node):
 # ──────────────────────────────────────────────────────────────────────────────
 _ros_node: Optional[RosBridgeNode] = None
 _ros_ready = threading.Event()
+_ros_lock = threading.Lock()
 
 # [2026-07 추가] 마지막 scan_for_boxes 결과 캐시. get_scanned_boxes가
 # ROS 왕복 없이 즉시 응답할 수 있게 하기 위함 (로봇이 움직이지 않는
@@ -201,12 +202,25 @@ def _ros_spin_thread():
         rclpy.shutdown()
 
 
+def _is_ros_alive() -> bool:
+    """브리지 노드가 살아있는지 확인."""
+    try:
+        return _ros_node is not None and _ros_node.context.ok()
+    except Exception:
+        return False
+
+
 def _ensure_ros():
-    if not _ros_ready.is_set():
+    global _ros_ready
+    with _ros_lock:
+        if _is_ros_alive():
+            return
+        # 노드가 죽었으면 재초기화 (ROS 재시작 후 자동 복구)
+        _ros_ready.clear()
         t = threading.Thread(target=_ros_spin_thread, daemon=True)
         t.start()
         _ros_ready.wait(timeout=10.0)
-        if _ros_node is None:
+        if not _is_ros_alive():
             raise RuntimeError('ROS2 bridge 노드 초기화 실패')
         time.sleep(3.0)
 
