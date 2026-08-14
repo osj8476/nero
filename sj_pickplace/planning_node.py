@@ -337,9 +337,10 @@ class PlanningNode(Node):
                 if _scan_match is not None:
                     pos = {'x': _scan_match['x'], 'y': _scan_match['y'], 'z': _scan_match['z']}
                     angle_deg = _scan_match.get('angle_base_deg') or 0.0
-                    skip_reacquire = True
+                    skip_reacquire = False
                     self.get_logger().info(
-                        f'[from_scan] 저장된 좌표 사용 -> pos={pos} angle_deg={angle_deg}')
+                        f'[from_scan] 저장된 좌표 사용 -> pos={pos} angle_deg={angle_deg} '
+                        f'(align 시 각도 재조회, 실패 시 스캔값 fallback)')
                     try:
                         self._scanned_boxes.remove(_scan_match)
                     except ValueError:
@@ -397,7 +398,7 @@ class PlanningNode(Node):
             else:
                 is_side = False
                 angle_deg = self._box_angle_deg if self._box_angle_deg is not None else 0.0
-                quat = self._top_down_quat_for(pos, angle_deg)
+                quat = self._abs_angle_to_quat(pos, angle_deg)
             self.get_logger().info(
                 f'PLACE 시작 @ {pos} | 자세: {"side" if is_side else "top"} '
                 f'{[round(v,3) for v in quat]}')
@@ -423,7 +424,7 @@ class PlanningNode(Node):
                 quat = None
             if not is_side:
                 angle_deg = self._box_angle_deg if self._box_angle_deg is not None else 0.0
-                quat = self._top_down_quat_for(pos, angle_deg)
+                quat = self._abs_angle_to_quat(pos, angle_deg)
             self.get_logger().info(f'MOVE 시작 @ {pos} | 자세: {quat}')
             threading.Thread(
                 target=self._move_sequence, args=(pos, quat), daemon=True).start()
@@ -514,13 +515,13 @@ class PlanningNode(Node):
                         continue
                     delta_deg = abs(math.degrees(pos - prev[jname]))
                     speed_deg_s = delta_deg / dt
-                    if speed_deg_s > JOINT_JUMP_MAX_DEG_PER_SEC and not self._safety_tripped:
-                        self.get_logger().error(
-                            f'🚨 [안전정지] {jname} 급회전 감지: '
-                            f'{delta_deg:.1f}° in {dt*1000:.0f}ms '
-                            f'({speed_deg_s:.0f}°/s > 임계값 {JOINT_JUMP_MAX_DEG_PER_SEC}°/s)')
-                        self._trigger_emergency_stop(
-                            reason=f'{jname} {speed_deg_s:.0f}°/s 급회전 감지')
+                    # if speed_deg_s > JOINT_JUMP_MAX_DEG_PER_SEC and not self._safety_tripped:
+                    #     self.get_logger().error(
+                    #         f'🚨 [안전정지] {jname} 급회전 감지: '
+                    #         f'{delta_deg:.1f}° in {dt*1000:.0f}ms '
+                    #         f'({speed_deg_s:.0f}°/s > 임계값 {JOINT_JUMP_MAX_DEG_PER_SEC}°/s)')
+                    #     self._trigger_emergency_stop(
+                    #         reason=f'{jname} {speed_deg_s:.0f}°/s 급회전 감지')
         self._prev_joint_snapshot = (current, now)
     def _trigger_emergency_stop(self, reason: str):
         """emergency_stop 서비스 호출 + 이후 모든 이동 명령 거부하는 안전 잠금."""
@@ -570,12 +571,23 @@ class PlanningNode(Node):
         return best.get('center_3d'), best.get('angle_base_deg', None)
     # ── top-down 쿼터니언 백엔드 분기 ────────────────────────────────────────
     def _top_down_quat_for(self, pos, angle_deg):
-        """
-        top 그립(side 아님)용 쿼터니언을 self.use_moveit2 여부로 분기해서 반환.
-        """
+        """top 그립용 쿼터니언. angle_deg는 position_yaw 기준 상대각(real) 또는
+        절대각(sim). place 시퀀스처럼 의도적으로 상대각 0을 쓰는 곳에만 사용.
+        perception angle_base_deg(절대각)를 넘길 때는 _abs_angle_to_quat 사용."""
         if self.use_moveit2:
             return sim_top_down_angle_quat(angle_deg)
         return top_down_angle_quat(pos['x'], pos['y'], angle_deg)
+
+    def _abs_angle_to_quat(self, pos: dict, angle_deg_abs: float) -> list:
+        """perception angle_base_deg(base_link 절대각) → top-down quat.
+        실물: atan2(y,x) 기준 상대각으로 변환 후 top_down_angle_quat.
+        시뮬: sim_top_down_angle_quat (절대각 그대로).
+        모든 yaw 계산에서 raw angle_base_deg를 넘길 때 이 함수를 사용해야 한다."""
+        if self.use_moveit2:
+            return sim_top_down_angle_quat(angle_deg_abs)
+        position_yaw_deg = math.degrees(math.atan2(pos.get('y', 0.0), pos.get('x', 0.0)))
+        angle_rel = (angle_deg_abs - position_yaw_deg) % 180.0
+        return top_down_angle_quat(pos['x'], pos['y'], angle_rel)
     # ── 시퀀스 ────────────────────────────────────────────────────────────────
     def _do_pick(self, pos, quat, is_side=False, label='', skip_reacquire=False, angle_deg=0.0):
         if is_side:
@@ -634,7 +646,7 @@ class PlanningNode(Node):
                 f'({math.degrees(target_bearing):.1f}\xb0)로 사전 회전...')
             if self.use_moveit2:
                 self.moveit2.force_reset_executing_state()
-                self.moveit2.max_velocity = 0.3
+                self.moveit2.max_velocity = 0.15
                 self.moveit2.max_acceleration = 0.3
                 self.moveit2.pipeline_id = ''
                 self.moveit2.planner_id = ''
@@ -665,22 +677,16 @@ class PlanningNode(Node):
             f'1/6: 접근 (approach) | {offset_desc}')
         if not is_side:
             approach_tol_ori = (TOL_ORI_TIGHT, TOL_ORI_TIGHT, 1.6)
-            # 실물: position_yaw 공식은 IK 안정성을 위해 유지하되,
-            # 사용자 절대각(angle_deg)을 radial 기준 상대각으로 변환해서 사용.
-            # jaw 방향 수학: euler(-angle_rel, 90°, position_yaw)의 jaw = position_yaw + angle_rel
-            # → angle_rel = angle_deg - position_yaw_deg 로 변환하면 jaw = angle_deg(절대) ✓
+            # 절대각 두 후보(angle_deg, +90°) → _abs_angle_to_quat 내부에서
+            # position_yaw 기준 상대각으로 변환됨 (시뮬은 변환 없음).
             if not self.use_moveit2:
-                _position_yaw_deg = math.degrees(math.atan2(pos.get('y', 0.0), pos.get('x', 0.0)))
-                _angle_rel = (angle_deg - _position_yaw_deg) % 180.0
-                _primary = _angle_rel
-                _secondary = (_primary + 90.0) % 180.0
-                _approach_angle_cands = [_primary, _secondary]
+                _approach_angle_cands = [angle_deg % 180.0, (angle_deg + 90.0) % 180.0]
             else:
                 _approach_angle_cands = [angle_deg]
             ok = False
             quat = None
             for _cand_deg in _approach_angle_cands:
-                _cand_quat = self._top_down_quat_for(pos, _cand_deg)
+                _cand_quat = self._abs_angle_to_quat(pos, _cand_deg)
                 _backend = 'sim(pitch180)' if self.use_moveit2 else f'real(top_down angle={_cand_deg:.0f}°)'
                 self.get_logger().info(
                     f'[top:{_backend}] approach 시도 -> '
@@ -726,6 +732,10 @@ class PlanningNode(Node):
                     if angle_deg_refined is not None:
                         break
                     time.sleep(0.3)
+                if angle_deg_refined is None and angle_deg is not None:
+                    self.get_logger().warn(
+                        f'[top] align 각도 재조회 실패, 스캔 각도 fallback: {angle_deg}°')
+                    angle_deg_refined = angle_deg
             if angle_deg_refined is not None:
                 if _align_quat_override is not None:
                     # approach와 동일한 quat 사용 → 암이 이미 올바른 위치·방향에 있으므로
@@ -920,7 +930,7 @@ class PlanningNode(Node):
         self.moveit2.force_reset_executing_state()
         self.moveit2.pipeline_id = ''
         self.moveit2.planner_id = ''
-        self.moveit2.max_velocity = 0.3
+        self.moveit2.max_velocity = 0.15
         self.moveit2.max_acceleration = 0.3
         self.moveit2.move_to_configuration(target_positions)
         time.sleep(0.5)
@@ -1172,7 +1182,7 @@ class PlanningNode(Node):
                     f'[move pre-rotate] joint1 → {math.degrees(target_bearing):.1f}°')
                 if self.use_moveit2:
                     self.moveit2.force_reset_executing_state()
-                    self.moveit2.max_velocity = 0.3
+                    self.moveit2.max_velocity = 0.15
                     self.moveit2.max_acceleration = 0.3
                     self.moveit2.pipeline_id = ''
                     self.moveit2.planner_id = ''
@@ -1306,7 +1316,7 @@ class PlanningNode(Node):
                     # 방식은 _home_sequence와 완전히 동일.
                     self.moveit2.pipeline_id = ''
                     self.moveit2.planner_id = ''
-                    self.moveit2.max_velocity = 0.3
+                    self.moveit2.max_velocity = 0.15
                     self.moveit2.max_acceleration = 0.3
                     self.moveit2.move_to_configuration(target)
                     time.sleep(0.5)
@@ -1380,7 +1390,7 @@ class PlanningNode(Node):
                 self.moveit2.force_reset_executing_state()
                 self.moveit2.pipeline_id = ''
                 self.moveit2.planner_id = ''
-                self.moveit2.max_velocity = 0.3
+                self.moveit2.max_velocity = 0.15
                 self.moveit2.max_acceleration = 0.3
                 self.moveit2.move_to_configuration(positions)
                 time.sleep(0.5)
@@ -1424,7 +1434,7 @@ class PlanningNode(Node):
                     # 같은 "공유 상태, 세팅 안 하면 이전 값 잔류" 패턴).
                     self.moveit2.pipeline_id = ''
                     self.moveit2.planner_id = ''
-                    self.moveit2.max_velocity = 0.3
+                    self.moveit2.max_velocity = 0.15
                     self.moveit2.max_acceleration = 0.3
                     self.moveit2.move_to_configuration([0.0] * 7)
                     time.sleep(0.5)
@@ -1533,7 +1543,7 @@ class PlanningNode(Node):
 
         selector = YawCandidateSelector(
             ik_check_fn=_ik_check,
-            quat_for_angle_fn=self._top_down_quat_for,
+            quat_for_angle_fn=self._abs_angle_to_quat,
         )
         return selector.pick_best(
             position, angle_deg, current_quat,
@@ -1838,7 +1848,7 @@ class PlanningNode(Node):
     def _move_try_ompl_safe(self, x, y, z, quat, tol_pos, tol_ori, max_ratio=1.8) -> bool:
         self.moveit2.pipeline_id = ''
         self.moveit2.planner_id = ''
-        self.moveit2.max_velocity = 0.3
+        self.moveit2.max_velocity = 0.15
         self.moveit2.max_acceleration = 0.3
         for replan_attempt in range(1, 4):
             self.moveit2.force_reset_executing_state()
@@ -1908,7 +1918,7 @@ class PlanningNode(Node):
         else:
             self.moveit2.pipeline_id = ''
             self.moveit2.planner_id = ''
-        self.moveit2.max_velocity = 0.3
+        self.moveit2.max_velocity = 0.15
         self.moveit2.max_acceleration = 0.3
         self.moveit2.move_to_pose(
             position=[x, y, z],

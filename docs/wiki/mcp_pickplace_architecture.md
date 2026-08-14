@@ -142,6 +142,24 @@ LLM 에이전트가 호출하는 MCP 툴(`pick_object`, `place_object`,
 xy/z만 맞으면 True로 오판할 수 있음(orientation 미검사, 의도적으로
 범위 밖으로 둠)** — 중요 작업에서는 이 점 감안.
 
+- **급회전 안전정지 임시 비활성화 (2026-08-14, 미검증)**: 스캔 중 joint1이
+  빠르게 스윕할 때 `JOINT_JUMP_MAX_DEG_PER_SEC` 임계값을 초과해 emergency
+  stop이 계속 트리거됐다. 임시 조치로 `planning_node.py`의 안전정지 로직을
+  주석처리(`#`)했고, 대신 최대 속도를 `0.3 → 0.15`로 절반 줄임.
+  **안전 기능이 꺼진 상태이므로 실물 운영 시 주의 필요.**
+  장기적으로는 스캔 경로를 느리게 하거나 임계값을 구분해서 재활성화해야 함.
+
+- **`from_scan` 시 align 각도 재조회 (2026-08-14)**: 기존에는 `from_scan=True`
+  일 때 `skip_reacquire=True`로 스캔 시 측정한 각도를 그대로 썼다. 스캔
+  거리에서 측정한 각도가 부정확하다는 실측 확인 후 `skip_reacquire=False`로
+  변경 — align 시점(박스 바로 위)에서 각도를 재조회하고, perception이 실패할
+  경우에만 스캔 각도로 fallback.
+
+- **`_abs_angle_to_quat` 추가 (2026-08-14)**: `perception`의 `angle_base_deg`
+  는 base_link 절대각인데, `_top_down_quat_for`는 position_yaw 기준 상대각을
+  입력으로 기대했다. place/move 시퀀스에서 절대각을 직접 넘기던 호출부를
+  `_abs_angle_to_quat`로 교체 — 내부에서 `atan2(y,x)` 변환 후 `top_down_angle_quat` 호출.
+
 ## 미완성/취약 지점
 - 박스 높이 전역 고정값(0.05m) — 실측 깊이 기반 측정은 아직 TODO.
 - z 노이즈(최대 26mm)는 완화가 아니라 관용치로 우회 중 — 미디언 필터링

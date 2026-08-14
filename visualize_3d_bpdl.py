@@ -13,6 +13,7 @@ visualize_3d_ros.py  (v3)
 """
 
 import json
+import signal
 import threading
 
 import cv2
@@ -72,6 +73,16 @@ class Visualizer3D(Node):
             )
 
 
+_running = True
+
+def _stop(sig, frame):
+    global _running
+    _running = False
+
+signal.signal(signal.SIGINT, _stop)
+signal.signal(signal.SIGTERM, _stop)
+
+
 def main():
     rclpy.init()
     node = Visualizer3D()
@@ -80,7 +91,7 @@ def main():
     print("[info] 시작. q 누르면 종료.")
 
     try:
-        while True:
+        while _running:
             img, objs, fx, fy, cx_i, cy_i = node.get_state()
 
             if img is None:

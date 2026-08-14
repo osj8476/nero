@@ -124,6 +124,49 @@
   아니라 raw 모델이었음이 같은 날 추가로 확진됨** (위 "알려진 이슈"
   참고, 상세 원인은 [[perception_dev_tools]]).
 
+- 2026-08-14: hand-eye 재캘리브레이션 시도 3회 + 수동 오프셋 보정.
+  **이번 세션에서 밝혀진 핵심 사항 2가지:**
+
+  **① calib_visual.py가 잘못된 joint를 패치하고 있었음 (버그)**
+  `calib_visual.py`의 `_apply_to_urdf()`가 수정하던 joint가
+  xacro 주석(`<!-- -->`) 안의 `usb_plug` 템플릿 joint여서 실제 tf2 체인에
+  전혀 반영되지 않았다. 실제 카메라 포즈를 결정하는 joint는
+  `d435_camera_joint` (parent=`camera_stand_link`, child=`d435_camera_link`)이며
+  `nero_with_camera.urdf` 411번째 줄에 있다:
+  ```
+  gripper_base → camera_stand_joint → camera_stand_link → d435_camera_joint → d435_camera_link → ... → camera_color_optical_frame
+  ```
+  **캘리브레이션 결과를 URDF에 반영하려면 반드시 `d435_camera_joint` origin을 수정해야 한다.**
+  적용 후 `robot_state_publisher`를 반드시 재시작해야 tf2가 갱신된다.
+
+  **② hand-eye 캘리브레이션 값이 튀는 근본 원인: orientation 다양성 부족**
+  3회 시도 결과(1차 x=21.9mm, 2차/3차 ~149mm) 비교 분석:
+  - 실패 공통점: j7 변화 범위 30~45° 수준으로 너무 좁음. j5=j6=0 고정 자체는
+    문제없지만, j7만으로는 카메라 orientation 다양성이 거의 안 생긴다.
+  - 성공 요건: j1을 -60~+60° 범위에서 5단계 이상 변화시키면 j7 범위가
+    좁아도 전체 orientation 다양성 확보 가능. j1 60° 변화 = 카메라가
+    3D에서 크게 다른 방향을 봄 = 캘리브레이션에 유효한 제약 추가.
+  - 참고: `/home/bpdl/sy/cali/handeye/output/cam2gripper_transform_final.yaml`
+    (30샘플, TSAI/PARK/HORAUD 서로 15mm 이내 일치)이 현재까지 가장 신뢰도
+    높은 결과. 이 값을 `d435_camera_joint`에 역산 적용하는 공식:
+    `T_d435 = T_stand^{-1} * T_cam2gripper * T_after_d435^{-1}`
+
+  **수동 보정 방법 (재캘리브레이션 없이 오프셋 미세조정)**
+  - 편향 방향이 j1 회전과 함께 돌면 → 캘리브레이션 상수 오차(systematic).
+    j1=0° 편향 방향과 j1=90° 편향 방향이 90° 회전 관계이면 확진.
+  - `d435_camera_joint` xyz의 y 값을 조정해서 보정 (camera_stand_joint가
+    rpy=(0,0,3.14)=180° z회전이라 y가 base 기준으로 반전됨에 주의).
+    y를 +δ 하면 base 기준 pick 좌표가 -y 방향으로 δ만큼 이동.
+  - 이번 세션 최종 값: `xyz="-0.031 0.012 0.0018"` (원래 -0.028에서 +0.04 보정,
+    실측 검증). **재캘리브레이션 전까지 임시값 — 미검증.**
+
+  **탑다운 픽앤플레이스 최적 캘리브레이션 자세 구성**
+  - j1: -60°, -30°, 0°, +30°, +60° (5단계)
+  - j7: 각 j1마다 0.7, 1.0, 1.4 rad (3단계) → 총 15샘플
+  - j5=j6=0 고정 유지
+  - 체스보드는 박스가 놓이는 테이블 높이 기준으로 고정 배치
+  - 4가지 알고리즘 결과가 10mm 이내 일치하면 신뢰 가능
+
 ## 관련 문서
 - [[mcp_pickplace_architecture]] — `/detected_objects` 소비 측
 - [[perception_dev_tools]] — YOLO 모델 학습/데이터셋/서빙 도구
