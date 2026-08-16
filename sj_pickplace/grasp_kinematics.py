@@ -155,9 +155,65 @@ def top_down_angle_quat(x: float, y: float, angle_deg: float) -> list:
     return euler_to_quat(math.radians(-angle_deg), math.radians(90), position_yaw)
 
 
-def sim_top_down_angle_quat(angle_deg: float) -> list:
-    """sim(MoveIt2) 전용 top-down + 박스각도 쿼터니언."""
-    return euler_to_quat(0.0, math.pi, math.radians(angle_deg))
+def sim_top_down_angle_quat(x: float, y: float, angle_deg: float) -> list:
+    """sim(MoveIt2) 전용 top-down + 위치추종 yaw 반영 쿼터니언.
+
+    [2026-08 수정, sim2real 정합] 기존엔 yaw=angle_deg(박스 절대각)만 써서
+    물체 위치와 무관했다 — x>0처럼 팔이 이미 몸 가까이 뻗어있는 영역에서
+    이 절대각이 자연스러운 reach 방향과 어긋나면, 7DOF redundancy 때문에
+    IK가 여분 관절을 뒤틀어 넣는(팔이 꼬이는) branch를 고르는 것으로
+    보임. 실물 top_down_angle_quat이 yaw를 position_yaw=atan2(y,x)로
+    고정해 이 문제가 구조적으로 발생하지 않는 것과 동일한 메커니즘을
+    적용: yaw = position_yaw + angle_deg. pitch=180 자체는 sim IK에서
+    이미 검증된 값이라 그대로 유지하고, yaw 계산만 위치추종으로 바꿨다
+    (pitch=90 실물 구조를 sim에 그대로 옮기는 건 sim IK 백엔드에서
+    미검증이라 하지 않음 — grasp-kinematics-design 스킬 문서 참고).
+
+    [2026-08 추가 수정, +180도 보정] 위 수정 배포 후에도 x>0에서 팔이
+    꼬인 branch를 고르는 현상이 실측 재현됨 (override 테스트로 확인).
+    원인: euler_to_quat(roll=0, pitch=180, yaw)는 로컬 기준축을
+    Ry(180°)로 먼저 뒤집는다((x,y,z)->(-x,y,-z)) — 즉 로컬 +X축이
+    yaw 회전 전에 이미 -X로 뒤집혀 있어서, 실제 그리퍼가 향하는 수평
+    방향은 요청한 yaw가 아니라 yaw+180°가 된다. 그 결과 position_yaw를
+    그대로 넣으면 그리퍼가 물체 방향이 아니라 정반대(로봇 쪽으로 접혀
+    들어가는 방향)를 향하도록 명령한 셈이었다. +180°(π) 보정으로 실제
+    향하는 방향이 position_yaw와 일치하도록 상쇄한다.
+    """
+    position_yaw = math.atan2(y, x)
+    return euler_to_quat(
+        0.0, math.pi,
+        position_yaw + math.radians(angle_deg) + math.pi)
+
+
+def sim_box_aligned_quat(angle_deg: float) -> list:
+    """sim(MoveIt2) 전용, align 단계 전용 박스-정렬 쿼터니언
+    (position_yaw 미포함).
+
+    [2026-08 추가, 근본 원인 규명] sim_top_down_angle_quat은
+    yaw = position_yaw + angle_deg + 180으로 계산한다. approach처럼
+    angle_deg=0 고정("yaw 자유", 아무 twist나 상관없고 자세만 좋으면
+    됨)일 때는 이게 맞는 공식이지만, align은 angle_deg에 실제 박스 edge
+    절대각(perception이 tf로 base_link 기준까지 변환해서 보내는 값,
+    0~90도)이 들어온다 — 이 값에 position_yaw(물체 방향 bearing, 물체의
+    실제 회전과 무관한 값)를 또 더하면, 최종 그리퍼 방향이 박스 edge와
+    정확히 position_yaw만큼 어긋난다. 실측으로 확진됨(2026-08-15):
+    박스 (0.233,0.250), 인식각도=12.9도인데 정렬 후 모서리를 잡는
+    현상 재현 -> position_yaw=atan2(0.250,0.233)=47.0도를 역산해보니
+    사용자가 육안으로 본 "약 45도 어긋남"과 정확히 일치.
+
+    align은 이 함수(position_yaw 미포함, 순수 박스각도+180)를 써야
+    한다. YawCandidateSelector의 cost 비교(현재 orientation과의 차이)는
+    여전히 유효하다 — current_quat은 approach가 만든 실제 자세(이미
+    position_yaw가 반영된 좋은 자세)이므로, cost = |position_yaw -
+    candidate| 형태로 자연스럽게 계산되어 "박스에 정확히 정렬되면서도
+    approach 자세에서 회전량이 가장 적은" 후보를 고르게 된다 — 정렬
+    정확도와 팔 자세 자연스러움을 동시에 만족.
+
+    실물 backend(top_down_angle_quat)는 애초에 이 문제가 없다 — roll에
+    angle_deg(박스정렬), yaw에 position_yaw(자세)가 서로 다른 축으로
+    분리돼 있어서 섞이지 않는다. 이 함수는 sim 전용 보정이다.
+    """
+    return euler_to_quat(0.0, math.pi, math.radians(angle_deg) + math.pi)
 
 
 def side_quat_for(pos: dict) -> list:
@@ -258,13 +314,35 @@ class YawCandidateSelector:
         self._ik_check_fn = ik_check_fn
         self._quat_for_angle_fn = quat_for_angle_fn
 
+    # [2026-08 추가] 선택된 후보의 cost(quat_angle_diff)가 이 값을
+    # 넘으면 "가까운 후보가 전부 IK 실패해서 어쩔 수 없이 큰 회전으로
+    # 넘어갔다"는 경고를 로그로 남긴다 (동작은 그대로, 관측성만 추가).
+    LARGE_REORIENT_WARN_DEG = 90.0
+
     def pick_best(self, position: dict, angle_deg: float,
                   current_quat, log_fn=None, ik_check_z: float = None) -> tuple:
-        """mod-90 대칭인 두 후보(angle_deg%90, +90) 중 IK로 도달 가능하면서
-        current_quat과의 순수 회전각 차이(quat_angle_diff)가 더 작은 쪽을
-        선택한다. IK는 도달가능성 확인용으로만 쓰고, 후보 선택 기준(cost)은
-        FK 기반 기하학적 회전량이다 (7DOF redundancy 때문에 IK 이동량은
-        실제 회전량과 무관할 수 있음 — grasp_kinematics.py 모듈 docstring 참고).
+        """box mod-90 대칭(짧은변/긴변) × 그리퍼 mod-180 대칭(좌우 대칭
+        그리퍼라 손끝 방향 반대로 잡아도 물리적으로 같은 그립)을 조합한
+        네 후보(angle_deg%90, +90, +180, +270) 중 IK로 도달 가능하면서
+        current_quat과의 순수 회전각 차이(quat_angle_diff)가 가장 작은
+        쪽을 선택한다. IK는 도달가능성 확인용으로만 쓰고, 후보 선택
+        기준(cost)은 FK 기반 기하학적 회전량이다 (7DOF redundancy 때문에
+        IK 이동량은 실제 회전량과 무관할 수 있음 — grasp_kinematics.py
+        모듈 docstring 참고).
+
+        [2026-08 확장, 2후보→4후보] 기존엔 mod-90 두 후보만 시도했는데,
+        "가까운(cost 작은) 후보의 IK가 실패하면 남은 먼(cost 큰, 사실상
+        180도 반대) 후보로 넘어가면서 approach 대비 큰 폭으로 그리퍼가
+        도는" 사고가 실측 확인됐다(2026-08-15, x=0.039,y=-0.476,
+        angle=81.1도 케이스: 81.1도 IK 실패 -> 171.1도만 성공해서 그걸로
+        결정, cost=171.1도). 그런데 171.1도의 "그리퍼 mod-180 대칭 짝"인
+        351.1도(=171.1+180)는 quat_angle_diff가 wrap돼서 cost가 겨우
+        8.9도임에도 애초에 후보에 없어서 시도조차 못 됐다. mod-90 두
+        값 각각에 +180을 더한 두 후보를 추가해 이 사각지대를 없앤다.
+        cost 최소화 로직 자체가 이미 "먼(뒤집힌) 후보는 cost가 커서
+        후순위"로 처리하므로, 후보를 늘려도 불필요하게 큰 회전이
+        선호되는 방향으로 동작이 바뀌지 않는다 — 오히려 이전엔 없던
+        선택지(작은 cost 후보)가 추가되는 것이라 순수 개선.
 
         Args:
             current_quat: 현재 그리퍼 orientation quat (FK로 조회한 값).
@@ -276,7 +354,8 @@ class YawCandidateSelector:
         Returns:
             (best_deg, best_quat)
         """
-        candidates_deg = [angle_deg % 90, (angle_deg % 90) + 90]
+        base = angle_deg % 90
+        candidates_deg = [base, base + 90, base + 180, base + 270]
         if current_quat is None:
             if log_fn:
                 log_fn('[ik_check] 현재 orientation FK 조회 실패, 원래 각도로 진행')
@@ -304,9 +383,15 @@ class YawCandidateSelector:
                 found_any = True
         if not found_any:
             if log_fn:
-                log_fn('[ik_check] 두 후보 모두 IK 조회 실패, 원래 각도 유지')
+                log_fn('[ik_check] 네 후보 모두 IK 조회 실패, 원래 각도 유지')
             deg = angle_deg % 90
             return deg, self._quat_for_angle_fn(position, deg)
         if log_fn:
             log_fn(f'[ik_check] 선택된 각도: {best_deg:.1f}\xb0')
+            if math.degrees(best_cost) > self.LARGE_REORIENT_WARN_DEG:
+                log_fn(f'[ik_check] ⚠ 선택된 후보의 회전량이 큼 '
+                       f'({math.degrees(best_cost):.1f}\xb0 > '
+                       f'{self.LARGE_REORIENT_WARN_DEG:.0f}\xb0) -- '
+                       f'더 가까운 후보들이 전부 IK 실패해서 어쩔 수 없이 '
+                       f'선택됨. approach 대비 큰 폭으로 그리퍼가 돌 수 있음.')
         return best_deg, best_quat

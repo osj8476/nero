@@ -51,8 +51,10 @@ LLM 에이전트가 호출하는 MCP 툴(`pick_object`, `place_object`,
   `PLACE_DROP_Z=0.01`, `DESCEND_MIN_FINGERTIP_Z=0.03`,
   `MIN_REACH_R_M=0.20`(도달범위 안쪽 데드존), `BOUNDARY_R_M=0.30`,
   `JOINT_JUMP_MAX_DEG_PER_SEC=150`(비상정지 트리거),
-  `BEARING_OFFSET_DEG=188.0`(카메라-베이스 베어링 실측 오프셋, 접근 전
-  joint1 사전회전에 사용), `SCAN_DEDUP_DIST_M=0.05`.
+  `BEARING_OFFSET_DEG=188.0`(카메라-베이스 베어링 실측 오프셋 — 2026-08-17
+  이전엔 접근 전 joint1 사전회전에도 썼으나 그 용도는 제거됨, 지금은
+  placement 검증 재확인 시 "스캔 자세 재사용" 로직에서만 사용),
+  `SCAN_DEDUP_DIST_M=0.05`.
 - `placement_verification.py`: `DEFAULT_XY_TOL_M=0.035`,
   `DEFAULT_Z_TOL_M=0.04`(z 노이즈 최대 26mm 관측 때문에 느슨하게 설정
   — CLAUDE.md의 "z 오차 관대하게 판정" 규칙의 근거), `MAX_STALE_SEC=2.0`.
@@ -86,6 +88,21 @@ LLM 에이전트가 호출하는 MCP 툴(`pick_object`, `place_object`,
 - **place 시 각도 미정렬**: 2026-08부터 place quat는 박스 각도에 안
   맞추고 angle=0 고정 — "회전+하강 동시 실패(넘어짐)"를 피하기 위한
   트레이드오프로 의도적으로 채택됨.
+- **joint1 사전회전(pre-rotate) 완전 제거 (2026-08-17)**: `_do_pick`
+  진입 시 approach 전에 joint1만 먼저 물체 방향(대략, `BEARING_OFFSET_DEG`
+  보정 적용)으로 돌려놓던 로직(2026-07 도입, "물체 방향까지 큰 차이를
+  approach와 동시에 풀면 IK가 어려워진다"는 가설)을 코드에서 완전히
+  삭제. [[grasp_kinematics_ik]]의 그립각도 근본 수정(sim의
+  `position_yaw` 반영/180도 axis-flip 보정/`YawCandidateSelector` 4후보
+  확장/`sim_box_aligned_quat` 분리) 이후 재테스트한 결과, pre-rotate가
+  더 이상 필요 없고 오히려 없는 쪽이 더 안정적으로 확인됨(사용자 실측
+  확인, 2026-08-17). 즉 pre-rotate는 애초에 "부정확한 그립 각도
+  계산이 유발하는 IK 어려움"을 완화하는 우회책이었고, 근본 원인(그립
+  각도 계산 버그)이 고쳐지자 우회책 자체가 불필요해진 사례 — 향후
+  비슷하게 "증상 완화용 사전 조치"가 남아있는 다른 지점을 발견하면
+  근본 원인이 이미 고쳐졌는지부터 의심해볼 것. `BEARING_OFFSET_DEG`
+  상수 자체는 삭제하지 않음(placement 검증 재확인 로직이 별도로 사용
+  중 — 위 "주요 상수" 참고).
 - **`move_joints`가 미지정 관절을 0으로 리셋하는 버그 (2026-08-11
   수정)**: `_move_joints_sequence`(`planning_node.py`)는 지정 안 한
   관절의 "현재값 유지"를 위해 `self.latest_joint_state`를 읽었는데,

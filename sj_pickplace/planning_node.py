@@ -79,6 +79,7 @@ from .grasp_kinematics import (
     QUAT_TOP_DOWN, QUAT_TOP_DOWN_R, QUAT_TOP_DOWN_L, QUAT_TOP_DOWN_RR,
     QUAT_HOME, QUAT_SIDE_FRONT, SIDE_TAG, GRASP_DIR_MAP, LABEL_GRASP_HINT,
     quat_angle_diff, top_down_angle_quat, sim_top_down_angle_quat,
+    sim_box_aligned_quat,
     side_quat_for, side_reachability_check, auto_grasp_quat,
     resolve_grasp_quat, YawCandidateSelector, SequenceRejected,
 )
@@ -393,7 +394,7 @@ class PlanningNode(Node):
             else:
                 is_side = False
                 angle_deg = self._box_angle_deg if self._box_angle_deg is not None else 0.0
-                quat = self._top_down_quat_for(pos, angle_deg)
+                quat = self._box_aligned_quat_for(pos, angle_deg)
             self.get_logger().info(
                 f'PLACE 시작 @ {pos} | 자세: {"side" if is_side else "top"} '
                 f'{[round(v,3) for v in quat]}')
@@ -419,7 +420,7 @@ class PlanningNode(Node):
                 quat = None
             if not is_side:
                 angle_deg = self._box_angle_deg if self._box_angle_deg is not None else 0.0
-                quat = self._top_down_quat_for(pos, angle_deg)
+                quat = self._box_aligned_quat_for(pos, angle_deg)
             self.get_logger().info(f'MOVE 시작 @ {pos} | 자세: {quat}')
             threading.Thread(
                 target=self._move_sequence, args=(pos, quat), daemon=True).start()
@@ -568,9 +569,33 @@ class PlanningNode(Node):
     def _top_down_quat_for(self, pos, angle_deg):
         """
         top 그립(side 아님)용 쿼터니언을 self.use_moveit2 여부로 분기해서 반환.
+        angle_deg=0(자유 twist, approach/entry처럼 자세 최적화만 필요하고
+        박스 각도 정렬은 상관없는 곳) 전용 -- 실제 박스 edge 각도로
+        정렬해야 하는 곳(align, place/move의 self._box_angle_deg 사용)은
+        이 메서드가 아니라 _box_aligned_quat_for를 써야 한다(아래 참고).
         """
         if self.use_moveit2:
-            return sim_top_down_angle_quat(angle_deg)
+            return sim_top_down_angle_quat(pos['x'], pos['y'], angle_deg)
+        return top_down_angle_quat(pos['x'], pos['y'], angle_deg)
+
+    def _box_aligned_quat_for(self, pos, angle_deg):
+        """
+        [2026-08 추가, 근본원인 수정] 실제 박스 edge 각도(perception이
+        base_link 기준 절대각으로 tf 변환해 보내는 값)로 그리퍼를
+        정렬해야 하는 곳 전용. _top_down_quat_for와 차이는 sim에서
+        position_yaw(물체 방향 bearing)를 더하지 않는다는 것 -- angle_deg가
+        이미 절대각인데 position_yaw를 더하면 그만큼 그리퍼가 박스 edge와
+        어긋난다. 실측 확진: 박스(0.233,0.250), 인식각도=12.9도인데
+        position_yaw=bearing=47.0도만큼 어긋나서 모서리를 잡는 현상 재현
+        (2026-08-15, grasp_kinematics.sim_box_aligned_quat docstring 참고).
+
+        approach(angle_deg=0 고정, "yaw 자유" — 자세 최적화만 필요하고
+        박스 정렬은 무관)처럼 position_yaw가 있어야 IK branch가 안 꼬이는
+        곳은 이 메서드가 아니라 _top_down_quat_for를 계속 써야 한다 --
+        이 둘을 혼동하면 안 됨.
+        """
+        if self.use_moveit2:
+            return sim_box_aligned_quat(angle_deg)
         return top_down_angle_quat(pos['x'], pos['y'], angle_deg)
     # ── 시퀀스 ────────────────────────────────────────────────────────────────
     def _do_pick(self, pos, quat, is_side=False, label='', skip_reacquire=False, angle_deg=0.0):
@@ -599,58 +624,18 @@ class PlanningNode(Node):
             descend_z  = pz + DESCEND_Z + TOP_TCP_OFFSET
             descend_z  = max(descend_z, DESCEND_MIN_FLANGE_Z)
             lift_z     = pz + LIFT_Z + TOP_TCP_OFFSET
-        # [2026-07 추가] approach 진입 전 joint1만 먼저 물체 방향으로
-        # 회전. 스캔이 끝난 자세(예: joint1=145°)에서 바로 approach를
-        # 시도하면, 물체 방향까지의 큰 차이를 approach의 나머지
-        # 조인트(top-down 자세 유지)와 동시에 풀어야 해서 IK가 훨씬
-        # 어려워지는 것이 실측+로그 분석으로 확인됨. joint1만 먼저
-        # 물체 쪽으로 돌려 "쉬운 시작 상태"를 만든다.
-        # BEARING_OFFSET_DEG: joint1 명령각과 실측 물체 방향(atan2)
-        # 사이 오프셋. 스캔 실측 2개 지점(-155°→46°, 145°→-39°)의
-        # 평균 약 188°(범위 176~201°)로 확인됨. 카메라가 팔 끝에
-        # top-down으로 장착되어 "정면"의 의미가 base 기준과 반대에
-        # 가깝게 어긋나는 것으로 추정 — 완벽한 정렬이 목적이 아니라
-        # IK 부담을 줄이는 사전 회전이므로 이 정도 오차는 허용.
-        target_bearing = math.atan2(pos['y'], pos['x']) - math.radians(BEARING_OFFSET_DEG)
-        target_bearing = math.atan2(math.sin(target_bearing), math.cos(target_bearing))
-        js = self.latest_joint_state_sim
-        if js is not None:
-            joint_names = ['joint1','joint2','joint3','joint4','joint5','joint6','joint7']
-            current = dict(zip(js.name, js.position))
-            pre_target = [current.get(jn, 0.0) for jn in joint_names]
-            pre_target[0] = target_bearing
-            self.get_logger().info(
-                f'[pre-rotate] joint1을 물체 방향 근처'
-                f'({math.degrees(target_bearing):.1f}\xb0)로 사전 회전...')
-            if self.use_moveit2:
-                self.moveit2.force_reset_executing_state()
-                self.moveit2.max_velocity = 0.3
-                self.moveit2.max_acceleration = 0.3
-                self.moveit2.pipeline_id = ''
-                self.moveit2.planner_id = ''
-                self.moveit2.move_to_configuration(pre_target)
-                time.sleep(0.5)
-                deadline = time.time() + MOVE_TIMEOUT
-                while time.time() < deadline:
-                    if (not self.moveit2._MoveIt2__is_motion_requested and
-                            not self.moveit2._MoveIt2__is_executing):
-                        break
-                    time.sleep(0.1)
-                # [2026-08 수정, 코드리뷰 발견] 이전엔 motion_suceeded를
-                # 확인 안 하고 무조건 approach로 넘어갔음 -- pre-rotate가
-                # 조용히 실패해도 원인 불명의 "approach가 왜 이렇게 크게
-                # 도나"로만 보였음. 하드게이트(중단)는 걸지 않음 --
-                # pre-rotate는 순수 최적화라 실패해도 approach 자체의
-                # 재시도/OMPL 폴백이 이어받을 수 있음(handoff 6절 원칙).
-                if not self.moveit2.motion_suceeded:
-                    self.get_logger().warn(
-                        '[pre-rotate] 이동 실패/중단 (motion_suceeded=False) -- '
-                        '사전회전 안 된 자세에서 approach 시작함. '
-                        'approach 자체의 재시도/OMPL 폴백에 맡기고 계속 진행.')
-            else:
-                self._move_joints_real_wait(pre_target)
-        else:
-            self.get_logger().warn('[pre-rotate] latest_joint_state_sim=None, 사전 회전 스킵')
+        # [2026-08-17 제거] approach 진입 전 joint1 사전회전(pre-rotate)을
+        # 완전히 걷어냄. 2026-07에 "물체 방향까지 큰 차이를 approach와
+        # 동시에 풀면 IK가 어려워진다"는 가설로 도입했었으나, 이후 그립
+        # 각도 계산 자체가 근본적으로 수정되면서(sim_top_down_angle_quat
+        # position_yaw 반영 + 180도 axis-flip 보정 + YawCandidateSelector
+        # 4후보 확장 + sim_box_aligned_quat 분리 -- 자세한 이력은
+        # docs/wiki/grasp_kinematics_ik.md 참고) 재테스트한 결과 pre-rotate
+        # 없이 approach 하나로 바로 가는 쪽이 더 안정적으로 확인됨(실측,
+        # 사용자 확인). BEARING_OFFSET_DEG 상수와 이걸 쓰는 동일 패턴은
+        # placement 검증 재확인 로직(_do_place 근처, "스캔 자세 재사용"
+        # 부분)에도 있는데 거긴 이번 제거 대상이 아니다 -- 그쪽은 안
+        # 건드림.
         self.get_logger().info(
             f'1/6: 접근 (approach) | {offset_desc}')
         if not is_side:
@@ -731,7 +716,13 @@ class PlanningNode(Node):
                 # 위치와 무관해 문제가 안 드러났지만, real에서는 descend
                 # 커맨드의 위치와 orientation이 서로 다른 시점 값으로
                 # 섞여서 나가는 버그였음. 갱신된 위치로 quat도 재계산.
-                quat = self._top_down_quat_for(
+                # [2026-08 추가 수정] _current_top_angle_deg는 align이 고른
+                # 실제 박스 정렬각이므로 _top_down_quat_for(자유 twist용,
+                # sim에서 position_yaw를 더함)가 아니라 _box_aligned_quat_for
+                # 를 써야 한다 -- 안 그러면 align에서 맞게 정렬해놓고
+                # descend(실제로 집는 순간)에서 다시 position_yaw만큼
+                # 어긋난 각도로 내려가는 회귀가 생긴다.
+                quat = self._box_aligned_quat_for(
                     {'x': px, 'y': py, 'z': _refreshed_pos.get('z', pos.get('z', 0.0))},
                     _current_top_angle_deg)
 
@@ -770,14 +761,21 @@ class PlanningNode(Node):
         try:
             align_angle_deg = self._do_pick(pos, quat, is_side, label, skip_reacquire, angle_deg)
             self.get_logger().info('✅ PICK 완료')
+            # busy 해제를 발행보다 먼저 (레이스 방지 -- _scan_box_sequence 참고)
+            with self.lock:
+                self.busy = False
             self._publish_result(
                 'success', 'pick_complete',
                 extra={'remaining_scanned_boxes': self._scanned_boxes,
                        'align_angle_deg': align_angle_deg})
         except SequenceRejected as e:
+            with self.lock:
+                self.busy = False
             self._publish_result('rejected', str(e))
         except Exception as e:
             self.get_logger().error(f'PICK 오류: {e}')
+            with self.lock:
+                self.busy = False
             self._publish_result('failed', str(e))
         finally:
             with self.lock:
@@ -849,10 +847,17 @@ class PlanningNode(Node):
     def _place_sequence(self, pos, quat, is_side=False):
         try:
             result_extra = self._do_place(pos, quat, is_side)
+            # busy 해제를 발행보다 먼저 (레이스 방지 -- _scan_box_sequence 참고)
+            with self.lock:
+                self.busy = False
             self._publish_result('success', 'place_complete', extra=result_extra)
         except SequenceRejected as e:
+            with self.lock:
+                self.busy = False
             self._publish_result('rejected', str(e))
         except RuntimeError as e:
+            with self.lock:
+                self.busy = False
             self._publish_result('failed', str(e))
         finally:
             with self.lock:
@@ -1097,6 +1102,9 @@ class PlanningNode(Node):
             self.get_logger().info(
                 f'✅ STACK 종료 ({overall}, {len(tier_results)}/{len(box_refs)} tier, '
                 f'backtrack_attempts_used={result["backtrack_attempts_used"]})')
+            # busy 해제를 발행보다 먼저 (레이스 방지 -- _scan_box_sequence 참고)
+            with self.lock:
+                self.busy = False
             self._publish_result(
                 overall, 'stack_complete' if overall == 'success' else 'stack_partial',
                 extra={'tiers': tier_results,
@@ -1116,9 +1124,14 @@ class PlanningNode(Node):
             if not ok:
                 raise RuntimeError('move 이동 실패 (재시도 초과)')
             self.get_logger().info('✅ MOVE 완료')
+            # busy 해제를 발행보다 먼저 (레이스 방지 -- _scan_box_sequence 참고)
+            with self.lock:
+                self.busy = False
             self._publish_result('success', 'move_complete')
         except Exception as e:
             self.get_logger().error(f'MOVE 오류: {e}')
+            with self.lock:
+                self.busy = False
             self._publish_result('failed', str(e))
         finally:
             with self.lock:
@@ -1257,11 +1270,23 @@ class PlanningNode(Node):
             self.get_logger().info(
                 f'[스캔] 완료 ({n_steps}스텝), 누적 박스 {len(self._scanned_boxes)}개: '
                 f'{[(round(b["x"],3), round(b["y"],3), round(b["z"],3)) for b in self._scanned_boxes]}')
+            # [2026-08 수정] busy 해제를 결과 발행보다 먼저 한다. 발행이
+            # 먼저 나가면, 그 결과를 받은 클라이언트가 곧바로 다음 명령
+            # (예: stack_boxes)을 보낼 때 busy=True가 아직 안 풀린 좁은
+            # 시간창에 걸려 on_command가 새 명령을 조용히 버리는(결과 미발행)
+            # 레이스가 있었다. 이 경우 클라이언트는 원인 불명의 "timeout"만
+            # 받는다 -- "스캔 → 즉시 stack" 조합에서만 재현되고 턴을 나눠
+            # 부르면(자연스러운 지연으로 레이스를 피해서) 안 재현되는 것으로
+            # 실측 확인됨(2026-08).
+            with self.lock:
+                self.busy = False
             self._publish_result(
                 'success', f'scan_complete:{len(self._scanned_boxes)}',
                 extra={'boxes': self._scanned_boxes})
         except Exception as e:
             self.get_logger().error(f'SCAN 오류: {e}')
+            with self.lock:
+                self.busy = False
             self._publish_result('failed', str(e))
         finally:
             with self.lock:
@@ -1318,9 +1343,14 @@ class PlanningNode(Node):
                 ok = self._move_joints_real_wait(positions)
                 if not ok:
                     raise RuntimeError('move_joints 이동 실패 (재시도 초과)')
+            # busy 해제를 발행보다 먼저 (레이스 방지 -- _scan_box_sequence 참고)
+            with self.lock:
+                self.busy = False
             self._publish_result('success', 'joint_move_complete')
         except Exception as e:
             self.get_logger().error(f'MOVE_JOINTS 오류: {e}')
+            with self.lock:
+                self.busy = False
             self._publish_result('failed', str(e))
         finally:
             with self.lock:
@@ -1372,9 +1402,14 @@ class PlanningNode(Node):
             # 명령이 이 시간만큼 자연스럽게 대기하도록 한다.
             time.sleep(1.5)
             self.get_logger().info('✅ HOME 완료')
+            # busy 해제를 발행보다 먼저 (레이스 방지 -- _scan_box_sequence 참고)
+            with self.lock:
+                self.busy = False
             self._publish_result('success', 'home_complete')
         except Exception as e:
             self.get_logger().error(f'HOME 오류: {e}')
+            with self.lock:
+                self.busy = False
             self._publish_result('failed', str(e))
         finally:
             with self.lock:
@@ -1446,7 +1481,7 @@ class PlanningNode(Node):
 
         selector = YawCandidateSelector(
             ik_check_fn=_ik_check,
-            quat_for_angle_fn=self._top_down_quat_for,
+            quat_for_angle_fn=self._box_aligned_quat_for,
         )
         return selector.pick_best(
             position, angle_deg, current_quat,
