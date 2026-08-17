@@ -150,7 +150,9 @@ def quat_angle_diff(q1, q2) -> float:
 
 
 def top_down_angle_quat(x: float, y: float, angle_deg: float) -> list:
-    """top-down 유지(pitch=90) + 위치추종 yaw 반영 쿼터니언 (실물 백엔드)."""
+    """top-down 유지(pitch=90) + 위치추종 yaw 반영 쿼터니언 (실물 백엔드).
+    position_yaw = atan2(y,x) — AGX IK solver가 위치에 따라 다른 해를
+    선택하므로, 이 yaw가 특정 위치에서 IK 성공률을 높일 수 있음."""
     position_yaw = math.atan2(y, x)
     return euler_to_quat(math.radians(-angle_deg), math.radians(90), position_yaw)
 

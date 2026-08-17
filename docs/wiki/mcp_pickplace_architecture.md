@@ -140,11 +140,20 @@ LLM 에이전트가 호출하는 MCP 툴(`pick_object`, `place_object`,
   잡아먹지 않기 위함.
 - **place 실패는 tier의 목표 좌표(`base_pos + tier*box_height_m`)
   문제라 어떤 박스를 들고 있어도 해결 안 됨** — 그래서 place 단계에는
-  후보 교체 로직이 아예 없고, `SequenceRejected`/`Exception`/
-  `placement_verified is False`는 `allow_reorder` 값과 무관하게
-  지금까지와 동일하게 무조건 중단한다. **이 비대칭이 설계의 핵심이며,
-  place 실패에도 후보 교체를 "완성"하려는 시도는 하지 말 것** —
+  후보 교체 로직이 아예 없고, `SequenceRejected`/`Exception`(place
+  자체가 물리적으로 실패)은 `allow_reorder` 값과 무관하게 지금까지와
+  동일하게 무조건 중단한다. **이 비대칭이 설계의 핵심이며, place
+  실패에도 후보 교체를 "완성"하려는 시도는 하지 말 것** —
   `task_planner.py` 코드 주석에도 명시돼 있음.
+- **[2026-08-17 변경] `placement_verified is False`는 더 이상 중단
+  사유가 아니다.** 원래는 "카메라로 재확인했더니 목표에 없음/비스듬함"
+  이면 불안정한 위에 계속 쌓지 않도록 여기서도 무조건 중단했는데,
+  사용자 판단으로 이 안전장치를 제거함 — 이제 `tiers[]`에 기록만 하고
+  다음 tier로 계속 진행한다(`planning_node.py`가 경고 로그만 남김).
+  **불안정한 스택 위에 계속 쌓일 위험이 실제로 있으므로, 호출부는
+  `tiers[].placement_verified`를 반드시 확인해야 한다** — CLAUDE.md의
+  placement_verified 규칙(개별 place_object 호출에 대한 에이전트
+  행동 지침)은 이 변경과 별개로 여전히 유효.
 - 요청한 박스가 대체됐으면 응답 `tiers[].box_used`/`substituted`,
   `skipped_candidates`로 확인 가능 — CLAUDE.md의 box_index 규칙에
   이 캐비엇이 추가돼 있음.

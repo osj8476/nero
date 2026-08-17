@@ -580,23 +580,32 @@ def stack_boxes(box_indices: list, base_x: float, base_y: float, base_z: float,
         allow_reorder: True면 어떤 tier에서 지정한 박스의 pick이
             실패/거부됐을 때, 같은 target_label의 스캔된 다른 박스(여기
             box_indices에 없는 것들)로 자동 대체를 시도한다 (place
-            단계는 대체하지 않음 -- place 실패/거부 및 placement_verified
-            =False는 allow_reorder 값과 무관하게 즉시 중단하고 이전과
-            동일하게 동작한다). 기본값 False -- box_indices로 순서를
+            단계는 대체하지 않음 -- place 자체가 물리적으로 실패/거부되면
+            allow_reorder 값과 무관하게 즉시 중단한다. placement_verified
+            =False는 [2026-08-17 변경] 더 이상 중단 사유가 아니다 --
+            아래 ⚠ 참고). 기본값 False -- box_indices로 순서를
             명시적으로 지정했을 수 있으므로, 조용히 다른 박스로 바뀌는
             동작은 opt-in이다.
 
-    ⚠ 중간 tier에서 pick/place가 실패하거나 그 tier의 placement_verified가
-    false로 나오면, 그 시점에서 멈추고 status="partial"로 그때까지의
-    결과만 반환한다 (불안정한 위에 계속 쌓지 않기 위한 안전장치). tiers
-    배열의 마지막 항목을 보고 어디서 멈췄는지 판단하라 -- 실패한 tier의
-    박스는 이미 집었을 수도(place 단계 실패) 아예 못 집었을 수도(pick
-    단계 실패) 있으니, list_detected_objects로 실제 상태를 확인 후
-    필요하면 개별 pick_object/place_object로 이어서 처리하라.
+    ⚠ 중간 tier에서 pick/place 자체가 실패하면(물리적으로 이동/파지
+    불가) 그 시점에서 멈추고 status="partial"로 그때까지의 결과만
+    반환한다. tiers 배열의 마지막 항목을 보고 어디서 멈췄는지 판단하라
+    -- 실패한 tier의 박스는 이미 집었을 수도(place 단계 실패) 아예 못
+    집었을 수도(pick 단계 실패) 있으니, list_detected_objects로 실제
+    상태를 확인 후 필요하면 개별 pick_object/place_object로 이어서
+    처리하라.
     allow_reorder=True일 때는 status="partial"/pick 실패가 곧바로 전체
     중단을 의미하지 않을 수 있으니, 먼저 tiers[].substituted(대체된
     박스로 성공했는지)와 skipped_candidates(시도했다가 제외된 후보들)를
     확인하라 -- 실제로는 다른 박스로 대체돼 그 tier가 성공했을 수 있다.
+
+    ⚠ [2026-08-17 변경] placement_verified=False는 더 이상 중단시키지
+    않는다 -- 물리적으로 place가 끝났으면(카메라 재확인 결과와 무관하게)
+    다음 tier로 계속 진행한다. 즉 status="success"로 끝나도 중간 tier가
+    불안정하게 놓였을 수 있다 -- **반드시 tiers[].placement_verified를
+    각 tier마다 확인하라.** false가 하나라도 있으면 그 위에 쌓인 박스들은
+    불안정한 기반 위에 있을 수 있으니 list_detected_objects로 실제
+    상태를 재확인하는 것을 권장한다.
 
     Returns:
         {"status": "success"|"partial"|"rejected"|"timeout",

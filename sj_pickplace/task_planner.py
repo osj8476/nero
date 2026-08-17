@@ -11,8 +11,18 @@ pick 실패는 "어떤 박스를 골랐느냐"에 좌우되는 문제라 후보�
 있다. place 실패는 tier의 목표 좌표(base_pos + tier*box_height_m, 어떤
 박스를 들고 있든 동일)의 문제라 박스를 바꿔도 해결되지 않는다. **따라서
 이 백트래킹은 오직 pick 단계의 박스 후보 재선택에만 적용하고, place
-실패 및 placement_verified is False에서의 무조건 중단은 allow_reorder
-값과 무관하게 항상 동일하게 유지한다.**
+단계의 SequenceRejected/Exception(물리적으로 place 자체가 실패)에서의
+무조건 중단은 allow_reorder 값과 무관하게 항상 동일하게 유지한다.**
+
+## placement_verified is False 처리 (2026-08-17 변경)
+예전엔 place가 물리적으로는 성공했어도 `placement_verified is False`
+(카메라로 재확인했는데 목표 위치에 없음/비스듬함)면 이후 tier를 아예
+중단했다 — "불안정한 위에 계속 쌓지 않기 위한 안전장치"였다. 사용자
+판단으로 이 무조건 중단을 제거함: 이제 `placement_verified is False`는
+`tiers[]`에 기록만 되고 다음 tier로 계속 진행한다. 실제로 불안정한
+스택 위에 계속 쌓을 위험은 여전히 있으므로, 호출부(MCP 응답의
+`tiers[].placement_verified`)를 반드시 확인해야 한다 — CLAUDE.md의
+placement_verified 규칙 참고.
 
 ## 콜백 주입 패턴
 grasp_kinematics.YawCandidateSelector가 이미 쓰는 "ROS 연산을 콜백으로
@@ -255,10 +265,13 @@ def run_stack_plan(
             'placement_verified': place_extra['placement_verified'],
             'verification_reason': place_extra['verification_reason'],
         })
-        if place_extra['placement_verified'] is False:
-            # [설계 원칙] placement_verified is False의 무조건 중단은
-            # allow_reorder 값과 절대 무관하다 -- 여기를 조건부로 만들지 말 것.
-            break
+        # [2026-08-17 변경] placement_verified is False에서도 더 이상
+        # 스택 전체를 중단하지 않는다 (예전 "설계 원칙"은 불안정한 위에
+        # 계속 쌓지 않기 위한 안전장치였으나, 사용자 판단으로 제거 --
+        # planning_node.py가 이 tier의 결과(tiers[].placement_verified)를
+        # 로그로 남기고, 다음 tier로 계속 진행한다). tiers 리스트에는
+        # placement_verified 값이 그대로 기록되므로, 호출부(MCP 응답)에서
+        # 여전히 어떤 tier가 검증 실패했는지 확인할 수 있다.
 
     all_ok = (len(tiers) == len(requested_boxes)
               and tiers and tiers[-1]['status'] == 'success')

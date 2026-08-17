@@ -190,8 +190,9 @@ class TestRunStackPlan(unittest.TestCase):
         self.assertEqual(result['tiers'][0]['status'], 'rejected')
         self.assertEqual(result['status'], 'partial')
 
-    # 4. placement_verified=False는 예산/allow_reorder와 무관하게 무조건 중단
-    def test_placement_verified_false_stops_unconditionally(self):
+    # 4. [2026-08-17 변경] placement_verified=False는 더 이상 중단시키지
+    # 않는다 -- tiers[]에 기록만 하고 다음 tier로 계속 진행한다.
+    def test_placement_verified_false_does_not_stop(self):
         box0 = _box(0.30, 0.0)
         box1 = _box(0.30, 0.10)
         pick_fn = FakePick()
@@ -201,11 +202,14 @@ class TestRunStackPlan(unittest.TestCase):
         result, _ = self._run(
             [box0, box1], [], pick_fn, place_fn, allow_reorder=True)
 
-        self.assertEqual(result['status'], 'partial')
-        self.assertEqual(len(result['tiers']), 1)
+        # tier0의 placement_verified=False가 기록되지만, tier1도 계속
+        # 진행돼 두 tier 모두 처리됨(tier1은 verified 기본값 True).
+        self.assertEqual(len(result['tiers']), 2)
         self.assertFalse(result['tiers'][0]['placement_verified'])
-        # tier 1의 pick_fn은 아예 호출되지 않아야 함.
-        self.assertEqual(len(pick_fn.calls), 1)
+        self.assertTrue(result['tiers'][1]['placement_verified'])
+        self.assertEqual(result['status'], 'success')
+        # tier 1의 pick_fn도 호출돼야 함(중단 안 됐으므로).
+        self.assertEqual(len(pick_fn.calls), 2)
 
     # 5. allow_reorder=False면 fallback_pool이 있어도 완전히 무시됨
     def test_allow_reorder_false_ignores_fallback_pool(self):
