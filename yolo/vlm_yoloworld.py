@@ -36,6 +36,7 @@ import argparse
 import base64
 import io
 import os
+import threading
 import time
 from typing import List
 
@@ -91,37 +92,38 @@ def build_app(
     else:
         print(f"[server :{port}] [WARN] CPU mode (very slow)")
 
-    print(f"[server :{port}] loading YOLO-World ({model_name})...")
-    from ultralytics import YOLOWorld
-    model = YOLOWorld(model_name)
-    if device == "cuda":
-        # half precision은 ultralytics가 predict() 호출 시 자동 처리 가능
-        # 명시적으로 fuse하면 약간 더 빠름
+    # .engine(TRT) 파일은 클래스가 export 시 고정 → YOLO로 로드, set_classes 불필요
+    # .pt 파일은 YOLOWorld로 로드하고 요청마다 set_classes로 동적 변경
+    is_trt = model_name.endswith(".engine")
+
+    print(f"[server :{port}] loading {'TRT engine' if is_trt else 'YOLO-World'} ({model_name})...")
+    if is_trt:
+        from ultralytics import YOLO
+        model = YOLO(model_name)
+        print(f"[server :{port}] TRT engine loaded (fixed classes: {list(model.names.values())})")
+    else:
+        from ultralytics import YOLOWorld
+        model = YOLOWorld(model_name)
+        if device == "cuda":
+            try:
+                model.fuse()
+            except Exception:
+                pass
+        # CLIP 의존성 fail-fast 체크
         try:
-            model.fuse()
-        except Exception:
-            pass
-    # ── Startup 시점에 CLIP 의존성 fail-fast 체크 ──
-    # set_classes()가 처음 호출될 때 CLIP을 import한다.
-    # CLIP이 없으면 매 요청마다 실패하고 무한 재시도하므로,
-    # 여기서 한 번 호출해서 의존성 문제면 즉시 죽이고 명확한 에러 표시.
-    try:
-        model.set_classes(["object"])  # dummy 라벨로 의존성만 체크
-        print(f"[server :{port}] CLIP text encoder OK")
-    except ImportError as e:
-        print(f"\n[server :{port}] ❌ CLIP 의존성 누락:\n  {e}")
-        print(f"[server :{port}] 다음 중 하나를 실행하세요:")
-        print(f"    pip install 'ultralytics==8.2.103'   # 다운그레이드 (가장 빠름)")
-        print(f"    pip install ftfy regex tqdm && pip install git+https://github.com/ultralytics/CLIP.git")
-        raise SystemExit(1)
+            model.set_classes(["object"])
+            print(f"[server :{port}] CLIP text encoder OK")
+        except ImportError as e:
+            print(f"\n[server :{port}] ❌ CLIP 의존성 누락:\n  {e}")
+            print(f"[server :{port}] pip install ftfy regex tqdm && "
+                  f"pip install git+https://github.com/ultralytics/CLIP.git")
+            raise SystemExit(1)
 
     print(f"[server :{port}] model ready "
           f"(conf={conf_threshold}, iou={iou_threshold}, imgsz={imgsz})")
 
-    # 라벨 캐싱: 같은 라벨 리스트면 set_classes() 호출 생략
-    # (set_classes()는 CLIP 텍스트 인코더를 돌려서 prompt embedding을 만드는데,
-    #  매 호출마다 하면 latency가 100ms+ 추가됨)
-    state = {"current_labels_key": ("object",)}  # dummy 등록된 상태로 시작
+    _model_lock = threading.Lock()
+    state = {"current_labels_key": ("object",)}
 
     # 공백 포함 라벨 → YOLO-World 친화적 단일토큰 치환 테이블
     # YOLO-World 텍스트 인코더(CLIP)가 공백 있는 라벨을 두 토큰으로 쪼개
@@ -153,13 +155,14 @@ def build_app(
         key = tuple(cleaned)
         if state["current_labels_key"] != key:
             print(f"[server :{port}] set_classes({cleaned})  (remap: {remap_back})")
-            try:
-                model.set_classes(list(cleaned))
-                state["current_labels_key"] = key
-                state["remap_back"] = remap_back
-            except Exception as e:
-                state["current_labels_key"] = key
-                raise HTTPException(500, f"set_classes failed: {e}")
+            with _model_lock:
+                try:
+                    model.set_classes(list(cleaned))
+                    state["current_labels_key"] = key
+                    state["remap_back"] = remap_back
+                except Exception as e:
+                    state["current_labels_key"] = key
+                    raise HTTPException(500, f"set_classes failed: {e}")
         else:
             remap_back = state.get("remap_back", {})
         return cleaned, remap_back
@@ -187,8 +190,14 @@ def build_app(
         if not req.labels:
             return DetectResponse(detections=[], inference_ms=0.0)
 
-        # 라벨 등록 (캐싱)
-        active_labels, remap_back = _ensure_labels(req.labels)
+        if is_trt:
+            # TRT: 클래스 고정, req.labels로 결과 필터링만
+            wanted = set(l.strip().lower() for l in req.labels if l.strip())
+            active_labels = list(wanted)
+            remap_back = {}
+        else:
+            # PT: CLIP으로 동적 set_classes
+            active_labels, remap_back = _ensure_labels(req.labels)
         if not active_labels:
             return DetectResponse(detections=[], inference_ms=0.0)
 
@@ -197,18 +206,18 @@ def build_app(
         img_np = np.array(img)  # PIL → numpy (H, W, 3) RGB
         H, W = img_np.shape[:2]
 
-        try:
-            results = model.predict(
-                img_np,
-                conf=conf_threshold,
-                iou=iou_threshold,
-                imgsz=imgsz,
-                device=device,
-                verbose=False,
-                half=(device == "cuda"),
-            )
-        except Exception as e:
-            raise HTTPException(500, f"inference failed: {e}")
+        with _model_lock:
+            try:
+                results = model.predict(
+                    img_np,
+                    conf=conf_threshold,
+                    iou=iou_threshold,
+                    imgsz=imgsz,
+                    device=device,
+                    verbose=False,
+                )
+            except Exception as e:
+                raise HTTPException(500, f"inference failed: {e}")
 
         # ── 결과 파싱 ──
         # [YOLO-World 버그 우회]
@@ -224,13 +233,6 @@ def build_app(
 
             # results[0].names: {int: str} — predict() 시점의 실제 클래스 이름 매핑
             names_map: dict = results[0].names  # e.g. {0: 'cellphone', 3: 'person', ...}
-
-            print(f"[DEBUG] active_labels: {active_labels}")
-            print(f"[DEBUG] names_map: {names_map}")
-            for i in range(len(xyxy)):
-                ci = int(cls_idx[i])
-                yolo_label = names_map.get(ci, None)
-                print(f"[DEBUG] box[{i}] cls_idx={ci} label={yolo_label} conf={confs[i]:.3f}")
 
             # active_labels(set_classes에 넘긴 것) 기준으로 필터링
             active_set = set(active_labels)
@@ -266,7 +268,7 @@ def build_app(
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int, required=True)
+    parser.add_argument("--port", type=int, default=8002)
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument(
         "--model", type=str,

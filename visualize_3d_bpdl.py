@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-visualize_3d_ros.py  (v3)
+visualize_3d_bpdl.py  (v4)
 /camera/color/image_raw + /camera/camera_info + /detected_objects 구독.
-- 초록색: 카메라 좌표계 XYZ
-- 노란색: base_link 기준 XYZ (실물 로봇 joint state 반영)
+- bbox 색상: 라벨별 고유 색
+- bbox 위: 라벨명 + confidence
+- bbox 중간 위: cam XYZ (초록)
+- bbox 중간 아래: base_link XYZ (노란)
 
 실행:
-  source /opt/ros/humble/setup.bash
+  source /opt/ros/jazzy/setup.bash
   source /home/bpdl/ros2_ws/install/setup.bash
-  python3 /home/bpdl/nero/visualize_3d_bpdl.py
+  python3 /home/bpdl/sj_real/nero/visualize_3d_bpdl.py
 종료: q
 """
 
@@ -23,6 +25,15 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from std_msgs.msg import String
 from sensor_msgs.msg import Image, CameraInfo
+
+
+def _label_color(label: str) -> tuple:
+    """라벨 해시로 결정론적 BGR 색상 생성 (항상 동일 라벨 = 동일 색)."""
+    h = (hash(label) * 2654435761) & 0xFFFFFF
+    b = max(80, (h >> 16) & 0xFF)
+    g = max(80, (h >>  8) & 0xFF)
+    r = max(80,  h        & 0xFF)
+    return (b, g, r)
 
 
 class Visualizer3D(Node):
@@ -79,7 +90,7 @@ def _stop(sig, frame):
     global _running
     _running = False
 
-signal.signal(signal.SIGINT, _stop)
+signal.signal(signal.SIGINT,  _stop)
 signal.signal(signal.SIGTERM, _stop)
 
 
@@ -117,36 +128,43 @@ def main():
                 cx_px = int(c2d.get("x", 0) * W)
                 cy_px = int(c2d.get("y", 0) * H)
 
-                # 카메라 좌표계 XYZ 계산 (핀홀 역투영)
+                color = _label_color(label)
+
+                # ── bbox + 중심점 ──────────────────────────────────────────
+                cv2.rectangle(disp, (x1, y1), (x2, y2), color, 2)
+                cv2.circle(disp, (cx_px, cy_px), 6, (0, 0, 255), -1)
+
+                # ── 라벨 + confidence (bbox 위) ────────────────────────────
+                tag = f"{label} {conf:.2f}"
+                (tw, th), baseline = cv2.getTextSize(
+                    tag, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
+                tag_y = max(y1 - 6, th + 4)
+                cv2.rectangle(disp, (x1, tag_y - th - 4),
+                              (x1 + tw + 4, tag_y + baseline), color, -1)
+                cv2.putText(disp, tag, (x1 + 2, tag_y),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 2)
+
+                # ── 카메라 XYZ (초록, bbox 중앙 위) ───────────────────────
                 if fx and depth_m:
                     cam_x = (cx_px - cx_i) * depth_m / fx
                     cam_y = (cy_px - cy_i) * depth_m / fy
                     cam_z = depth_m
-                else:
-                    cam_x = cam_y = cam_z = None
-
-                # base_link XYZ
-                bx = c3d.get("x"); by = c3d.get("y"); bz = c3d.get("z")
-
-                # bbox + 중심점
-                cv2.rectangle(disp, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.circle(disp, (cx_px, cy_px), 6, (0, 0, 255), -1)
-
-                # bbox 중앙 위 — 카메라 XYZ (초록)
-                if cam_x is not None:
                     coord = f"cam({cam_x:.2f},{cam_y:.2f},{cam_z:.2f})"
-                    (tw, th), _ = cv2.getTextSize(coord, cv2.FONT_HERSHEY_SIMPLEX, 0.48, 2)
-                    tx = x1 + (x2-x1-tw)//2
-                    cv2.putText(disp, coord, (tx, (y1+y2)//2 - 12),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 255, 0), 2)
+                    (tw, _), _ = cv2.getTextSize(
+                        coord, cv2.FONT_HERSHEY_SIMPLEX, 0.44, 1)
+                    tx = x1 + (x2 - x1 - tw) // 2
+                    cv2.putText(disp, coord, (tx, (y1 + y2) // 2 - 12),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.44, (0, 255, 0), 1)
 
-                # bbox 중앙 아래 — base_link XYZ (노란)
+                # ── base_link XYZ (노란, bbox 중앙 아래) ──────────────────
+                bx = c3d.get("x"); by = c3d.get("y"); bz = c3d.get("z")
                 if bx is not None:
                     b_coord = f"base({bx:.2f},{by:.2f},{bz:.2f})"
-                    (tw, th), _ = cv2.getTextSize(b_coord, cv2.FONT_HERSHEY_SIMPLEX, 0.48, 2)
-                    tx = x1 + (x2-x1-tw)//2
-                    cv2.putText(disp, b_coord, (tx, (y1+y2)//2 + 20),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 200, 255), 2)
+                    (tw, _), _ = cv2.getTextSize(
+                        b_coord, cv2.FONT_HERSHEY_SIMPLEX, 0.44, 1)
+                    tx = x1 + (x2 - x1 - tw) // 2
+                    cv2.putText(disp, b_coord, (tx, (y1 + y2) // 2 + 20),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.44, (0, 200, 255), 1)
 
             cv2.imshow("3D Detection (base_link)", disp)
             if cv2.waitKey(1) & 0xFF == ord('q'):

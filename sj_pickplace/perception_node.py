@@ -36,7 +36,7 @@ perception_node.py  (박스 전용 단순화 버전 v3 — 각도보정 복원�
   BOX_HEALTH_URL  : 헬스체크 주소 (기본: http://127.0.0.1:8002/health)
   CAM_EXPOSURE    : RealSense 노출값 (기본: 500, 0이면 자동노출)
   DISPATCH_RATE_HZ: 추론 요청 주기 (기본: 10Hz)
-  TARGET_LABEL    : 탐지 대상 클래스 (기본: box)
+  TARGET_LABEL    : 탐지 대상 클래스 (기본: box). 쉼표로 복수 지정 가능: "box,bottle"
   BASE_FRAME      : tf 변환 목표 프레임 (기본: base_link)
   CAMERA_OPTICAL_FRAME : 카메라 광학 프레임 (기본: camera_color_optical_frame)
 """
@@ -76,11 +76,15 @@ from sj_pickplace.camera_calibration import (
 # ──────────────────────────────────────────────
 # 설정
 # ──────────────────────────────────────────────
-TARGET_LABEL     = os.environ.get("TARGET_LABEL", "box")
+_raw_labels      = os.environ.get("TARGET_LABEL", "box")
+TARGET_LABELS    = [l.strip() for l in _raw_labels.split(",") if l.strip()]
+TARGET_LABEL     = TARGET_LABELS[0]  # 단일 라벨 기대 코드와의 하위 호환용
 BOX_SERVER_URL   = os.environ.get("BOX_SERVER_URL", "http://127.0.0.1:8002/detect")
 BOX_HEALTH_URL   = os.environ.get("BOX_HEALTH_URL", "http://127.0.0.1:8002/health")
 REQUEST_TIMEOUT  = float(os.environ.get("REQUEST_TIMEOUT", "3.0"))
 DISPATCH_RATE_HZ = float(os.environ.get("DISPATCH_RATE_HZ", "10.0"))
+# 이미지 하단 N% 마스킹 (그리퍼가 카메라에 잡히는 경우 사용, 기본 0=비활성)
+GRIPPER_MASK_BOTTOM = float(os.environ.get("GRIPPER_MASK_BOTTOM", "0.0"))
 
 # 카메라 해상도
 CAM_W   = int(os.environ.get("CAM_W", "640"))
@@ -445,7 +449,7 @@ class PerceptionNode(Node):
         self.timer = self.create_timer(1.0 / DISPATCH_RATE_HZ, self._dispatch_inference)
 
         self.get_logger().info(
-            f'PerceptionNode 시작 | target={TARGET_LABEL} | '
+            f'PerceptionNode 시작 | target={TARGET_LABELS} | '
             f'server={BOX_SERVER_URL} | exposure={CAM_EXPOSURE} | '
             f'tf: {CAMERA_OPTICAL_FRAME} -> {BASE_FRAME}')
 
@@ -573,12 +577,17 @@ class PerceptionNode(Node):
     def _send_and_publish_impl(self, color: np.ndarray, depth: np.ndarray, _stamp):
         try:
             # 원본 크기(640x480)로 전송 — 다운스케일 시 탐지 누락 방지
+            if GRIPPER_MASK_BOTTOM > 0.0:
+                h = color.shape[0]
+                cutoff = int(h * (1.0 - GRIPPER_MASK_BOTTOM))
+                color = color.copy()
+                color[cutoff:, :] = 0
             ok, buf = cv2.imencode('.jpg', color, [cv2.IMWRITE_JPEG_QUALITY, 90])
             if not ok:
                 return
             img_b64 = base64.b64encode(buf.tobytes()).decode('ascii')
 
-            payload = {"image_b64": img_b64, "labels": [TARGET_LABEL]}
+            payload = {"image_b64": img_b64, "labels": TARGET_LABELS}
             r = requests.post(BOX_SERVER_URL, json=payload, timeout=REQUEST_TIMEOUT)
             if r.status_code != 200:
                 return
