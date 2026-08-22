@@ -197,8 +197,12 @@ run_bg "8_visualize" "${SRC_CMD} && python3 ~/nero/visualize_3d_bpdl.py"
 sleep 2
 
 # ── 선택 사항: perception/planning/박스서버까지 여기서 같이 켜고 싶으면 주석 해제 ──
-echo "8) 박스 서버"
-run_bg "8_box_server" "python3 ~/nero/yolo/vlm_boxyolo.py --port 8002 --model ~/nero/yolo/best.pt --conf 0.75"
+# [2026-08-19] vlm_boxyolo.py가 듀얼 모델 서버(box 커스텀 + COCO 25종)로
+# 바뀌면서 인자명이 --conf → --conf-box/--conf-coco로 변경됨. 옛 --conf 인자
+# 그대로 두면 argparse가 즉시 에러내며 죽는다(실측 확인, 스크래치 포트 8011
+# 검증 결과 box 검출 정확도는 기존과 100% 동일 — conf_box=0.75 유지로 회귀 없음).
+echo "8) 박스 서버 (듀얼: box 커스텀 + COCO 25종)"
+run_bg "8_box_server" "python3 ~/nero/yolo/vlm_boxyolo.py --port 8002 --model ~/nero/yolo/best.pt --model-coco yolov8n.pt --conf-box 0.75 --conf-coco 0.25"
 sleep 3
 
 echo "9) perception_node_sim"
