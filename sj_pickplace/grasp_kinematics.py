@@ -83,7 +83,7 @@ class SequenceRejected(RuntimeError):
 
 # ── side 그립 전용 상수 (대규모 IK 그리드 전수조사 결과) ──────────────────
 SIDE_MIN_DIST = 0.32     # 이 거리 미만이면 IK 시도 없이 즉시 거부
-SIDE_PITCH_DEG = 90      # side 그립 손목 pitch (그리퍼를 눕히는 각도)
+SIDE_PITCH_DEG = -90      # side 그립 손목 pitch (그리퍼를 눕히는 각도)
 SIDE_TCP_OFFSET = 0.1358  # 미터. top과 동일 실측값 적용 (side 별도 실측 전까지,
                           # 2026-08 기준 아직 검증 대기 — 변경 시 주의)
 
@@ -221,9 +221,9 @@ def sim_box_aligned_quat(angle_deg: float) -> list:
 def side_quat_for(pos: dict) -> list:
     """로봇(base_link 원점) -> 물체 위치 방향을 바라보는 '옆에서 수평 그립' 쿼터니언."""
     x, y = pos.get('x', 0.0), pos.get('y', 0.0)
-    yaw = math.atan2(y, x)
+    yaw = -math.atan2(y, x)+math.radians(SIDE_PITCH_DEG)
     pitch = math.radians(SIDE_PITCH_DEG)
-    roll = 0.0
+    roll =  0.0
     return euler_to_quat(roll, pitch, yaw)
 
 
