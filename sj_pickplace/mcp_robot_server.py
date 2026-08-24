@@ -17,13 +17,26 @@ import os
 import json
 import time
 import threading
+import logging
 from typing import Optional
 
+_logger = logging.getLogger(__name__)
+
+import base64
+import requests as _requests
+
+import cv2
+import numpy as np
 import rclpy
+import rclpy.time
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from std_msgs.msg import String
-from sensor_msgs.msg import JointState
+from sensor_msgs.msg import Image, JointState, CameraInfo
+from geometry_msgs.msg import PointStamped
+from rclpy.duration import Duration
+import tf2_ros
+import tf2_geometry_msgs  # noqa: F401 — PointStamped 변환 등록용
 
 from mcp.server.fastmcp import FastMCP
 
@@ -104,10 +117,38 @@ class RosBridgeNode(Node):
         # /joint_states로 교체.
         self.sub_joints = self.create_subscription(
             JointState, '/joint_states', self._on_joint_state, qos)
+        # infer_grasp용 카메라 이미지 버퍼 — camera device 직접 접근 없음,
+        # perception_node가 발행하는 ROS2 topic만 구독한다.
+        self.sub_image = self.create_subscription(
+            Image, '/camera/color/image_raw', self._on_image, qos)
+        self.sub_depth = self.create_subscription(
+            Image, '/camera/depth/image_raw', self._on_depth, qos)
+        self.sub_caminfo = self.create_subscription(
+            CameraInfo, '/camera/camera_info', self._on_camera_info, qos)
+
+        # TF 버퍼 — ground_object에서 camera_color_optical_frame → base_link 변환
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
         self._objects_lock = threading.Lock()
         self._latest_objects: list = []
         self._last_obj_stamp: float = 0.0
+
+        self._image_lock = threading.Lock()
+        self._latest_image: Optional[np.ndarray] = None  # BGR uint8
+        self._last_image_stamp: float = 0.0
+
+        self._depth_lock = threading.Lock()
+        self._latest_depth: Optional[np.ndarray] = None  # float32 meters
+        self._last_depth_stamp: float = 0.0
+
+        self._caminfo_lock = threading.Lock()
+        self._cam_fx: Optional[float] = None
+        self._cam_fy: Optional[float] = None
+        self._cam_cx: Optional[float] = None
+        self._cam_cy: Optional[float] = None
+        self._cam_width: int = 640
+        self._cam_height: int = 480
 
         self._joint_lock = threading.Lock()
         self._latest_joint_state = None
@@ -142,6 +183,55 @@ class RosBridgeNode(Node):
         with self._joint_lock:
             state = dict(self._latest_joint_state) if self._latest_joint_state else None
             return state, self._last_joint_stamp
+
+    def _on_image(self, msg: Image):
+        try:
+            channels = len(msg.data) // (msg.height * msg.width)
+            arr = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, channels)
+            if msg.encoding in ('rgb8', 'RGB8'):
+                arr = arr[:, :, ::-1]  # RGB→BGR
+            with self._image_lock:
+                self._latest_image = arr.copy()
+                self._last_image_stamp = time.time()
+        except Exception as e:
+            self.get_logger().warn(f'_on_image 처리 실패: {e}')
+
+    def get_image(self) -> tuple:
+        with self._image_lock:
+            img = self._latest_image.copy() if self._latest_image is not None else None
+            return img, self._last_image_stamp
+
+    def _on_depth(self, msg: Image):
+        try:
+            if msg.encoding != "32FC1":
+                return
+            arr = np.frombuffer(msg.data, dtype=np.float32).reshape(msg.height, msg.width)
+            with self._depth_lock:
+                self._latest_depth = arr.copy()
+                self._last_depth_stamp = time.time()
+        except Exception as e:
+            self.get_logger().warn(f'_on_depth 처리 실패: {e}')
+
+    def get_depth(self) -> tuple:
+        with self._depth_lock:
+            d = self._latest_depth.copy() if self._latest_depth is not None else None
+            return d, self._last_depth_stamp
+
+    def _on_camera_info(self, msg: CameraInfo):
+        with self._caminfo_lock:
+            k = msg.k
+            self._cam_fx = k[0]
+            self._cam_fy = k[4]
+            self._cam_cx = k[2]
+            self._cam_cy = k[5]
+            self._cam_width  = msg.width
+            self._cam_height = msg.height
+
+    def get_cam_intrinsics(self) -> tuple:
+        with self._caminfo_lock:
+            return (self._cam_fx, self._cam_fy,
+                    self._cam_cx, self._cam_cy,
+                    self._cam_width, self._cam_height)
 
     def _on_result(self, msg: String):
         try:
@@ -188,6 +278,534 @@ _ros_lock = threading.Lock()
 # 물체는 재스캔 없이도 이 캐시로 충분히 정확함).
 _last_scanned_boxes: list = []
 _last_scan_stamp: float = 0.0
+
+# analyze_scene 결과 캐시 — hierarchical grounding에서 parent bbox 재사용
+_last_scene_objects: list = []   # [{"label":..., "bbox":[...], "source":...}, ...]
+_last_scene_stamp: float = 0.0
+_scene_cache_lock = threading.Lock()
+
+
+# ── ground_object 헬퍼 ────────────────────────────────────────────────────────
+
+def _px2cam(u: float, v: float, depth_m: float,
+            fx: float, fy: float, cx: float, cy: float) -> Optional[dict]:
+    """픽셀 좌표 + depth → camera_color_optical_frame 3D 점."""
+    if not (0.05 < depth_m < 3.0):
+        return None
+    return {
+        "x": round((u - cx) * depth_m / fx, 4),
+        "y": round((v - cy) * depth_m / fy, 4),
+        "z": round(float(depth_m), 4),
+    }
+
+
+def _sample_depth_robust(depth: np.ndarray, x1: int, y1: int,
+                          x2: int, y2: int) -> Optional[float]:
+    """bbox 영역에서 valid depth (0.05–3.0m)의 median. 실패 시 None."""
+    h, w = depth.shape
+    x1c, x2c = max(0, x1), min(w, x2)
+    y1c, y2c = max(0, y1), min(h, y2)
+    if x2c <= x1c or y2c <= y1c:
+        return None
+    valid = depth[y1c:y2c, x1c:x2c]
+    valid = valid[(valid > 0.05) & (valid < 3.0)]
+    if len(valid) < 3:
+        # center window 폴백
+        cy_px = (y1c + y2c) // 2
+        cx_px = (x1c + x2c) // 2
+        win = 15
+        patch = depth[max(0, cy_px - win):min(h, cy_px + win),
+                      max(0, cx_px - win):min(w, cx_px + win)]
+        valid = patch[(patch > 0.05) & (patch < 3.0)]
+    if len(valid) == 0:
+        return None
+    return float(np.median(valid))
+
+
+def _cam_to_base(cam_xyz: dict) -> Optional[dict]:
+    """camera_color_optical_frame 점 → base_link 좌표. 실패 시 None."""
+    try:
+        pt = PointStamped()
+        pt.header.frame_id = "camera_color_optical_frame"
+        pt.header.stamp = rclpy.time.Time().to_msg()
+        pt.point.x = cam_xyz["x"]
+        pt.point.y = cam_xyz["y"]
+        pt.point.z = cam_xyz["z"]
+        result = _ros_node.tf_buffer.transform(
+            pt, "base_link", timeout=Duration(seconds=0.3))
+        return {
+            "x": round(result.point.x, 3),
+            "y": round(result.point.y, 3),
+            "z": round(result.point.z, 3),
+        }
+    except Exception:
+        return None
+
+
+def _crop_b64(img_bgr: np.ndarray, bbox_norm: list, padding: float = 0.07) -> tuple:
+    """parent bbox 영역을 crop하고 base64 JPEG + crop pixel bbox 반환.
+    padding: bbox 주변에 추가할 여유 비율 (기본 7%)"""
+    h, w = img_bgr.shape[:2]
+    x1n, y1n, x2n, y2n = bbox_norm
+    pw = (x2n - x1n) * padding
+    ph = (y2n - y1n) * padding
+    x1n = max(0.0, x1n - pw)
+    y1n = max(0.0, y1n - ph)
+    x2n = min(1.0, x2n + pw)
+    y2n = min(1.0, y2n + ph)
+    x1, y1 = max(0, int(x1n * w)), max(0, int(y1n * h))
+    x2, y2 = min(w, int(x2n * w)), min(h, int(y2n * h))
+    if x2 - x1 < 8 or y2 - y1 < 8:
+        raise ValueError(f'crop 너무 작음: {x2-x1}x{y2-y1}px')
+    ok, buf = cv2.imencode('.jpg', img_bgr[y1:y2, x1:x2], [cv2.IMWRITE_JPEG_QUALITY, 85])
+    if not ok:
+        raise RuntimeError('crop JPEG 인코딩 실패')
+    return base64.b64encode(buf.tobytes()).decode(), [x1, y1, x2, y2]
+
+
+def _restore_bbox(child_norm: list, crop_norm: list) -> list:
+    """crop 기준 child bbox → 원본 이미지 normalized 좌표 복원.
+    crop_norm: 원본 이미지에서의 실제 crop 영역 [x1,y1,x2,y2] (padding 포함)"""
+    cx1, cy1, cx2, cy2 = child_norm
+    px1, py1, px2, py2 = crop_norm
+    pw, ph = px2 - px1, py2 - py1
+    return [
+        round(px1 + cx1 * pw, 4),
+        round(py1 + cy1 * ph, 4),
+        round(px1 + cx2 * pw, 4),
+        round(py1 + cy2 * ph, 4),
+    ]
+
+
+def _label_matches_parent(candidate: str, query: str) -> bool:
+    """candidate label이 query parent_label에 의미적으로 매칭되는지 확인.
+    'yellow drawer' ↔ 'drawer' 같은 core word overlap 허용.
+    과도한 fuzzy matching은 배제."""
+    c = candidate.strip().lower()
+    q = query.strip().lower()
+    if c == q:
+        return True
+    q_words = set(q.split())
+    c_words = set(c.split())
+    common = q_words & c_words
+    # query 단어의 절반 이상이 candidate에 포함될 때만 허용
+    return len(common) >= max(1, len(q_words) // 2)
+
+
+def _is_bbox_oversized(bbox_norm: list, threshold: float = 0.8) -> bool:
+    """bbox 면적이 이미지의 threshold 이상이면 True (too coarse 경고용)."""
+    x1, y1, x2, y2 = bbox_norm
+    return (x2 - x1) * (y2 - y1) > threshold
+
+
+def _make_child_target(target_label: str, parent_label: str) -> str:
+    """child grounding용 target_label 생성.
+    handle/knob/pull/grip 류는 내부 부품과 구분되도록 상세 설명 포함."""
+    target_lower = target_label.strip().lower()
+    if any(kw in target_lower for kw in ('handle', 'knob', 'pull', 'grip')):
+        return (
+            f"Front-facing {target_label} of the {parent_label}. "
+            f"The physical handle that a person grabs to open/pull — "
+            f"a horizontal bar or protruding grip on the EXTERIOR FRONT FACE of the {parent_label}. "
+            f"NOT: internal rails, drawer slides, brackets, hinges, screws, "
+            f"or any mechanical component inside the drawer cavity."
+        )
+    return f"{target_label} (part of {parent_label})"
+
+
+def _ground_hierarchical(target_label: str, parent_label: str,
+                          ground_url: str, vlm_timeout: float,
+                          min_conf: float) -> str:
+    """parent object crop → child part grounding → depth → TF → 3D (2D fallback).
+
+    Parent bbox 우선순위:
+      1. analyze_scene 캐시 (가장 최근 scene 결과)
+      2. YOLO detection
+      3. VLM /ground_object(parent_label) — 최후 수단
+    """
+
+    # ── A. 이미지 획득 ─────────────────────────────────────────────────────────
+    img_bgr, img_stamp = _ros_node.get_image()
+    if img_bgr is None:
+        return json.dumps({'success': False, 'reason': 'image_unavailable'})
+    img_age = round(time.time() - img_stamp, 3)
+    if img_age > 3.0:
+        return json.dumps({'success': False, 'reason': f'image_stale — {img_age:.1f}s'})
+
+    h, w = img_bgr.shape[:2]
+
+    def _encode(bgr: np.ndarray) -> str:
+        ok, buf = cv2.imencode('.jpg', bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if not ok:
+            raise RuntimeError('JPEG 인코딩 실패')
+        return base64.b64encode(buf.tobytes()).decode()
+
+    # ── B. Parent bbox 확보 ────────────────────────────────────────────────────
+    # Priority 1: analyze_scene 캐시 (가장 최근 perception 결과)
+    # Priority 2: YOLO detection
+    # Priority 3: VLM /ground_object(parent_label) — 최후 수단
+
+    _logger.info(f'[ground_object] target={target_label!r}  parent={parent_label!r}')
+
+    parent_source = None
+    parent_bbox_norm = None
+
+    # Priority 1: analyze_scene 캐시 — VLM parent grounding 호출 없이 재사용
+    with _scene_cache_lock:
+        scene_objs = list(_last_scene_objects)
+        scene_age  = time.time() - _last_scene_stamp
+
+    if scene_objs and scene_age < 60.0:
+        scene_matched = [o for o in scene_objs
+                         if _label_matches_parent(str(o.get('label', '')), parent_label)]
+        if scene_matched:
+            # 면적 큰 순 우선 — parent는 child를 포함하는 더 넓은 영역이어야 함
+            scene_matched.sort(
+                key=lambda o: (
+                    (o.get('bbox', [0, 0, 1, 1])[2] - o.get('bbox', [0, 0, 1, 1])[0]) *
+                    (o.get('bbox', [0, 0, 1, 1])[3] - o.get('bbox', [0, 0, 1, 1])[1])
+                ),
+                reverse=True,
+            )
+            for sc in scene_matched:
+                b = sc.get('bbox', [])
+                if isinstance(b, list) and len(b) == 4:
+                    cand = [float(v) for v in b]
+                    area = (cand[2] - cand[0]) * (cand[3] - cand[1])
+                    if area < 0.01:
+                        _logger.warning(f'[parent] scene cache bbox too small {cand} (area={area:.4f}) — trying next candidate')
+                        continue
+                    if _is_bbox_oversized(cand):
+                        _logger.warning(f'[parent] scene cache bbox oversized {cand} — trying next candidate')
+                        continue
+                    parent_bbox_norm = cand
+                    parent_source = 'scene'
+                    _logger.info(
+                        f'[parent] reused existing analyze_scene bbox '
+                        f'({sc.get("label")}): {cand}'
+                    )
+                    break
+            # 모두 oversized여도 YOLO/VLM보다 scene 결과가 더 신뢰할 수 있으므로 최후 수단으로 사용
+            if parent_bbox_norm is None and scene_matched:
+                b = scene_matched[0].get('bbox', [])
+                if isinstance(b, list) and len(b) == 4:
+                    parent_bbox_norm = [float(v) for v in b]
+                    parent_source = 'scene'
+                    _logger.warning(
+                        f'[parent] all scene candidates oversized — '
+                        f'using smallest ({scene_matched[0].get("label")}): {parent_bbox_norm}'
+                    )
+
+    # Priority 2: YOLO
+    if parent_bbox_norm is None:
+        objects, _ = _ros_node.get_objects()
+        yolo_matched = [o for o in objects
+                        if _label_matches_parent(str(o.get('label', '')), parent_label)]
+        if yolo_matched:
+            b = yolo_matched[0].get('bbox', [])
+            if isinstance(b, list) and len(b) == 4:
+                cand = [float(v) for v in b]
+                if _is_bbox_oversized(cand):
+                    _logger.warning(f'[parent] YOLO bbox oversized {cand}')
+                parent_bbox_norm = cand
+                parent_source = 'yolo'
+                _logger.info(f'[parent] using YOLO bbox ({yolo_matched[0].get("label")}): {cand}')
+    else:
+        # scene 경로에서는 objects 미조회 — VLM fallback용으로 lazy 조회
+        objects = None
+
+    # Priority 3: VLM parent grounding — 최후 수단
+    if parent_bbox_norm is None:
+        _logger.info(f'[parent] no scene/YOLO match — calling VLM ground_object({parent_label!r})')
+        if objects is None:
+            objects, _ = _ros_node.get_objects()
+        try:
+            full_b64 = _encode(img_bgr)
+        except Exception as e:
+            return json.dumps({'success': False, 'reason': f'encode_failed — {e}'})
+
+        yolo_detections = [
+            {'label': o.get('label', '?'), 'bbox': o.get('bbox', []),
+             'confidence': round(float(o.get('confidence', 0.0)), 3)}
+            for o in objects
+        ]
+        try:
+            resp = _requests.post(ground_url,
+                                  json={'full_image_b64': full_b64,
+                                        'target_label': parent_label,
+                                        'detections': yolo_detections,
+                                        'timestamp': time.time()},
+                                  timeout=vlm_timeout)
+        except _requests.exceptions.ConnectionError:
+            return json.dumps({'success': False, 'reason': 'vlm_server_unavailable'})
+        except _requests.exceptions.Timeout:
+            return json.dumps({'success': False, 'reason': f'vlm_timeout — {vlm_timeout}s 초과'})
+        except Exception as e:
+            return json.dumps({'success': False, 'reason': f'vlm_request_failed — {e}'})
+
+        if resp.status_code != 200:
+            return json.dumps({'success': False,
+                               'reason': f'vlm_http_error — {resp.status_code}'})
+        try:
+            pdata = resp.json()
+        except Exception:
+            return json.dumps({'success': False, 'reason': 'vlm_invalid_json'})
+
+        if not pdata.get('found', False):
+            return json.dumps({'success': False, 'reason': 'parent_not_found'})
+
+        p_conf = float(pdata.get('confidence', 0.0))
+        if p_conf < min_conf:
+            return json.dumps({'success': False,
+                               'reason': f'parent_low_confidence — {p_conf:.2f} < {min_conf}'})
+
+        raw_bbox = pdata.get('bbox_norm', [])
+        if not isinstance(raw_bbox, list) or len(raw_bbox) != 4:
+            return json.dumps({'success': False, 'reason': 'parent_not_found'})
+        parent_bbox_norm = [float(v) for v in raw_bbox]
+        parent_source = 'vlm'
+        if _is_bbox_oversized(parent_bbox_norm):
+            _logger.warning(f'[parent] VLM returned oversized bbox {parent_bbox_norm}')
+        _logger.info(f'[parent] VLM ground_object result: {parent_bbox_norm}')
+
+    _logger.info(f'[parent source] {parent_source}')
+    _logger.info(f'[parent bbox]   {parent_bbox_norm}')
+
+    # ── C. Parent bbox 검증 ────────────────────────────────────────────────────
+    parent_bbox_norm = [max(0.0, min(1.0, v)) for v in parent_bbox_norm]
+    px1, py1, px2, py2 = parent_bbox_norm
+    if px1 >= px2 or py1 >= py2 or (px2 - px1) * (py2 - py1) < 0.01:
+        return json.dumps({'success': False, 'reason': 'invalid_parent_bbox'})
+
+    # ── D. Parent crop (7% padding) ────────────────────────────────────────────
+    try:
+        crop_b64, crop_px = _crop_b64(img_bgr, parent_bbox_norm)
+    except Exception as e:
+        return json.dumps({'success': False, 'reason': f'crop_failed — {e}'})
+
+    # ── E. Child grounding (crop 이미지에서) ──────────────────────────────────
+    # _make_child_target: handle/knob/grip류는 상세 설명(내부 부품 제외) 포함
+    child_label_ctx = _make_child_target(target_label, parent_label)
+    _logger.info(f'[crop bbox]      px={crop_px}')
+    _logger.info(f'[child target]   {child_label_ctx!r}')
+
+    def _call_ground(image_b64: str, label: str) -> Optional[dict]:
+        """VLM /ground_object 호출 → response dict 또는 None."""
+        try:
+            r = _requests.post(ground_url,
+                               json={'full_image_b64': image_b64,
+                                     'target_label': label,
+                                     'detections': [],
+                                     'timestamp': time.time()},
+                               timeout=vlm_timeout)
+        except _requests.exceptions.ConnectionError:
+            return {'_error': 'vlm_server_unavailable'}
+        except _requests.exceptions.Timeout:
+            return {'_error': f'vlm_timeout — {vlm_timeout}s 초과'}
+        except Exception as e:
+            return {'_error': f'vlm_request_failed — {e}'}
+        if r.status_code != 200:
+            return {'_error': f'vlm_http_error — {r.status_code}'}
+        try:
+            return r.json()
+        except Exception:
+            return {'_error': 'vlm_invalid_json'}
+
+    # 1차 시도: parent crop
+    cdata = _call_ground(crop_b64, child_label_ctx)
+    _error = cdata.get('_error') if isinstance(cdata, dict) else None
+    if _error:
+        return json.dumps({'success': False, 'reason': _error})
+
+    child_found = (
+        cdata.get('found', False)
+        and isinstance(cdata.get('bbox_norm'), list)
+        and len(cdata['bbox_norm']) == 4
+        and float(cdata.get('confidence', 0.0)) >= min_conf
+    )
+
+    if not child_found:
+        _logger.warning(
+            f'[child] crop grounding failed '
+            f'(found={cdata.get("found")}, conf={cdata.get("confidence")}, '
+            f'raw={cdata}) — fallback to full image'
+        )
+        # fallback: 전체 원본 이미지로 한 번만 재시도
+        try:
+            full_b64_fb = _encode(img_bgr)
+        except Exception as e:
+            return json.dumps({'success': False, 'reason': f'encode_failed — {e}'})
+
+        cdata = _call_ground(full_b64_fb, child_label_ctx)
+        _error = cdata.get('_error') if isinstance(cdata, dict) else None
+        if _error:
+            return json.dumps({'success': False, 'reason': _error})
+
+        child_found = (
+            cdata.get('found', False)
+            and isinstance(cdata.get('bbox_norm'), list)
+            and len(cdata['bbox_norm']) == 4
+            and float(cdata.get('confidence', 0.0)) >= min_conf
+        )
+        if not child_found:
+            _logger.error(
+                f'[child] full-image fallback also failed '
+                f'(found={cdata.get("found")}, conf={cdata.get("confidence")}, '
+                f'raw={cdata})'
+            )
+            return json.dumps({'success': False, 'reason': 'child_not_found_in_parent'})
+
+        # fallback 성공: child bbox는 이미 원본 좌표이므로 _restore_bbox 불필요
+        child_bbox_in_crop = [float(v) for v in cdata['bbox_norm']]
+        child_conf = float(cdata.get('confidence', 0.0))
+        _logger.info(f'[child raw bbox (full-image fallback)] {child_bbox_in_crop}')
+
+        ox1, oy1, ox2, oy2 = child_bbox_in_crop
+        u_c = ((ox1 + ox2) / 2) * w
+        v_c = ((oy1 + oy2) / 2) * h
+        center_px = [int(round(u_c)), int(round(v_c))]
+        child_bbox_px = [int(ox1 * w), int(oy1 * h), int(ox2 * w), int(oy2 * h)]
+        _logger.info(f'[restored bbox (full-image fallback)] {child_bbox_in_crop}')
+        _logger.info(f'[localization source] full-image VLM fallback')
+
+        # depth → TF pipeline 공통 처리로 이동
+        depth_arr_fb, _ = _ros_node.get_depth()
+        fx_fb, fy_fb, cx_fb, cy_fb, _, _ = _ros_node.get_cam_intrinsics()
+
+        def _result_2d_fb():
+            return json.dumps({
+                'success':             True,
+                'label':               cdata.get('label', target_label),
+                'source':              'vlm',
+                'grounding':           'hierarchical',
+                'center_px':           center_px,
+                'bbox_approx':         child_bbox_px,
+                'camera_point':        None,
+                'base_link_point':     None,
+                'confidence':          round(child_conf, 3),
+                'position_confidence': '2d_only',
+                'description':         cdata.get('description', ''),
+                'inference_ms':        cdata.get('inference_ms', 0.0),
+                'parent_label':        parent_label,
+                'parent_source':       parent_source,
+            }, ensure_ascii=False)
+
+        if depth_arr_fb is None or fx_fb is None:
+            _logger.info('[depth] unavailable — 2d_only')
+            return _result_2d_fb()
+        depth_m_fb = _sample_depth_robust(depth_arr_fb,
+                                          child_bbox_px[0], child_bbox_px[1],
+                                          child_bbox_px[2], child_bbox_px[3])
+        if depth_m_fb is None:
+            _logger.info('[depth] invalid — 2d_only')
+            return _result_2d_fb()
+        cam_xyz_fb = _px2cam(u_c, v_c, depth_m_fb, fx_fb, fy_fb, cx_fb, cy_fb)
+        if cam_xyz_fb is None:
+            return _result_2d_fb()
+        base_xyz_fb = _cam_to_base(cam_xyz_fb)
+        if base_xyz_fb is None:
+            return _result_2d_fb()
+        _logger.info(f'[3d] {base_xyz_fb}  [localization] 3d (full-image fallback)')
+        return json.dumps({
+            'success':             True,
+            'label':               cdata.get('label', target_label),
+            'source':              'vlm',
+            'grounding':           'hierarchical',
+            'center_px':           center_px,
+            'bbox_approx':         child_bbox_px,
+            'camera_point':        cam_xyz_fb,
+            'base_link_point':     base_xyz_fb,
+            'confidence':          round(child_conf, 3),
+            'position_confidence': 'approximate',
+            'description':         cdata.get('description', ''),
+            'inference_ms':        cdata.get('inference_ms', 0.0),
+            'depth_m':             round(depth_m_fb, 3),
+            'parent_label':        parent_label,
+            'parent_source':       parent_source,
+        }, ensure_ascii=False)
+
+    child_conf = float(cdata.get('confidence', 0.0))
+    child_bbox_in_crop = [float(v) for v in cdata['bbox_norm']]
+    _logger.info(f'[child raw bbox (crop)]  {child_bbox_in_crop}')
+
+    # ── F. Child bbox 원본 이미지 좌표 복원 ──────────────────────────────────
+    # crop_px는 padding 포함된 실제 crop 영역 [bx1,by1,bx2,by2] (pixel)
+    bx1, by1, bx2, by2 = crop_px
+    crop_norm = [bx1 / w, by1 / h, bx2 / w, by2 / h]
+    child_bbox_orig = _restore_bbox(child_bbox_in_crop, crop_norm)
+    _logger.info(f'[restored bbox]  {child_bbox_orig}')
+
+    ox1, oy1, ox2, oy2 = child_bbox_orig
+    u = ((ox1 + ox2) / 2) * w
+    v = ((oy1 + oy2) / 2) * h
+    center_px = [int(round(u)), int(round(v))]
+    child_bbox_px = [int(ox1 * w), int(oy1 * h), int(ox2 * w), int(oy2 * h)]
+
+    # ── 2D fallback 응답 구성 ──────────────────────────────────────────────────
+    def _result_2d():
+        _logger.info('[localization] 2d_only')
+        return json.dumps({
+            'success':             True,
+            'label':               cdata.get('label', target_label),
+            'source':              'vlm',
+            'grounding':           'hierarchical',
+            'center_px':           center_px,
+            'bbox_approx':         child_bbox_px,
+            'camera_point':        None,
+            'base_link_point':     None,
+            'confidence':          round(child_conf, 3),
+            'position_confidence': '2d_only',
+            'description':         cdata.get('description', ''),
+            'inference_ms':        cdata.get('inference_ms', 0.0),
+            'parent_label':        parent_label,
+            'parent_source':       parent_source,
+        }, ensure_ascii=False)
+
+    # ── G. Depth 샘플링 ────────────────────────────────────────────────────────
+    depth_arr, _ = _ros_node.get_depth()
+    fx, fy, cx, cy, cam_w, cam_h = _ros_node.get_cam_intrinsics()
+
+    if depth_arr is None or fx is None:
+        _logger.info('[depth] unavailable — 2d_only')
+        return _result_2d()
+
+    depth_m = _sample_depth_robust(depth_arr,
+                                    child_bbox_px[0], child_bbox_px[1],
+                                    child_bbox_px[2], child_bbox_px[3])
+    if depth_m is None:
+        _logger.info('[depth] invalid — 2d_only')
+        return _result_2d()
+
+    _logger.info(f'[depth]          {depth_m:.3f}m')
+
+    # ── H. Camera XYZ → base_link TF ─────────────────────────────────────────
+    cam_xyz = _px2cam(u, v, depth_m, fx, fy, cx, cy)
+    if cam_xyz is None:
+        return _result_2d()
+
+    base_xyz = _cam_to_base(cam_xyz)
+    if base_xyz is None:
+        return _result_2d()
+
+    _logger.info(f'[3d]             {base_xyz}')
+    _logger.info('[localization]   3d')
+    return json.dumps({
+        'success':             True,
+        'label':               cdata.get('label', target_label),
+        'source':              'vlm',
+        'grounding':           'hierarchical',
+        'center_px':           center_px,
+        'bbox_approx':         child_bbox_px,
+        'camera_point':        cam_xyz,
+        'base_link_point':     base_xyz,
+        'confidence':          round(child_conf, 3),
+        'position_confidence': 'approximate',
+        'description':         cdata.get('description', ''),
+        'inference_ms':        cdata.get('inference_ms', 0.0),
+        'depth_m':             round(depth_m, 3),
+        'parent_label':        parent_label,
+        'parent_source':       parent_source,
+    }, ensure_ascii=False)
 
 
 def _ros_spin_thread():
@@ -237,6 +855,16 @@ def list_detected_objects() -> str:
 
     로봇에게 무언가를 시키기 전에 반드시 먼저 이 도구를 호출해서
     실제로 어떤 물체가 장면에 있는지 확인하라.
+
+    ─── 라우팅 규칙 ──────────────────────────────────────────────────────────
+    ① 알려진 물체 위치 확인         → 이 도구 (YOLO, 빠름)
+    ② YOLO 목록에 없는 특정 물체    → ground_object(label)
+    ③ 화면 전체 장면 파악           → analyze_scene()
+    ④ 파지 방법 판단                → infer_grasp(label)
+    ⑤ 배치 가능 공간 탐색           → find_placement()
+
+    YOLO 결과에 target object가 있으면 ground_object()를 호출하지 마라.
+    YOLO 결과만으로 해결 가능한 작업에 VLM을 호출하지 마라.
 
     ⚠ 중요 — 좌표/치수 해석 시 반드시 지켜야 할 규칙:
     1. center_3d는 물체의 "기하학적 중심점" 좌표다 (바닥면이 아니다).
@@ -433,7 +1061,8 @@ def get_scanned_boxes() -> str:
 def pick_object(target_label: str, grasp_dir: str = 'auto',
                  from_scan: bool = False, box_index: int = None,
                  x: float = None, y: float = None, z: float = None,
-                 angle_deg: float = None) -> str:
+                 angle_deg: float = None,
+                 side_approach_deg: float = None) -> str:
     """지정한 물체를 로봇 팔로 집어 올린다. pick 완료까지 블로킹.
 
     Args:
@@ -447,6 +1076,10 @@ def pick_object(target_label: str, grasp_dir: str = 'auto',
         from_scan: True면 scan_for_boxes로 미리 찾아둔 좌표를 사용한다
             (현재 카메라 시야 밖에 있는 물체도 집을 수 있음). scan_for_boxes를
             먼저 호출해서 물체를 찾아둔 경우에만 True로 설정하라.
+        side_approach_deg: side 그립 시 접근 방향 (world 절대각, 도). 생략 시 물체
+            정면(atan2(y,x)) 기준 0도 오프셋. VLM이 장면 분석 후 "어느 방향에서
+            접근할지"를 world 좌표계 각도로 넘기면, 내부에서 position_yaw 기준
+            offset으로 자동 역산한다.
         box_index: [신규] from_scan=True일 때, get_scanned_boxes()/이전
             pick_object 응답의 remaining_scanned_boxes 배열에서 몇 번째
             항목(0부터 시작)을 집을지 명시적으로 지정한다. 생략하면
@@ -498,6 +1131,8 @@ def pick_object(target_label: str, grasp_dir: str = 'auto',
     payload = {'action': 'pick', 'target_label': target_label}
     if grasp_dir and grasp_dir != 'auto':
         payload['grasp_dir'] = grasp_dir
+    if side_approach_deg is not None:
+        payload['side_approach_deg'] = side_approach_deg
     if x is not None and y is not None and z is not None:
         payload['override_pos'] = {'x': x, 'y': y, 'z': z}
         if angle_deg is not None:
@@ -772,6 +1407,608 @@ def go_home() -> str:
     _ros_node.publish_command({'action': 'home'})
     result = _ros_node.wait_for_result(timeout=TIMEOUT_HOME)
     return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+def infer_grasp(target_label: str) -> str:
+    """지정한 물체에 대해 VLM grasp 타입을 추론한다 (명시적 온디맨드 호출).
+
+    VLM은 "어떻게 잡을 것인가?"만 판단한다. "어디 있는가?"는 YOLO가 담당한다.
+    VLM이 object를 다시 탐지하지 않는다 — YOLO bbox와 crop 이미지를 VLM에 전달한다.
+
+    /detected_objects 에서 target_label 과 일치하는 물체를 찾고,
+    /camera/color/image_raw 의 최신 프레임에서 bbox crop을 만들어
+    http://127.0.0.1:8003/infer_grasp 에 POST 한다.
+
+    ─── 라우팅 규칙 ──────────────────────────────────────────────────────────
+    "컵 어떻게 잡아?"  → infer_grasp("cup")
+    "컵 어디 있어?"   → list_detected_objects()  ← VLM 불필요
+    target이 YOLO에 없으면 먼저 ground_object()로 위치를 확보한 뒤 호출한다.
+
+    Args:
+        target_label: 추론할 물체의 YOLO 탐지 라벨 (예: "box", "cup")
+
+    Returns:
+        성공: {"status": "success", "object": "...", "grasp_type": "TOP|SIDE|PINCH",
+               "orientation": "HORIZONTAL|VERTICAL", "confidence": 0.95,
+               "reason": "...", "inference_ms": 1200.0,
+               "bbox_px": [x1,y1,x2,y2], "image_age_sec": 0.1}
+        실패: {"status": "error", "reason": "..."}
+    """
+    _ensure_ros()
+
+    VLM_URL     = "http://127.0.0.1:8003/infer_grasp"
+    VLM_TIMEOUT = 30.0   # Qwen2.5-VL inference 시간 여유 확보
+
+    # ── 1. 감지된 물체 목록에서 target_label 찾기 ────────────────────────────
+    objects, obj_stamp = _ros_node.get_objects()
+    if not objects:
+        return json.dumps({'status': 'error',
+                           'reason': 'no_objects_detected — /detected_objects 수신 없음'})
+
+    label_lower = target_label.strip().lower()
+    matched = [o for o in objects if str(o.get('label', '')).lower() == label_lower]
+    if not matched:
+        available = [o.get('label', '') for o in objects]
+        return json.dumps({'status': 'error',
+                           'reason': f'object_not_found — "{target_label}" 없음. '
+                                     f'현재 감지 목록: {available}'})
+
+    obj = matched[0]
+    bbox_norm = obj.get('bbox')   # [x_min, y_min, x_max, y_max] 0~1 정규화
+
+    # ── 2. 최신 카메라 이미지 가져오기 ──────────────────────────────────────
+    img_bgr, img_stamp = _ros_node.get_image()
+    if img_bgr is None:
+        return json.dumps({'status': 'error',
+                           'reason': 'image_unavailable — /camera/color/image_raw 수신 없음'})
+
+    img_age = round(time.time() - img_stamp, 3)
+    if img_age > 3.0:
+        return json.dumps({'status': 'error',
+                           'reason': f'image_stale — 이미지가 {img_age:.1f}초 경과 (>3s)'})
+
+    h, w = img_bgr.shape[:2]
+
+    # ── 3. bbox crop 생성 ────────────────────────────────────────────────────
+    if bbox_norm and len(bbox_norm) == 4:
+        x1 = int(bbox_norm[0] * w)
+        y1 = int(bbox_norm[1] * h)
+        x2 = int(bbox_norm[2] * w)
+        y2 = int(bbox_norm[3] * h)
+        # 클램프 + 최소 크기 보장
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(w - 1, x2), min(h - 1, y2)
+        if x2 - x1 < 4 or y2 - y1 < 4:
+            return json.dumps({'status': 'error',
+                               'reason': f'bbox_too_small — crop 크기 {x2-x1}x{y2-y1}px'})
+        crop_bgr = img_bgr[y1:y2, x1:x2]
+        bbox_px  = [x1, y1, x2, y2]
+    else:
+        # bbox 정보가 없으면 전체 이미지를 crop으로 사용
+        crop_bgr = img_bgr.copy()
+        bbox_px  = [0, 0, w, h]
+
+    # ── 4. base64 JPEG 인코딩 ───────────────────────────────────────────────
+    def _encode_b64(bgr: np.ndarray) -> str:
+        ok, buf = cv2.imencode('.jpg', bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if not ok:
+            raise RuntimeError('JPEG 인코딩 실패')
+        return base64.b64encode(buf.tobytes()).decode()
+
+    try:
+        full_b64 = _encode_b64(img_bgr)
+        crop_b64 = _encode_b64(crop_bgr)
+    except Exception as e:
+        return json.dumps({'status': 'error', 'reason': f'encode_failed — {e}'})
+
+    # ── 5. VLM 서버 POST ────────────────────────────────────────────────────
+    payload = {
+        'full_image_b64': full_b64,
+        'crop_image_b64': crop_b64,
+        'object_label':   obj.get('label', target_label),
+        'bbox':           bbox_norm if bbox_norm else [0, 0, 1, 1],
+        'timestamp':      time.time(),
+    }
+
+    try:
+        resp = _requests.post(VLM_URL, json=payload, timeout=VLM_TIMEOUT)
+    except _requests.exceptions.ConnectionError:
+        return json.dumps({'status': 'error',
+                           'reason': 'vlm_server_unavailable — http://127.0.0.1:8003 연결 거부'})
+    except _requests.exceptions.Timeout:
+        return json.dumps({'status': 'error',
+                           'reason': f'vlm_timeout — {VLM_TIMEOUT}s 초과'})
+    except Exception as e:
+        return json.dumps({'status': 'error', 'reason': f'vlm_request_failed — {e}'})
+
+    if resp.status_code != 200:
+        return json.dumps({'status': 'error',
+                           'reason': f'vlm_http_error — status {resp.status_code}: {resp.text[:200]}'})
+
+    # ── 6. 응답 파싱 및 검증 ────────────────────────────────────────────────
+    try:
+        data = resp.json()
+    except Exception:
+        return json.dumps({'status': 'error',
+                           'reason': f'vlm_invalid_json — {resp.text[:200]}'})
+
+    grasp_type  = str(data.get('grasp_type', '')).upper()
+    orientation = str(data.get('orientation', '')).upper()
+    confidence  = data.get('confidence', 0.0)
+
+    if grasp_type not in ('TOP', 'SIDE', 'PINCH'):
+        return json.dumps({'status': 'error',
+                           'reason': f'vlm_invalid_grasp_type — {grasp_type!r}'})
+    if orientation not in ('HORIZONTAL', 'VERTICAL'):
+        orientation = 'VERTICAL' if grasp_type == 'PINCH' else 'HORIZONTAL'
+    try:
+        confidence = float(confidence)
+    except (TypeError, ValueError):
+        confidence = 0.0
+
+    return json.dumps({
+        'status':        'success',
+        'object':        data.get('object', target_label),
+        'grasp_type':    grasp_type,
+        'orientation':   orientation,
+        'confidence':    round(confidence, 3),
+        'reason':        data.get('reason', ''),
+        'inference_ms':  data.get('inference_ms', 0.0),
+        'bbox_px':       bbox_px,
+        'image_age_sec': img_age,
+    }, ensure_ascii=False)
+
+
+@mcp.tool()
+def analyze_scene() -> str:
+    """현재 카메라 화면에 보이는 모든 물체를 label + bbox로 반환한다.
+
+    VLM이 카메라 이미지를 독립적으로 보고 물체를 탐지한다.
+    YOLO 결과와 병합해서 전체 scene을 반환한다.
+
+    ─── 라우팅 규칙 ──────────────────────────────────────────────────────────
+    ○ 사용: "화면에 뭐가 있어?" / "YOLO가 못 찾은 것도 알려줘" / 전체 장면 파악
+    ✗ 금지: 단일 물체 위치 확인   → list_detected_objects() 또는 ground_object()
+    ✗ 금지: YOLO에 이미 있는 물체를 다시 찾기 위한 호출
+    ✗ 금지: VLM 실패 시 robot movement 명령
+
+    source 태깅:
+    - "both" = YOLO와 VLM 모두 탐지
+    - "vlm"  = VLM만 탐지 (예: 선반·바구니·펜처럼 YOLO가 없는 물체)
+    - "yolo" = YOLO만 탐지 (VLM이 못 찾은 경우)
+
+    ─── VLM 실패 시 절대 금지 ──────────────────────────────────────────────────
+    status가 "error"이면:
+    - YOLO 좌표로 "빈 공간" / placement 위치 추론 금지
+    - robot movement 명령 금지
+    반드시: "시각적 scene reasoning을 수행할 수 없습니다. (이유: {reason})"
+
+    Returns:
+        성공: {"status":"success",
+               "yolo_detected":["cup","box"],
+               "objects":[{"label":"cup","bbox":[x1,y1,x2,y2],"source":"both"},
+                          {"label":"pen","bbox":[...],"source":"vlm"},
+                          {"label":"box","bbox":[...],"source":"yolo"},...],
+               "inference_ms":8000.0,"image_age_sec":0.1}
+        실패: {"status":"error","reason":"..."}
+    """
+    _ensure_ros()
+
+    ANALYZE_URL = "http://127.0.0.1:8003/analyze_scene"
+    VLM_TIMEOUT = 45.0
+
+    img_bgr, img_stamp = _ros_node.get_image()
+    if img_bgr is None:
+        return json.dumps({'status': 'error',
+                           'reason': 'image_unavailable — /camera/color/image_raw 수신 없음'})
+    img_age = round(time.time() - img_stamp, 3)
+    if img_age > 3.0:
+        return json.dumps({'status': 'error',
+                           'reason': f'image_stale — {img_age:.1f}s 경과 (>3s)'})
+
+    yolo_objects, _ = _ros_node.get_objects()
+    detections = [{'label': o.get('label', '?'), 'bbox': o.get('bbox', [])} for o in yolo_objects]
+
+    def _encode_b64(bgr: np.ndarray) -> str:
+        ok, buf = cv2.imencode('.jpg', bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if not ok:
+            raise RuntimeError('JPEG 인코딩 실패')
+        return base64.b64encode(buf.tobytes()).decode()
+
+    try:
+        full_b64 = _encode_b64(img_bgr)
+    except Exception as e:
+        return json.dumps({'status': 'error', 'reason': f'encode_failed — {e}'})
+
+    try:
+        resp = _requests.post(ANALYZE_URL,
+                              json={'full_image_b64': full_b64, 'detections': detections,
+                                    'timestamp': time.time()},
+                              timeout=VLM_TIMEOUT)
+    except _requests.exceptions.ConnectionError:
+        return json.dumps({'status': 'error',
+                           'reason': 'vlm_server_unavailable — http://127.0.0.1:8003 연결 거부'})
+    except _requests.exceptions.Timeout:
+        return json.dumps({'status': 'error',
+                           'reason': f'vlm_timeout — {VLM_TIMEOUT}s 초과'})
+    except Exception as e:
+        return json.dumps({'status': 'error', 'reason': f'vlm_request_failed — {e}'})
+
+    if resp.status_code != 200:
+        return json.dumps({'status': 'error',
+                           'reason': f'vlm_http_error — status {resp.status_code}: {resp.text[:200]}'})
+
+    try:
+        data = resp.json()
+    except Exception:
+        return json.dumps({'status': 'error', 'reason': f'vlm_invalid_json — {resp.text[:200]}'})
+
+    yolo_label_set = {str(o.get('label', '')).lower() for o in yolo_objects}
+    vlm_objects    = data.get('objects', [])
+    vlm_label_set  = {str(o.get('label', '')).lower() for o in vlm_objects}
+
+    # VLM 탐지 물체: source="both"(YOLO도 탐지) 또는 source="vlm"(VLM만 탐지)
+    objects_merged = [
+        {**o, 'source': 'both' if str(o.get('label', '')).lower() in yolo_label_set else 'vlm'}
+        for o in vlm_objects
+    ]
+    # YOLO-only 물체(VLM이 못 찾은 것): source="yolo"로 추가
+    for yo in yolo_objects:
+        if str(yo.get('label', '')).lower() not in vlm_label_set:
+            objects_merged.append({
+                'label':  yo.get('label', '?'),
+                'bbox':   yo.get('bbox', []),
+                'source': 'yolo',
+            })
+
+    # analyze_scene 결과를 캐시에 저장 — hierarchical grounding의 parent bbox 재사용용
+    global _last_scene_objects, _last_scene_stamp
+    with _scene_cache_lock:
+        _last_scene_objects = [o.copy() for o in objects_merged]
+        _last_scene_stamp   = time.time()
+
+    return json.dumps({
+        'status':        'success',
+        'yolo_detected': [o.get('label', '?') for o in yolo_objects],
+        'objects':       objects_merged,
+        'inference_ms':  data.get('inference_ms', 0.0),
+        'image_age_sec': img_age,
+    }, ensure_ascii=False)
+
+
+@mcp.tool()
+def find_placement() -> str:
+    """카메라 화면에서 물체를 놓을 수 있는 빈 공간을 추론한다.
+
+    ─── 라우팅 규칙 ──────────────────────────────────────────────────────────
+    ○ 사용: "빈 공간에 놓아" / "정리해" / "어디 두면 좋을지 봐줘" / "선반에 놓아"
+    ✗ 금지: "컵 옆에 놓아" → YOLO 3D 좌표 상대 계산으로 해결 (VLM 불필요)
+    ✗ 금지: target placement가 명확한 좌표로 이미 알려진 경우
+
+    VLM은 normalized bbox로 배치 가능 영역만 반환한다.
+    실제 robot 좌표는 반환된 bbox → depth → camera coords → TF → base_link 순으로 변환한다.
+    VLM placement는 approximate임을 반드시 명시한다.
+
+    ─── VLM 실패 시 절대 금지 ──────────────────────────────────────────────────
+    status가 "error"이면:
+    - YOLO 좌표로 placement 위치 추측 금지
+    - robot movement 명령 금지
+    반드시: "시각적 scene reasoning을 수행할 수 없습니다. (이유: {reason})"
+
+    Returns:
+        성공: {"status":"success",
+               "placement_regions":[{"bbox":[x1,y1,x2,y2],"confidence":0.8},...],
+               "inference_ms":8000.0,"image_age_sec":0.1}
+        실패: {"status":"error","reason":"..."}
+    """
+    _ensure_ros()
+
+    PLACEMENT_URL = "http://127.0.0.1:8003/find_placement"
+    VLM_TIMEOUT = 45.0
+
+    img_bgr, img_stamp = _ros_node.get_image()
+    if img_bgr is None:
+        return json.dumps({'status': 'error',
+                           'reason': 'image_unavailable — /camera/color/image_raw 수신 없음'})
+    img_age = round(time.time() - img_stamp, 3)
+    if img_age > 3.0:
+        return json.dumps({'status': 'error',
+                           'reason': f'image_stale — {img_age:.1f}s 경과 (>3s)'})
+
+    yolo_objects, _ = _ros_node.get_objects()
+    detections = [{'label': o.get('label', '?'), 'bbox': o.get('bbox', [])} for o in yolo_objects]
+
+    def _encode_b64(bgr: np.ndarray) -> str:
+        ok, buf = cv2.imencode('.jpg', bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if not ok:
+            raise RuntimeError('JPEG 인코딩 실패')
+        return base64.b64encode(buf.tobytes()).decode()
+
+    try:
+        full_b64 = _encode_b64(img_bgr)
+    except Exception as e:
+        return json.dumps({'status': 'error', 'reason': f'encode_failed — {e}'})
+
+    try:
+        resp = _requests.post(PLACEMENT_URL,
+                              json={'full_image_b64': full_b64, 'detections': detections,
+                                    'timestamp': time.time()},
+                              timeout=VLM_TIMEOUT)
+    except _requests.exceptions.ConnectionError:
+        return json.dumps({'status': 'error',
+                           'reason': 'vlm_server_unavailable — http://127.0.0.1:8003 연결 거부'})
+    except _requests.exceptions.Timeout:
+        return json.dumps({'status': 'error',
+                           'reason': f'vlm_timeout — {VLM_TIMEOUT}s 초과'})
+    except Exception as e:
+        return json.dumps({'status': 'error', 'reason': f'vlm_request_failed — {e}'})
+
+    if resp.status_code != 200:
+        return json.dumps({'status': 'error',
+                           'reason': f'vlm_http_error — status {resp.status_code}: {resp.text[:200]}'})
+
+    try:
+        data = resp.json()
+    except Exception:
+        return json.dumps({'status': 'error', 'reason': f'vlm_invalid_json — {resp.text[:200]}'})
+
+    return json.dumps({
+        'status':            'success',
+        'placement_regions': data.get('placement_regions', []),
+        'inference_ms':      data.get('inference_ms', 0.0),
+        'image_age_sec':     img_age,
+    }, ensure_ascii=False)
+
+
+@mcp.tool()
+def ground_object(target_label: str, parent_label: str = None) -> str:
+    """YOLO에 없는 물체를 VLM으로 찾아 depth + TF로 3D 좌표를 추정한다.
+
+    동작 순서 (일반):
+      1. YOLO /detected_objects에 target_label이 있으면 그 좌표를 바로 반환
+         (source=yolo, grounding=detected, position_confidence=precise)
+      2. YOLO에 없으면 VLM /ground_object 호출 → approximate bbox/center_norm 획득
+      3. bbox 영역의 depth를 robust median으로 샘플링
+      4. pixel_to_camera_xyz → camera_color_optical_frame 3D 점
+      5. TF → base_link 3D 좌표 반환
+         (source=vlm, grounding=approximate, position_confidence=approximate)
+
+    ─── Hierarchical Grounding (parent_label 지정 시) ────────────────────────
+    parent object crop → child part grounding → depth → TF → 3D (2D fallback).
+
+    Use normal grounding when:
+    - target이 독립적인 물체인 경우
+    - 전체 scene에서 충분히 찾을 수 있는 크기
+
+    Use hierarchical grounding when:
+    - target이 큰 물체의 일부 part인 경우
+    - handle, knob, button, rim, switch, opening 등 작은 조작 대상
+    - 전체 이미지에서 바로 찾으면 놓칠 가능성이 높은 경우
+
+    Examples:
+      ground_object("pen")
+      ground_object("drawer handle", parent_label="yellow drawer")
+      ground_object("cup rim", parent_label="cup")
+
+    라우팅 규칙:
+      "은색 선반이 어디 있어?"       → ground_object("silver shelf")
+      "서랍 손잡이 위치 알려줘."     → ground_object("drawer handle", parent_label="yellow drawer")
+      "컵을 어떻게 잡아?"            → infer_grasp("cup")  (위치 아님)
+      "화면에 뭐가 있어?"            → analyze_scene()
+
+    Args:
+        target_label: 찾을 물체 설명 (예: "silver shelf", "drawer handle")
+        parent_label: [선택] hierarchical grounding 시 parent 물체 라벨
+                     (예: "yellow drawer"). None이면 기존 동작 유지.
+
+    Returns:
+        YOLO에 있을 때:
+          {"label":"cup", "source":"yolo", "grounding":"detected",
+           "center_px":[u,v], "camera_point":{x,y,z}, "base_link_point":{x,y,z},
+           "confidence":0.95, "position_confidence":"precise"}
+        VLM grounding 성공 시:
+          {"label":"silver shelf", "source":"vlm", "grounding":"approximate",
+           "center_px":[u,v], "bbox_approx":[x1,y1,x2,y2],
+           "camera_point":{x,y,z}, "base_link_point":{x,y,z},
+           "confidence":0.78, "position_confidence":"approximate"}
+        Hierarchical grounding 3D 성공 시:
+          {"success":true, "label":"drawer handle", "source":"vlm",
+           "grounding":"hierarchical", "center_px":[u,v], "bbox_approx":[x1,y1,x2,y2],
+           "camera_point":{x,y,z}, "base_link_point":{x,y,z},
+           "confidence":0.78, "position_confidence":"approximate",
+           "parent_label":"yellow drawer", "parent_source":"yolo"|"vlm"}
+        Hierarchical grounding 2D fallback (depth/TF 실패):
+          {"success":true, ..., "camera_point":null, "base_link_point":null,
+           "position_confidence":"2d_only"}
+        실패 시:
+          {"success":false, "reason":"target_not_found"|"parent_not_found"|
+                            "invalid_parent_bbox"|"child_not_found_in_parent"|
+                            "invalid_depth"|"tf_unavailable"|...}
+    """
+    _ensure_ros()
+
+    GROUND_URL  = "http://127.0.0.1:8003/ground_object"
+    VLM_TIMEOUT = 45.0
+    MIN_CONF    = 0.3
+
+    # ── Hierarchical grounding 위임 ───────────────────────────────────────────
+    if parent_label is not None:
+        return _ground_hierarchical(target_label, parent_label,
+                                    GROUND_URL, VLM_TIMEOUT, MIN_CONF)
+
+    # ── 1. YOLO에서 먼저 검색 ────────────────────────────────────────────────
+    objects, _ = _ros_node.get_objects()
+    label_lower = target_label.strip().lower()
+    matched = [o for o in objects if str(o.get('label', '')).lower() == label_lower]
+
+    if matched:
+        obj = matched[0]
+        c3d = obj.get('center_3d', {})
+        # YOLO는 이미 base_link 좌표를 가지고 있음
+        bbox_norm = obj.get('bbox', [])
+        img_bgr, _ = _ros_node.get_image()
+        center_px = None
+        if img_bgr is not None and len(bbox_norm) == 4:
+            h, w = img_bgr.shape[:2]
+            cx = int((bbox_norm[0] + bbox_norm[2]) / 2 * w)
+            cy = int((bbox_norm[1] + bbox_norm[3]) / 2 * h)
+            center_px = [cx, cy]
+        return json.dumps({
+            'label':              obj.get('label', target_label),
+            'source':             'yolo',
+            'grounding':          'detected',
+            'center_px':          center_px,
+            'camera_point':       None,
+            'base_link_point':    c3d,
+            'confidence':         round(float(obj.get('confidence', 1.0)), 3),
+            'position_confidence': 'precise',
+        }, ensure_ascii=False)
+
+    # ── 2. YOLO 미감지 → VLM grounding ──────────────────────────────────────
+    img_bgr, img_stamp = _ros_node.get_image()
+    if img_bgr is None:
+        return json.dumps({'success': False,
+                           'reason': 'image_unavailable'})
+    img_age = round(time.time() - img_stamp, 3)
+    if img_age > 3.0:
+        return json.dumps({'success': False,
+                           'reason': f'image_stale — {img_age:.1f}s'})
+
+    # 이미지 인코딩
+    def _encode(bgr: np.ndarray) -> str:
+        ok, buf = cv2.imencode('.jpg', bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if not ok:
+            raise RuntimeError('JPEG 인코딩 실패')
+        return base64.b64encode(buf.tobytes()).decode()
+
+    try:
+        full_b64 = _encode(img_bgr)
+    except Exception as e:
+        return json.dumps({'success': False, 'reason': f'encode_failed — {e}'})
+
+    yolo_detections = [
+        {'label': o.get('label', '?'),
+         'bbox':  o.get('bbox', []),
+         'confidence': round(float(o.get('confidence', 0.0)), 3)}
+        for o in objects
+    ]
+
+    payload = {
+        'full_image_b64': full_b64,
+        'target_label':   target_label,
+        'detections':     yolo_detections,
+        'timestamp':      time.time(),
+    }
+    try:
+        resp = _requests.post(GROUND_URL, json=payload, timeout=VLM_TIMEOUT)
+    except _requests.exceptions.ConnectionError:
+        return json.dumps({'success': False,
+                           'reason': 'vlm_server_unavailable'})
+    except _requests.exceptions.Timeout:
+        return json.dumps({'success': False,
+                           'reason': f'vlm_timeout — {VLM_TIMEOUT}s 초과'})
+    except Exception as e:
+        return json.dumps({'success': False, 'reason': f'vlm_request_failed — {e}'})
+
+    if resp.status_code != 200:
+        return json.dumps({'success': False,
+                           'reason': f'vlm_http_error — {resp.status_code}'})
+
+    try:
+        gdata = resp.json()
+    except Exception:
+        return json.dumps({'success': False, 'reason': 'vlm_invalid_json'})
+
+    if not gdata.get('found', False):
+        return json.dumps({'success': False, 'reason': 'target_not_found'})
+
+    conf = float(gdata.get('confidence', 0.0))
+    if conf < MIN_CONF:
+        return json.dumps({'success': False,
+                           'reason': f'low_grounding_confidence — {conf:.2f} < {MIN_CONF}'})
+
+    # ── 3. bbox_norm → pixel 좌표 변환 ──────────────────────────────────────
+    h, w = img_bgr.shape[:2]
+    bbox_norm = gdata.get('bbox_norm', [])
+    center_norm = gdata.get('center_norm', [])
+
+    if len(bbox_norm) == 4:
+        bx1 = int(bbox_norm[0] * w)
+        by1 = int(bbox_norm[1] * h)
+        bx2 = int(bbox_norm[2] * w)
+        by2 = int(bbox_norm[3] * h)
+        bbox_px = [bx1, by1, bx2, by2]
+    else:
+        bbox_px = None
+
+    if len(center_norm) == 2:
+        u = center_norm[0] * w
+        v = center_norm[1] * h
+    elif bbox_px is not None:
+        u = (bbox_px[0] + bbox_px[2]) / 2.0
+        v = (bbox_px[1] + bbox_px[3]) / 2.0
+    else:
+        return json.dumps({'success': False, 'reason': 'no_valid_bbox_from_vlm'})
+
+    center_px = [int(round(u)), int(round(v))]
+
+    # ── 4. depth 샘플링 (없으면 시각적 결과만 반환) ─────────────────────────
+    depth_arr, _ = _ros_node.get_depth()
+    fx, fy, cx, cy, cam_w, cam_h = _ros_node.get_cam_intrinsics()
+
+    if depth_arr is None or fx is None:
+        # depth 없음 → 3D 좌표 없이 시각적 결과만 반환
+        return json.dumps({
+            'label':              gdata.get('label', target_label),
+            'source':             'vlm',
+            'grounding':          'visual_only',
+            'center_px':          center_px,
+            'bbox_approx':        bbox_px,
+            'camera_point':       None,
+            'base_link_point':    None,
+            'confidence':         round(conf, 3),
+            'position_confidence': 'visual_only — depth 없음, 3D 좌표 불가',
+            'description':        gdata.get('description', ''),
+            'inference_ms':       gdata.get('inference_ms', 0.0),
+        }, ensure_ascii=False)
+
+    if bbox_px is not None:
+        depth_m = _sample_depth_robust(depth_arr, bbox_px[0], bbox_px[1],
+                                        bbox_px[2], bbox_px[3])
+    else:
+        win = 20
+        depth_m = _sample_depth_robust(depth_arr,
+                                        center_px[0] - win, center_px[1] - win,
+                                        center_px[0] + win, center_px[1] + win)
+
+    if depth_m is None:
+        return json.dumps({'success': False, 'reason': 'invalid_depth'})
+
+    # ── 5. camera XYZ ────────────────────────────────────────────────────────
+    cam_xyz = _px2cam(u, v, depth_m, fx, fy, cx, cy)
+    if cam_xyz is None:
+        return json.dumps({'success': False, 'reason': 'invalid_depth'})
+
+    # ── 6. TF → base_link ────────────────────────────────────────────────────
+    base_xyz = _cam_to_base(cam_xyz)
+    if base_xyz is None:
+        return json.dumps({'success': False, 'reason': 'tf_unavailable'})
+
+    return json.dumps({
+        'label':              gdata.get('label', target_label),
+        'source':             'vlm',
+        'grounding':          'approximate',
+        'center_px':          center_px,
+        'bbox_approx':        bbox_px,
+        'camera_point':       cam_xyz,
+        'base_link_point':    base_xyz,
+        'confidence':         round(conf, 3),
+        'position_confidence': 'approximate',
+        'description':        gdata.get('description', ''),
+        'inference_ms':       gdata.get('inference_ms', 0.0),
+        'depth_m':            round(depth_m, 3),
+    }, ensure_ascii=False)
 
 
 @mcp.tool()

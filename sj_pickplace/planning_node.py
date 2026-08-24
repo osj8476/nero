@@ -358,9 +358,17 @@ class PlanningNode(Node):
                     self.busy = False
                 return
             grasp_dir = cmd.get('grasp_dir', None)
+            # side 접근각도: VLM이 넘긴 절대 world 각도를 position_yaw 기준 offset으로 역산
+            _side_approach_deg = cmd.get('side_approach_deg')
+            if _side_approach_deg is not None:
+                _position_yaw_deg = math.degrees(math.atan2(pos['y'], pos['x']))
+                _side_approach_offset_deg = _side_approach_deg - _position_yaw_deg
+            else:
+                _side_approach_offset_deg = 0.0
             # [단순화] GRASP_DIR_MAP 조회 + SIDE_TAG 체크 + 라벨/위치 휴리스틱을
             # grasp_kinematics.resolve_grasp_quat() 하나로 통합 (동작 동일).
-            quat, is_side = resolve_grasp_quat(grasp_dir, pos, label)
+            quat, is_side = resolve_grasp_quat(grasp_dir, pos, label,
+                                               side_approach_offset_deg=_side_approach_offset_deg)
             self.get_logger().info(
                 f'PICK 시작: {label} @ {pos} | 자세: {grasp_dir or "auto"} '
                 f'({"side" if is_side else "top"}) {[round(v,3) for v in quat]} | '

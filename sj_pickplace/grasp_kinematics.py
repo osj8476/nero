@@ -83,7 +83,7 @@ class SequenceRejected(RuntimeError):
 
 # ── side 그립 전용 상수 (대규모 IK 그리드 전수조사 결과) ──────────────────
 SIDE_MIN_DIST = 0.32     # 이 거리 미만이면 IK 시도 없이 즉시 거부
-SIDE_PITCH_DEG = 90      # side 그립 손목 pitch (그리퍼를 눕히는 각도)
+SIDE_PITCH_DEG = 90
 SIDE_TCP_OFFSET = 0.1358  # 미터. top과 동일 실측값 적용 (side 별도 실측 전까지,
                           # 2026-08 기준 아직 검증 대기 — 변경 시 주의)
 
@@ -218,12 +218,19 @@ def sim_box_aligned_quat(angle_deg: float) -> list:
     return euler_to_quat(0.0, math.pi, math.radians(angle_deg) + math.pi)
 
 
-def side_quat_for(pos: dict) -> list:
-    """로봇(base_link 원점) -> 물체 위치 방향을 바라보는 '옆에서 수평 그립' 쿼터니언."""
+def side_quat_for(pos: dict, approach_offset_deg: float = 0.0) -> list:
+    """로봇(base_link 원점) -> 물체 위치 방향을 바라보는 '옆에서 수평 그립' 쿼터니언.
+    탑다운 : math.radians(-angle_deg), math.radians(90), position_yaw
+
+    approach_offset_deg: position_yaw 기준 접근 방향 오프셋 (도). 0이면 정면 직선 접근.
+    """
     x, y = pos.get('x', 0.0), pos.get('y', 0.0)
-    yaw = math.atan2(y, x)
-    pitch = math.radians(SIDE_PITCH_DEG)
-    roll = 0.0
+    position_yaw = math.atan2(y, x)
+
+    yaw = position_yaw + math.radians(approach_offset_deg)
+    pitch = 0.0
+    roll = math.radians(-90.0)
+
     return euler_to_quat(roll, pitch, yaw)
 
 
@@ -261,7 +268,8 @@ def auto_grasp_quat(pos: dict, label: str) -> list:
     return QUAT_TOP_DOWN
 
 
-def resolve_grasp_quat(grasp_dir, pos: dict, label: str = '') -> tuple:
+def resolve_grasp_quat(grasp_dir, pos: dict, label: str = '',
+                       side_approach_offset_deg: float = 0.0) -> tuple:
     """[신설] planning_node.py의 on_command 안에 pick/place/move 세 곳에
     거의 동일하게 반복돼 있던 "grasp_dir 문자열 -> (quat, is_side)" 해석
     로직을 하나로 통합한 것. 기존에는 이 세 곳이 서로 미묘하게 달랐다
@@ -274,6 +282,7 @@ def resolve_grasp_quat(grasp_dir, pos: dict, label: str = '') -> tuple:
             None/'auto' (라벨/위치 기반 자동 판단에 위임)
         pos: {'x', 'y', 'z'} 물체 또는 목표 위치
         label: 물체 라벨 (auto 판단 시에만 사용, 없으면 위치 휴리스틱만 적용)
+        side_approach_offset_deg: side 그립 시 position_yaw 기준 접근 방향 오프셋 (도).
 
     Returns:
         (quat: list[4], is_side: bool)
@@ -281,7 +290,7 @@ def resolve_grasp_quat(grasp_dir, pos: dict, label: str = '') -> tuple:
     if grasp_dir and grasp_dir != 'auto':
         quat = GRASP_DIR_MAP.get(grasp_dir, QUAT_HOME)
         if quat == SIDE_TAG:
-            return side_quat_for(pos), True
+            return side_quat_for(pos, side_approach_offset_deg), True
         return quat, False
     quat = auto_grasp_quat(pos, label)
     is_side = (
