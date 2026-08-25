@@ -83,7 +83,7 @@ class SequenceRejected(RuntimeError):
 
 # ── side 그립 전용 상수 (대규모 IK 그리드 전수조사 결과) ──────────────────
 SIDE_MIN_DIST = 0.32     # 이 거리 미만이면 IK 시도 없이 즉시 거부
-SIDE_PITCH_DEG = -90      # side 그립 손목 pitch (그리퍼를 눕히는 각도)
+SIDE_PITCH_DEG = 90
 SIDE_TCP_OFFSET = 0.1358  # 미터. top과 동일 실측값 적용 (side 별도 실측 전까지,
                           # 2026-08 기준 아직 검증 대기 — 변경 시 주의)
 
@@ -218,13 +218,35 @@ def sim_box_aligned_quat(angle_deg: float) -> list:
     return euler_to_quat(0.0, math.pi, math.radians(angle_deg) + math.pi)
 
 
-def side_quat_for(pos: dict) -> list:
-    """로봇(base_link 원점) -> 물체 위치 방향을 바라보는 '옆에서 수평 그립' 쿼터니언."""
+def side_quat_for(pos: dict, approach_offset_deg: float = 0.0) -> list:
+    """실물 전용 — 물체 방향으로 수평 접근하는 side 그립 쿼터니언.
+    ZYX euler: roll=-90°, pitch=0°, yaw=position_yaw
+    실물 AGX IK 실측 검증 기준. 시뮬은 sim_side_quat_for() 사용.
+    """
     x, y = pos.get('x', 0.0), pos.get('y', 0.0)
-    yaw = -math.atan2(y, x)+math.radians(SIDE_PITCH_DEG)
-    pitch = math.radians(SIDE_PITCH_DEG)
-    roll =  0.0
-    return euler_to_quat(roll, pitch, yaw)
+    position_yaw = math.atan2(y, x)
+    yaw = position_yaw + math.radians(approach_offset_deg)
+    return euler_to_quat(math.radians(-90.0), 0.0, yaw)
+
+
+def sim_side_quat_for(pos: dict, approach_offset_deg: float = 0.0) -> list:
+    """시뮬(MoveIt2) 전용 — 물체 방향으로 수평 접근하는 side 그립 쿼터니언.
+    ZYX euler: roll=+90°, pitch=0°, yaw=position_yaw
+
+    도출 근거:
+      sim top-down(roll=0, pitch=180°, yaw=py+π)의 회전행렬에 Rx(-90°)를
+      추가 적용하면 body_X → 물체방향, body_Y → 세계上, body_Z → 수평측면
+      의 수평 그립 자세가 된다. 이 행렬을 ZYX로 역산하면:
+        R[2,0]=0 → pitch=0°
+        R[2,1]=1 → roll=+90°
+        R[0,0]=cosθ₀ → yaw=position_yaw (보정항 없음)
+      결과적으로 실물(roll=-90°)과 roll 부호만 다르다.
+      실물과 시뮬의 side 축 정의 차이가 roll 방향 반전으로 흡수된 것.
+    """
+    x, y = pos.get('x', 0.0), pos.get('y', 0.0)
+    position_yaw = math.atan2(y, x)
+    yaw = position_yaw + math.radians(approach_offset_deg)
+    return euler_to_quat(math.radians(90.0), 0.0, yaw)
 
 
 def side_reachability_check(pos: dict) -> tuple:
@@ -246,44 +268,45 @@ def side_reachability_check(pos: dict) -> tuple:
     return (True, '')
 
 
-def auto_grasp_quat(pos: dict, label: str) -> list:
+def auto_grasp_quat(pos: dict, label: str, use_moveit2: bool = False) -> list:
     """라벨 힌트 -> 없으면 위치 기반 휴리스틱(y가 x보다 훨씬 크면 side)으로
     top-down 또는 side 쿼터니언을 결정한다."""
+    _side_fn = sim_side_quat_for if use_moveit2 else side_quat_for
     hint = LABEL_GRASP_HINT.get(label, None)
     if hint:
         entry = GRASP_DIR_MAP[hint]
         if entry == SIDE_TAG:
-            return side_quat_for(pos)
+            return _side_fn(pos)
         return entry
     x, y = pos.get('x', 0.0), pos.get('y', 0.0)
     if abs(y) > abs(x) * 1.5:
-        return side_quat_for(pos)
+        return _side_fn(pos)
     return QUAT_TOP_DOWN
 
 
-def resolve_grasp_quat(grasp_dir, pos: dict, label: str = '') -> tuple:
-    """[신설] planning_node.py의 on_command 안에 pick/place/move 세 곳에
-    거의 동일하게 반복돼 있던 "grasp_dir 문자열 -> (quat, is_side)" 해석
-    로직을 하나로 통합한 것. 기존에는 이 세 곳이 서로 미묘하게 달랐다
-    (move 분기만 기본값이 QUAT_HOME이고 pick/place는 None이었음 — 실질적
-    동작 차이는 없었지만 유지보수 시 혼동 요인이었다). 이제 이 함수
-    하나만 보고 판단하면 된다.
+def resolve_grasp_quat(grasp_dir, pos: dict, label: str = '',
+                       side_approach_offset_deg: float = 0.0,
+                       use_moveit2: bool = False) -> tuple:
+    """grasp_dir 문자열 -> (quat, is_side) 변환. sim/real 축 정의 차이를
+    use_moveit2 플래그로 흡수한다.
 
     Args:
-        grasp_dir: 사용자가 명시한 자세 문자열('top', 'side', ...) 또는
-            None/'auto' (라벨/위치 기반 자동 판단에 위임)
+        grasp_dir: 자세 문자열('top', 'side', ...) 또는 None/'auto'
         pos: {'x', 'y', 'z'} 물체 또는 목표 위치
-        label: 물체 라벨 (auto 판단 시에만 사용, 없으면 위치 휴리스틱만 적용)
+        label: 물체 라벨 (auto 판단 시에만 사용)
+        side_approach_offset_deg: side 그립 시 position_yaw 기준 오프셋 (도).
+        use_moveit2: True=시뮬(sim_side_quat_for), False=실물(side_quat_for)
 
     Returns:
         (quat: list[4], is_side: bool)
     """
+    _side_fn = sim_side_quat_for if use_moveit2 else side_quat_for
     if grasp_dir and grasp_dir != 'auto':
         quat = GRASP_DIR_MAP.get(grasp_dir, QUAT_HOME)
         if quat == SIDE_TAG:
-            return side_quat_for(pos), True
+            return _side_fn(pos, side_approach_offset_deg), True
         return quat, False
-    quat = auto_grasp_quat(pos, label)
+    quat = auto_grasp_quat(pos, label, use_moveit2=use_moveit2)
     is_side = (
         LABEL_GRASP_HINT.get(label) in ('side', 'side_front')
         or (label not in LABEL_GRASP_HINT

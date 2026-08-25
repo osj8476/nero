@@ -4,7 +4,7 @@ calib_visual.py
 Hand-eye 캘리브레이션 — RViz 시각화 + 수동 조작 버전.
 
 [사용법]
-  python3 /home/bpdl/sj_real/nero/sj_pickplace/scripts/calib_visual.py
+  python3 /home/bpdl/ros2_ws/src/sj_pickplace/scripts/calib_visual.py
 
 [RViz 에 추가할 디스플레이]
   - Image        topic: /calib/image          (카메라+체스보드 오버레이)
@@ -65,7 +65,7 @@ SQUARE_SIZE_M   = 0.025
 # ── 저장 경로 ─────────────────────────────────────────────────────────────────
 CALIB_DIR   = os.path.expanduser(os.environ.get("NERO_CALIB_DIR", "~/.nero_calib"))
 OUTPUT_JSON = os.path.join(CALIB_DIR, "flange_to_camera.json")
-URDF_PATH   = '/home/bpdl/sj_real/nero/sj_pickplace/nero_with_camera.urdf'
+URDF_PATH   = '/home/bpdl/ros2_ws/src/sj_pickplace/nero_with_camera.urdf'
 
 CAM_W, CAM_H, CAM_FPS = 640, 480, 30
 MIN_SAMPLES = 8

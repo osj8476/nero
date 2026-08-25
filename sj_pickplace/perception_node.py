@@ -86,6 +86,7 @@ DISPATCH_RATE_HZ = float(os.environ.get("DISPATCH_RATE_HZ", "10.0"))
 # 이미지 하단 N% 마스킹 (그리퍼가 카메라에 잡히는 경우 사용, 기본 0=비활성)
 GRIPPER_MASK_BOTTOM = float(os.environ.get("GRIPPER_MASK_BOTTOM", "0.0"))
 
+
 # 카메라 해상도
 CAM_W   = int(os.environ.get("CAM_W", "640"))
 CAM_H   = int(os.environ.get("CAM_H", "480"))
@@ -404,6 +405,7 @@ def _dedup_3d(objs, xy_thresh=DEDUP_XY_THRESH_M, z_thresh=DEDUP_Z_THRESH_M):
     return filtered
 
 
+
 class PerceptionNode(Node):
     def __init__(self):
         super().__init__('perception_node')
@@ -420,6 +422,7 @@ class PerceptionNode(Node):
         self.pub = self.create_publisher(String, "/detected_objects", qos)
         self.pub_image = self.create_publisher(Image, "/camera/color/image_raw", qos)
         self.pub_info = self.create_publisher(CameraInfo, "/camera/camera_info", qos)
+        self.pub_depth = self.create_publisher(Image, "/camera/depth/image_raw", qos)
 
         # ── RealSense 초기화 (이 안에서 intrinsics도 등록됨) ──
         self._init_camera()
@@ -439,6 +442,7 @@ class PerceptionNode(Node):
         # 동일 원인/동일 패치). 이전 요청 처리 중이면 dispatch를 건너뛴다.
         self._inflight = False
         self._inflight_lock = threading.Lock()
+
 
         if not self._wait_for_box_server():
             self.get_logger().error(
@@ -518,6 +522,15 @@ class PerceptionNode(Node):
                     self.pub_image.publish(img_msg)
                     self._cam_info.header = img_msg.header
                     self.pub_info.publish(self._cam_info)
+
+                    depth_msg = Image()
+                    depth_msg.header = img_msg.header
+                    depth_msg.height = depth_np.shape[0]
+                    depth_msg.width  = depth_np.shape[1]
+                    depth_msg.encoding = "32FC1"
+                    depth_msg.step = depth_np.shape[1] * 4
+                    depth_msg.data = depth_np.astype(np.float32).tobytes()
+                    self.pub_depth.publish(depth_msg)
 
                     self.latest_color = color_np
                     self.latest_depth = depth_np
@@ -670,9 +683,12 @@ class PerceptionNode(Node):
         # 쌓여있는 박스처럼 z(depth)가 다르면 그대로 유지된다.
         objs = _dedup_3d(objs)
 
+        # ── YOLO 결과 발행 ───────────────────────────────────────────
         msg = String()
         msg.data = json.dumps({"objects": objs}, ensure_ascii=False)
         self.pub.publish(msg)
+
+
 
     @staticmethod
     @staticmethod

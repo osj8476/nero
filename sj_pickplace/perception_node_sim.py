@@ -18,28 +18,19 @@ perception_node.py와 100% 동일하게 유지했다 (planning_node 변경 불�
   → depth 조회 완료 후, 3D 위치(x,y,z) 기준으로 dedup 하도록 변경.
     x,y가 가깝더라도 z(depth)가 다르면 쌓인 별개 박스로 보고 유지한다.
 
-[2026-08-19 포팅 — 다중 라벨 + GRIPPER_MASK_BOTTOM]
-origin/master 커밋 e2fee24("듀얼 YOLO 서버, 다중 라벨 perception, 시각화 v4")가
-perception_node.py(실물)에만 추가하고 이 파일(sim)에는 반영 안 돼 있던 두 가지를
-포팅: (1) TARGET_LABEL 쉼표 구분 다중 라벨 지원(TARGET_LABELS), (2)
-GRIPPER_MASK_BOTTOM 환경변수(이미지 하단 N% 마스킹 — 그리퍼 오탐 대응 방식이
-하나 더 늘어난 것. 기존 GRIPPER_MIN_DEPTH_M(depth 기준 사후 필터링)과는 별개
-메커니즘이라 둘 다 유지, 필요시 같이 켤 수 있음). yolo_world 기반 좌표 검출
-서버(vlm_yoloworld.py, open-vocab)로 BOX_SERVER_URL을 바꿔 물체 여러 종류를
-동시에 찾을 때 이 다중 라벨 지원이 전제조건이 된다.
-
 [환경변수]
   BOX_SERVER_URL  : 박스 서버 주소 (기본: http://127.0.0.1:8002/detect)
   BOX_HEALTH_URL  : 헬스체크 주소 (기본: http://127.0.0.1:8002/health)
-  TARGET_LABEL    : 탐지 대상 클래스 (기본: box). 쉼표로 복수 지정 가능: "box,bottle"
+  TARGET_LABEL    : 탐지 대상 클래스 (기본: box + vlm_boxyolo.py의 ALLOWED_COCO 24종
+                    전부). 쉼표로 복수 지정 가능: "box,bottle" (지정 시 기본값 전체를
+                    덮어씀 — COCO 라벨은 서버(vlm_boxyolo.py)의 ALLOWED_COCO 집합과
+                    반드시 일치해야 함, 안 맞으면 서버가 조용히 필터링해서 버림)
   BASE_FRAME      : tf 변환 목표 프레임 (기본: base_link)
   CAMERA_OPTICAL_FRAME : 카메라 광학 프레임 (기본: camera_color_optical_frame)
   IMAGE_TOPIC     : RGB 이미지 토픽 (기본: /camera/color/image_raw)
   DEPTH_TOPIC     : Depth 이미지 토픽 (기본: /camera/depth/image_raw)
   CAMERA_INFO_TOPIC : CameraInfo 토픽 (기본: /camera/camera_info)
   GRIPPER_MIN_DEPTH_M : 이보다 가까운 depth는 그리퍼 오탐으로 간주해 제외 (기본: 0.15)
-  GRIPPER_MASK_BOTTOM : 이미지 하단 N% 마스킹(0~1, 그리퍼가 화면에 잡히는 경우
-                        사용, 기본 0=비활성) — perception_node.py와 동일 메커니즘
   DEDUP_XY_THRESH_M   : 3D dedup 시 x,y 임계값(미터) (기본: 0.03)
   DEDUP_Z_THRESH_M    : 3D dedup 시 z(depth) 임계값(미터) — 이보다 z가 가까우면 같은
                         박스로 보고 병합, 이보다 멀면 쌓인 별개 박스로 보고 유지 (기본: 0.03)
@@ -72,7 +63,19 @@ from sj_pickplace.camera_calibration import (
 # ──────────────────────────────────────────────
 # 설정
 # ──────────────────────────────────────────────
-_raw_labels      = os.environ.get("TARGET_LABEL", "box")
+# 기본 라벨 = "box" + vlm_boxyolo.py의 ALLOWED_COCO 24종 전부 (2026-08-25).
+# 서버가 다른 파일이라 상수 공유 불가 — 서버 쪽 ALLOWED_COCO를 바꾸면 여기도
+# 같이 맞춰야 함 (yolo/vlm_boxyolo.py 참고).
+_DEFAULT_TARGET_LABELS = (
+    "box,"
+    "person,umbrella,tie,"
+    "bottle,wine glass,cup,fork,knife,spoon,bowl,"
+    "banana,apple,"
+    "book,clock,vase,scissors,toothbrush,"
+    "laptop,remote,keyboard,cell phone,"
+    "sports ball,baseball bat,baseball glove"
+)
+_raw_labels      = os.environ.get("TARGET_LABEL", _DEFAULT_TARGET_LABELS)
 TARGET_LABELS    = [l.strip() for l in _raw_labels.split(",") if l.strip()]
 TARGET_LABEL     = TARGET_LABELS[0]  # 단일 라벨 기대 코드와의 하위 호환용
 BOX_SERVER_URL   = os.environ.get("BOX_SERVER_URL", "http://127.0.0.1:8002/detect")
@@ -86,12 +89,6 @@ MIN_BBOX_SIZE = 0.02
 # 그리퍼는 카메라에 항상 훨씬 가깝게(depth ~0.1m) 잡히므로, 이보다 가까운
 # detection은 실제 작업 대상 박스가 아니라 그리퍼 자체로 간주하고 제외한다.
 GRIPPER_MIN_DEPTH_M = float(os.environ.get("GRIPPER_MIN_DEPTH_M", "0.15"))
-
-# [2026-08-19 포팅, perception_node.py와 동일] 이미지 하단 N% 마스킹.
-# GRIPPER_MIN_DEPTH_M(depth 기준 사후 필터링)과는 별개 메커니즘 — depth가
-# 불안정하거나 그리퍼가 박스와 depth가 비슷하게 잡히는 각도에서는 이쪽이
-# 더 확실하게 걸러낼 수 있어 둘 다 유지, 필요시 같이 켤 수 있다.
-GRIPPER_MASK_BOTTOM = float(os.environ.get("GRIPPER_MASK_BOTTOM", "0.0"))
 
 # 3D 위치 기준 dedup 임계값.
 # x,y는 가깝지만 z(depth)가 이 임계값보다 더 차이나면 "쌓여있는 별개 박스"로
@@ -176,7 +173,7 @@ class PerceptionNodeSim(Node):
             f'PerceptionNodeSim 시작 (Isaac Sim 카메라) | target={TARGET_LABELS} | '
             f'image={IMAGE_TOPIC} depth={DEPTH_TOPIC} info={CAMERA_INFO_TOPIC} | '
             f'tf: {CAMERA_OPTICAL_FRAME} -> {BASE_FRAME} | '
-            f'gripper_min_depth={GRIPPER_MIN_DEPTH_M}m gripper_mask_bottom={GRIPPER_MASK_BOTTOM} | '
+            f'gripper_min_depth={GRIPPER_MIN_DEPTH_M}m | '
             f'dedup_xy={DEDUP_XY_THRESH_M}m dedup_z={DEDUP_Z_THRESH_M}m')
 
     # ── 카메라 콜백들 ──────────────────────────────────────────────────────
@@ -285,15 +282,6 @@ class PerceptionNodeSim(Node):
     def _send_and_publish(self, color: np.ndarray, depth: np.ndarray, stamp=None):
         _stamp = stamp if stamp is not None else rclpy.time.Time().to_msg()
         try:
-            # [2026-08-19 포팅, perception_node.py와 동일] 그리퍼가 화면
-            # 하단에 걸리는 각도에서 오탐 대응 — 마스킹 이후의 color를
-            # 그대로 뒤에서 angle 계산/depth 샘플링에도 재사용한다(실물
-            # 버전과 동일 순서).
-            if GRIPPER_MASK_BOTTOM > 0.0:
-                h = color.shape[0]
-                cutoff = int(h * (1.0 - GRIPPER_MASK_BOTTOM))
-                color = color.copy()
-                color[cutoff:, :] = 0
             ok, buf = cv2.imencode('.jpg', color, [cv2.IMWRITE_JPEG_QUALITY, 90])
             if not ok:
                 return
