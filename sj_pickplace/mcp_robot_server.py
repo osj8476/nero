@@ -47,6 +47,10 @@ from mcp.server.fastmcp import FastMCP
 # 안의 순수 함수 import라 문제 없음 (perception_node_sim.py가 이미
 # _compute_box_angle_base/_dedup_3d를 같은 방식으로 재사용 중).
 from .perception_node import _fit_plane_normal
+from .segmentation_backend import NoOpSegmentationBackend
+from .point_cloud import Intrinsics as _PCIntrinsics, mask_depth_to_pointcloud
+from . import geometry_3d as _geometry_3d
+from .grasp_types import GeometryResult as _GeometryResult
 
 # ── 타임아웃 설정 ──────────────────────────────────────────────────────────────
 TIMEOUT_PICK  = 75.0  # [2026-07 수정] IK 후보비교, 재조회 재시도,
@@ -424,6 +428,67 @@ def _compute_face_normal_yaw_from_bbox(bbox_px: list, depth: np.ndarray,
 
     yaw_deg = math.degrees(math.atan2(ny, nx)) % 180.0
     return round(yaw_deg, 1), confidence, len(points_cam)
+
+
+def _rotate_vec_to_base(vec) -> Optional[tuple]:
+    """카메라 좌표계 방향벡터(위치 아님) 하나를 base_link로 "회전만" 변환.
+    _compute_face_normal_yaw_from_bbox와 동일 Vector3Stamped 패턴 -- 여러
+    지점에서 반복되던 걸 함수로 뽑음."""
+    if vec is None:
+        return None
+    try:
+        v = Vector3Stamped()
+        v.header.frame_id = "camera_color_optical_frame"
+        v.header.stamp = rclpy.time.Time().to_msg()
+        v.vector.x, v.vector.y, v.vector.z = [float(c) for c in vec]
+        v_base = _ros_node.tf_buffer.transform(v, "base_link", timeout=Duration(seconds=0.3))
+        return (v_base.vector.x, v_base.vector.y, v_base.vector.z)
+    except Exception:
+        return None
+
+
+def _geometry_to_base_link(geometry, depth_quality: float = 1.0):
+    """geometry_3d.compute_geometry()가 camera_color_optical_frame 점군에서
+    낸 GeometryResult(축/normal이 전부 카메라 좌표계)를 base_link 기준으로
+    다시 감싼다. 점 수만 개를 전부 재변환하는 대신, 이미 계산된 축/normal
+    (벡터 3~4개)과 centroid(점 1개)만 변환한다 -- 점군 자체를 base_link로
+    옮긴 뒤 geometry_3d를 다시 돌리는 것과 수학적으로 동일하지만 훨씬 싸다
+    (회전 변환은 선형이라 축소환 순서를 바꿔도 결과가 같음).
+
+    실패(TF 불가 등)하면 valid=False인 빈 GeometryResult를 반환한다 --
+    호출부가 무조건 뭔가를 받되, 유효성은 반드시 .valid로 확인해야 한다."""
+    from dataclasses import replace as _dc_replace
+
+    if geometry is None or not geometry.valid:
+        return _GeometryResult(valid=False)
+
+    centroid_base = _cam_to_base({'x': geometry.centroid[0], 'y': geometry.centroid[1],
+                                  'z': geometry.centroid[2]})
+    major_base = _rotate_vec_to_base(geometry.major_axis)
+    minor_base = _rotate_vec_to_base(geometry.minor_axis)
+    third_base = _rotate_vec_to_base(geometry.third_axis)
+    normal_base = _rotate_vec_to_base(geometry.plane_normal) if geometry.plane_normal else None
+
+    if centroid_base is None or major_base is None:
+        return _GeometryResult(valid=False, point_count=geometry.point_count,
+                               filtered_point_count=geometry.filtered_point_count)
+
+    def _yaw(vec):
+        if vec is None:
+            return None
+        h = math.hypot(vec[0], vec[1])
+        if h < 0.5:
+            return None
+        return round(math.degrees(math.atan2(vec[1], vec[0])) % 180.0, 1)
+
+    return _dc_replace(
+        geometry,
+        centroid=(centroid_base['x'], centroid_base['y'], centroid_base['z']),
+        major_axis=major_base, minor_axis=minor_base, third_axis=third_base,
+        plane_normal=normal_base,
+        major_axis_yaw_deg=_yaw(major_base),
+        normal_yaw_deg=_yaw(normal_base),
+    )
 
 
 def _crop_b64(img_bgr: np.ndarray, bbox_norm: list, padding: float = 0.07) -> tuple:
@@ -2161,6 +2226,106 @@ def ground_object(target_label: str, parent_label: str = None) -> str:
         # side_approach_deg 계산의 참고용 -- planning_node.py엔 아직 미연결.
         'face_normal_yaw_deg': face_yaw_deg,
         'face_normal_confidence': face_conf,
+    }, ensure_ascii=False)
+
+
+@mcp.tool()
+def estimate_object_geometry(target_label: str) -> str:
+    """[2026-08 추가, 프로토타입 -- 실기 미검증] 물체의 3D 형상(RANSAC 평면 +
+    PCA 주축)을 실측 depth로 계산한다. pick_object의 자세 결정에는 아직
+    자동 연결되지 않았다 -- 이 값을 보고 판단에 참고하거나, pick_object가
+    받는 grasp_candidate 필드를 직접 구성할 때 쓰기 위한 읽기 전용 도구다.
+
+    파이프라인: YOLO bbox(현재 segmentation은 NoOp -- bbox를 그대로 사각형
+    마스크로 씀) → depth 역투영 → point cloud → RANSAC(우세 평면) + PCA
+    (주축) → base_link 좌표계로 변환.
+
+    ─── 라우팅 규칙 ──────────────────────────────────────────────────────────
+    ○ 사용: side/pinch 그립 전 물체의 실제 긴 축 방향을 확인하고 싶을 때,
+           또는 infer_grasp의 grasp_relation("perpendicular_to_long_axis" 등)이
+           실제로 어느 각도를 가리키는지 검증하고 싶을 때.
+    ✗ 대체 아님: infer_grasp(어떻게 잡을지)나 ground_object(어디 있는지)를
+           대체하지 않는다 -- 이 도구는 "물체가 실제로 어떤 모양으로 놓여
+           있는지"만 답한다.
+
+    Args:
+        target_label: /detected_objects에 있는 라벨 (YOLO 검출 필요 --
+            아직 VLM-only 물체는 지원 안 함, ground_object의 bbox_approx를
+            나중에 여기 연결할 수 있음).
+
+    Returns:
+        성공: {"status":"success", "label":"...",
+               "geometry_confidence":0.87,
+               "major_axis_yaw_deg":37.2, "normal_yaw_deg":12.0|null,
+               "plane_inlier_ratio":0.71, "point_count":812,
+               "major_axis":[x,y,z], "plane_normal":[x,y,z]|null,
+               "extents":[L,W,H]}
+               (major_axis_yaw_deg/normal_yaw_deg는 mod-180 -- 부호 모호성은
+               해소 안 됨, side grasp 후보 생성 시 양쪽 다 고려해야 함.
+               None이면 그 축/면이 충분히 수직이 아니라 방위각이 무의미하다는
+               뜻 -- geometry_3d.py의 verticality 게이트 참고.)
+        실패: {"status":"error"|"low_confidence", "reason":"..."}
+    """
+    _ensure_ros()
+    target_label = target_label.strip().lower()
+
+    objects, _ = _ros_node.get_objects()
+    matched = [o for o in objects if str(o.get('label', '')).lower() == target_label]
+    if not matched:
+        return json.dumps({'status': 'error',
+                           'reason': f"'{target_label}' 이(가) /detected_objects에 없습니다 "
+                                     f"(YOLO 검출 필요 -- VLM-only 물체는 아직 미지원)."})
+    obj = matched[0]
+    bbox_norm = obj.get('bbox')
+
+    img_bgr, img_stamp = _ros_node.get_image()
+    if img_bgr is None:
+        return json.dumps({'status': 'error', 'reason': 'image_unavailable'})
+    img_age = round(time.time() - img_stamp, 3)
+    if img_age > 3.0:
+        return json.dumps({'status': 'error', 'reason': f'image_stale — {img_age:.1f}s'})
+
+    depth_arr, _ = _ros_node.get_depth()
+    fx, fy, cx, cy, _cw, _ch = _ros_node.get_cam_intrinsics()
+    if depth_arr is None or fx is None:
+        return json.dumps({'status': 'error', 'reason': 'depth_or_intrinsics_unavailable'})
+
+    h, w = img_bgr.shape[:2]
+    if not bbox_norm or len(bbox_norm) != 4:
+        return json.dumps({'status': 'error', 'reason': 'invalid_bbox'})
+    bbox_px = [int(bbox_norm[0] * w), int(bbox_norm[1] * h),
+               int(bbox_norm[2] * w), int(bbox_norm[3] * h)]
+
+    seg = NoOpSegmentationBackend().segment(img_bgr, bbox_px)
+    if seg is None:
+        return json.dumps({'status': 'error', 'reason': 'segmentation_failed'})
+
+    points_cam = mask_depth_to_pointcloud(
+        depth_arr, seg.mask, _PCIntrinsics(fx=fx, fy=fy, cx=cx, cy=cy),
+        max_points=2000)
+    if len(points_cam) < 20:
+        return json.dumps({'status': 'error',
+                           'reason': f'insufficient_points — {len(points_cam)}개 (최소 20)'})
+
+    geo_cam = _geometry_3d.compute_geometry(points_cam, min_inliers=20)
+    if not geo_cam.valid:
+        return json.dumps({'status': 'error', 'reason': 'geometry_fit_failed'})
+
+    geo = _geometry_to_base_link(geo_cam)
+    if not geo.valid:
+        return json.dumps({'status': 'error', 'reason': 'tf_unavailable'})
+
+    return json.dumps({
+        'status': 'success',
+        'label': target_label,
+        'geometry_confidence': geo.geometry_confidence,
+        'major_axis_yaw_deg': geo.major_axis_yaw_deg,
+        'normal_yaw_deg': geo.normal_yaw_deg,
+        'plane_inlier_ratio': round(geo.plane_inlier_ratio, 3),
+        'point_count': geo.point_count,
+        'major_axis': list(geo.major_axis) if geo.major_axis else None,
+        'plane_normal': list(geo.plane_normal) if geo.plane_normal else None,
+        'extents': list(geo.extents) if geo.extents else None,
     }, ensure_ascii=False)
 
 

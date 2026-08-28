@@ -391,11 +391,32 @@ class PlanningNode(Node):
             # 역산했는데, 절대각 기준이라 물체 위치가 바뀔 때마다 "정면"에
             # 해당하는 값을 사용자가 매번 다시 계산해야 했다.)
             _side_approach_offset_deg = cmd.get('side_approach_deg') or 0.0
-            # [단순화] GRASP_DIR_MAP 조회 + SIDE_TAG 체크 + 라벨/위치 휴리스틱을
-            # grasp_kinematics.resolve_grasp_quat() 하나로 통합 (동작 동일).
-            quat, is_side = resolve_grasp_quat(grasp_dir, pos, label,
-                                               side_approach_offset_deg=_side_approach_offset_deg,
-                                               use_moveit2=self.use_moveit2)
+            # [2026-08 추가, 프로토타입] grasp_pose_generator.py가 만든 후보를
+            # 그대로 실행하고 싶은 호출부를 위한 옵션 경로. payload에
+            # {'grasp_candidate': {'quaternion':[x,y,z,w], 'is_side':bool, ...}}
+            # 가 있으면 resolve_grasp_quat() 계산을 건너뛰고 그 quat/is_side를
+            # 그대로 쓴다 -- _do_pick 이후의 approach/descend/lift 시퀀스는
+            # 전혀 안 바뀌므로(quat/is_side는 원래도 이 시퀀스에 전달되는
+            # 파라미터일 뿐) 회귀 위험이 없다. 필드가 없으면(기존 모든
+            # 호출부) 100% 기존 동작과 동일 -- 이 분기 자체가 새 로직을
+            # 추가한 게 아니라 quat/is_side를 "어디서 계산했는지"만 바뀐다.
+            _grasp_candidate = cmd.get('grasp_candidate')
+            if (isinstance(_grasp_candidate, dict)
+                    and isinstance(_grasp_candidate.get('quaternion'), list)
+                    and len(_grasp_candidate['quaternion']) == 4):
+                quat = [float(v) for v in _grasp_candidate['quaternion']]
+                is_side = bool(_grasp_candidate.get('is_side', False))
+                self.get_logger().info(
+                    f'[grasp_candidate] 외부 제공 후보 사용 -- '
+                    f'source={_grasp_candidate.get("source", "?")} '
+                    f'total_score={_grasp_candidate.get("total_score", "?")}')
+            else:
+                # [단순화] GRASP_DIR_MAP 조회 + SIDE_TAG 체크 + 라벨/위치
+                # 휴리스틱을 grasp_kinematics.resolve_grasp_quat() 하나로
+                # 통합 (동작 동일, 기존 경로).
+                quat, is_side = resolve_grasp_quat(grasp_dir, pos, label,
+                                                   side_approach_offset_deg=_side_approach_offset_deg,
+                                                   use_moveit2=self.use_moveit2)
             self.get_logger().info(
                 f'PICK 시작: {label} @ {pos} | 자세: {grasp_dir or "auto"} '
                 f'({"side" if is_side else "top"}) {[round(v,3) for v in quat]} | '

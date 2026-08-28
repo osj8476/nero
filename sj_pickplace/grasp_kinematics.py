@@ -470,6 +470,57 @@ def resolve_grasp_quat(grasp_dir, pos: dict, label: str = '',
     return quat, is_side
 
 
+def candidate_quat_for(pos: dict, approach_vector, grasp_dir_hint: str = 'side',
+                       angle_deg: float = None, use_moveit2: bool = False,
+                       side_approach_offset_deg: float = None) -> tuple:
+    """[2026-08 추가] grasp_pose_generator.GraspCandidate의 approach_vector를
+    기존 TCP orientation 공식(quaternion)으로 변환한다.
+
+    [설계 원칙] 이 함수는 gripper local axis를 새로 추측하지 않는다 --
+    기존에 실측 검증된 side_quat_for/sim_side_quat_for/pinch_quat_for/
+    sim_pinch_quat_for/top_down_angle_quat/sim_top_down_angle_quat/
+    sim_box_aligned_quat 공식을 그대로 재사용하고, candidate의
+    approach_vector/각도는 그 공식들이 이미 받는 파라미터
+    (approach_offset_deg 또는 angle_deg)로 "번역"만 한다. 즉 이 함수는
+    resolve_grasp_quat()의 "candidate 버전"이지 새 자세 계산 로직이 아니다.
+
+    Args:
+        pos: {'x','y','z'} 목표 위치.
+        approach_vector: (x,y,z) 단위벡터 -- side/pinch일 때만 수평 방위각
+            추출에 쓰임(top이면 무시).
+        grasp_dir_hint: 'top' | 'side' | 'pinch'. GraspCandidate.grasp_dir_hint
+            그대로 전달받는다 -- 이 함수가 top/side/pinch를 스스로 판단하지
+            않는다(그 판단은 grasp_pose_generator.py 책임, VLM grasp_type
+            또는 approach_vector 수직성 휴리스틱 등).
+        angle_deg: top-down일 때 물체 edge 정렬각(도, base_link 절대각) --
+            보통 GeometryResult.major_axis_yaw_deg 또는 기존
+            angle_base_deg. None이면 0.0(자유 twist, 자세 최적화만).
+        side_approach_offset_deg: side/pinch일 때 이미 계산된 offset이
+            있으면 그대로 사용(재계산 방지). None이면 approach_vector에서
+            역산한다.
+
+    Returns:
+        (quat, is_side)
+    """
+    if grasp_dir_hint == 'top':
+        _angle = angle_deg if angle_deg is not None else 0.0
+        if use_moveit2:
+            return sim_box_aligned_quat(_angle), False
+        return top_down_angle_quat(pos['x'], pos['y'], _angle), False
+
+    if side_approach_offset_deg is None:
+        x, y = pos.get('x', 0.0), pos.get('y', 0.0)
+        position_yaw_deg = math.degrees(math.atan2(y, x))
+        approach_yaw_deg = math.degrees(math.atan2(approach_vector[1], approach_vector[0]))
+        side_approach_offset_deg = ((approach_yaw_deg - position_yaw_deg + 180.0) % 360.0) - 180.0
+
+    if grasp_dir_hint == 'pinch':
+        _fn = sim_pinch_quat_for if use_moveit2 else pinch_quat_for
+    else:
+        _fn = sim_side_quat_for if use_moveit2 else side_quat_for
+    return _fn(pos, approach_offset_deg=side_approach_offset_deg), True
+
+
 class YawCandidateSelector:
     """_pick_best_yaw_candidate의 순수 비교 로직만 분리한 것 (원본 로직
     그대로 이관 — candidates_deg 구성, cost 계산 방식 모두 동일).
