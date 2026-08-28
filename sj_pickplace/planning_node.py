@@ -85,9 +85,6 @@ from .grasp_kinematics import (
     resolve_grasp_quat, YawCandidateSelector, SequenceRejected,
     SIDE_BLIND_SWEEP_DEG, side_face_candidates_deg,
 )
-# [신설] stack_boxes의 pick 단계 경량 백트래킹 플래너 (ROS 비의존, 순수 함수).
-# 상세: task_planner.py 모듈 docstring 참고.
-from .task_planner import run_stack_plan, DEFAULT_MAX_BACKTRACK_ATTEMPTS
 # [신설] 폐루프(closed-loop) place 검증 -- 그리퍼를 열고 물러난 뒤 실제로
 # 목표 위치에 물체가 안착했는지 perception으로 재확인한다.
 # 상세: placement_verification.py 모듈 docstring 참고.
@@ -600,51 +597,6 @@ class PlanningNode(Node):
         elif action == 'home':
             self.get_logger().info('HOME 시작')
             threading.Thread(target=self._home_sequence, daemon=True).start()
-        elif action == 'stack':
-            target_label = cmd.get('target_label', 'box').strip().lower()
-            box_indices = cmd.get('box_indices', [])
-            base_pos = cmd.get('base_pos')
-            box_height_m = cmd.get('box_height_m', 0.05)
-            grasp_dir = cmd.get('grasp_dir', None)
-            allow_reorder = cmd.get('allow_reorder', False)
-            if not box_indices or base_pos is None:
-                self.get_logger().warn("'stack' 명령에 box_indices 또는 base_pos 없음.")
-                with self.lock:
-                    self.busy = False
-                return
-            _label_matches = [b for b in self._scanned_boxes if b.get('label') == target_label]
-            box_refs, invalid = [], []
-            for idx in box_indices:
-                if isinstance(idx, int) and 0 <= idx < len(_label_matches):
-                    box_refs.append(_label_matches[idx])
-                else:
-                    invalid.append(idx)
-            if invalid or not box_refs:
-                reason = (f"잘못된 box_indices: {invalid} "
-                           f"(라벨 '{target_label}' 매칭 {len(_label_matches)}개)")
-                self.get_logger().warn(f'[stack] {reason}')
-                self._publish_result('rejected', reason)
-                with self.lock:
-                    self.busy = False
-                return
-            # [신설] allow_reorder=True일 때만 fallback pool을 채운다 --
-            # _label_matches는 원래 box_refs를 좁힌 뒤 버려지던 변수였으나,
-            # 여기서는 "지정되지 않은 나머지 같은 라벨 박스" 후보군으로
-            # 재활용한다 (task_planner.run_stack_plan의 pick 백트래킹용).
-            fallback_pool = (
-                [b for b in _label_matches if b not in box_refs]
-                if allow_reorder else []
-            )
-            self.get_logger().info(
-                f'STACK 시작: label={target_label} box_indices={box_indices} '
-                f'base={base_pos} height={box_height_m} allow_reorder={allow_reorder} '
-                f'fallback_pool={len(fallback_pool)}개')
-            t = threading.Thread(
-                target=self._stack_sequence,
-                args=(target_label, box_refs, base_pos, box_height_m, grasp_dir,
-                      fallback_pool, allow_reorder))
-            t.daemon = False
-            t.start()
         else:
             self.get_logger().warn(f"알 수 없는 action: '{action}'")
             with self.lock:
@@ -1657,92 +1609,6 @@ class PlanningNode(Node):
                 self.get_logger().warn(
                     '  [verify] 재확인 자세 이동 실패, 1차 검증 결과 그대로 유지')
         return verification
-
-    def _stack_sequence(self, target_label, box_refs, base_pos, box_height_m, grasp_dir,
-                         fallback_pool=None, allow_reorder=False):
-        """box_refs를 순서대로(맨 아래부터) base_pos 위치에 쌓는다.
-        box_refs의 각 원소는 self._scanned_boxes 안의 실제 dict 레퍼런스 --
-        stack_boxes 호출 시작 시점에 한 번만 인덱스를 해석해뒀으므로(box_index
-        혼동 방지 원칙과 동일한 이유), 이후로는 인덱스 재조회 없이 이 레퍼런스로
-        큐에서 제거한다.
-
-        [2026-08 재작성] 실제 tier 진행/후보 재선택 로직은 task_planner.
-        run_stack_plan()(ROS 비의존 순수 함수)으로 이관됨. 이 메서드는
-        _do_pick/_do_place/큐 제거를 콜백으로 주입하고, 반환된 결과를
-        로그로 남긴 뒤 그대로 퍼블리시하는 얇은 어댑터로만 남는다.
-        pick 실패 시 fallback_pool에서 대체 후보를 시도할 수 있지만
-        (allow_reorder=True일 때만), place 실패 또는 placement_verified
-        =False에서의 무조건 중단은 이관 전과 완전히 동일하다.
-        """
-        fallback_pool = fallback_pool or []
-        try:
-            def _remove_from_queue(box):
-                try:
-                    self._scanned_boxes.remove(box)
-                except ValueError:
-                    pass
-
-            result = run_stack_plan(
-                requested_boxes=box_refs,
-                fallback_pool=fallback_pool,
-                target_label=target_label,
-                grasp_dir=grasp_dir,
-                base_pos=base_pos,
-                box_height_m=box_height_m,
-                pick_fn=lambda pos, quat, is_side, label, skip_reacquire, angle_deg:
-                    self._do_pick(pos, quat, is_side, label, skip_reacquire, angle_deg),
-                place_fn=lambda pos, quat, is_side: self._do_place(pos, quat, is_side),
-                remove_fn=_remove_from_queue,
-                min_reach_r_m=MIN_REACH_R_M,
-                boundary_r_m=BOUNDARY_R_M,
-                allow_reorder=allow_reorder,
-            )
-
-            tier_results = result['tiers']
-            for tr in tier_results:
-                tag = f"tier {tr['tier']}/{len(box_refs)-1}"
-                if tr['stage'] == 'pick' and tr['status'] != 'success':
-                    log_fn = self.get_logger().warn if tr['status'] == 'rejected' else self.get_logger().error
-                    log_fn(f"[stack] {tag} pick {tr['status']}: {tr['reason']}")
-                elif tr['stage'] == 'place' and tr['status'] != 'success':
-                    log_fn = self.get_logger().warn if tr['status'] == 'rejected' else self.get_logger().error
-                    log_fn(f"[stack] {tag} place {tr['status']}: {tr['reason']}")
-                else:
-                    sub_note = ''
-                    if tr.get('substituted'):
-                        bu = tr.get('box_used') or {}
-                        sub_note = (f" (대체됨 -> "
-                                    f"({bu.get('x', 0):.3f},{bu.get('y', 0):.3f},{bu.get('z', 0):.3f}))")
-                    self.get_logger().info(f"[stack] {tag} place 성공{sub_note}")
-                    if tr.get('placement_verified') is False:
-                        self.get_logger().warn(
-                            f"[stack] {tag} placement_verified=False "
-                            f"({tr.get('verification_reason', '')}) -- "
-                            f"불안정할 수 있으나 중단하지 않고 다음 tier 계속 진행.")
-
-            for sc in result['skipped_candidates']:
-                b = sc.get('box') or {}
-                prefilter_note = ' [사전필터]' if sc.get('prefiltered') else ''
-                self.get_logger().info(
-                    f"[stack] tier {sc['tier']} 후보 제외{prefilter_note}: "
-                    f"({b.get('x', 0):.3f},{b.get('y', 0):.3f},{b.get('z', 0):.3f}) -- {sc['reason']}")
-
-            overall = result['status']
-            self.get_logger().info(
-                f'✅ STACK 종료 ({overall}, {len(tier_results)}/{len(box_refs)} tier, '
-                f'backtrack_attempts_used={result["backtrack_attempts_used"]})')
-            # busy 해제를 발행보다 먼저 (레이스 방지 -- _scan_box_sequence 참고)
-            with self.lock:
-                self.busy = False
-            self._publish_result(
-                overall, 'stack_complete' if overall == 'success' else 'stack_partial',
-                extra={'tiers': tier_results,
-                       'skipped_candidates': result['skipped_candidates'],
-                       'backtrack_attempts_used': result['backtrack_attempts_used'],
-                       'remaining_scanned_boxes': self._scanned_boxes})
-        finally:
-            with self.lock:
-                self.busy = False
 
     def _move_sequence(self, pos, quat, is_side=False):
         try:

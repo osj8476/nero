@@ -40,11 +40,6 @@ import tf2_geometry_msgs  # noqa: F401 — PointStamped 변환 등록용
 
 from mcp.server.fastmcp import FastMCP
 
-# [신설] stack_boxes(allow_reorder=True) 타임아웃 계산에 필요한 백트래킹
-# 예산 상수. planning_node.py의 task_planner.run_stack_plan과 동일한
-# 값을 공유하기 위해 import (중복정의 방지).
-from .task_planner import DEFAULT_MAX_BACKTRACK_ATTEMPTS
-
 # ── 타임아웃 설정 ──────────────────────────────────────────────────────────────
 TIMEOUT_PICK  = 75.0  # [2026-07 수정] IK 후보비교, 재조회 재시도,
 # calib_debug tf lookup 등이 추가되며 pick 시퀀스가 예전보다 느려짐
@@ -56,7 +51,6 @@ TIMEOUT_PLACE = 60.0  # [2026-07 수정] place가 approach->align->descend
 # 루프를 만드는 원인이었음). pick과 비슷한 수준으로 넉넉하게 상향.
 TIMEOUT_MOVE  = 11.0
 TIMEOUT_HOME  = 16.0
-TIMEOUT_STACK_PER_BOX = 90.0  # pick(최대 75s)+place(최대 60s)를 박스당 여유있게 커버
 
 # [2026-07 추가] 박스 실측 치수 지원 전까지 임시 고정값 (추후 A안:
 # depth 기반 실측으로 교체 예정). 현재 테스트 환경 박스 높이 기준.
@@ -1279,109 +1273,6 @@ def place_object(x: float, y: float, z: float, grasp_dir: str = 'auto',
         result['place_pos'] = result['actual_place_pos']
     else:
         result['place_pos'] = place_pos
-    return json.dumps(result, ensure_ascii=False)
-
-
-@mcp.tool()
-def stack_boxes(box_indices: list, base_x: float, base_y: float, base_z: float,
-                 target_label: str = 'box', box_height_m: float = DEFAULT_BOX_HEIGHT_M,
-                 grasp_dir: str = 'auto', allow_reorder: bool = False) -> str:
-    """스캔해둔 여러 박스를 지정한 좌표 위에 순서대로(맨 아래→맨 위) 쌓는다.
-    pick_object와 place_object를 박스 개수만큼 번갈아 호출하는 대신, 서버가
-    내부에서 pick→place를 tier마다 반복 처리한다 (MCP round-trip 1회로
-    N개 박스를 다 쌓음 -- 기존 방식은 2N회 필요했음). 완료까지 블로킹
-    (박스 개수 * 1~2분 소요될 수 있음, allow_reorder=True면 대체 시도
-    만큼 더 오래 걸릴 수 있음).
-
-    반드시 scan_for_boxes를 먼저 호출해서 쌓을 박스들의 위치를 찾아둔 뒤
-    사용하라.
-
-    Args:
-        box_indices: get_scanned_boxes()/이전 pick_object 응답의
-            remaining_scanned_boxes에서 몇 번째 항목(0부터, target_label
-            매칭 기준으로 다시 매겨진 인덱스)을 쌓을지 순서대로 나열한다.
-            예: [2, 0, 1]이면 2번 박스를 base_z에(맨 아래), 0번 박스를
-            base_z+box_height_m에, 1번 박스를 base_z+2*box_height_m에
-            (맨 위) 쌓는다. base_x/y/z 위치에 이미 놓여있는 박스(바닥
-            박스, 새로 집지 않을 것)는 여기 포함하지 마라.
-        base_x, base_y, base_z: 맨 아래 박스가 놓일 좌표 (base_link 기준,
-            미터). place_object와 동일한 좌표 규칙 (박스 중심 z 기준).
-        target_label: 쌓을 물체 라벨 (기본값 'box')
-        box_height_m: 층당 높이 증분. 기본값은 고정 박스높이 0.05m
-            (CLAUDE.md 확정값, 재스캔으로 재확인하지 말 것).
-        grasp_dir: 각 박스를 집고 놓을 자세. 기본 'auto'.
-        allow_reorder: True면 어떤 tier에서 지정한 박스의 pick이
-            실패/거부됐을 때, 같은 target_label의 스캔된 다른 박스(여기
-            box_indices에 없는 것들)로 자동 대체를 시도한다 (place
-            단계는 대체하지 않음 -- place 자체가 물리적으로 실패/거부되면
-            allow_reorder 값과 무관하게 즉시 중단한다. placement_verified
-            =False는 [2026-08-17 변경] 더 이상 중단 사유가 아니다 --
-            아래 ⚠ 참고). 기본값 False -- box_indices로 순서를
-            명시적으로 지정했을 수 있으므로, 조용히 다른 박스로 바뀌는
-            동작은 opt-in이다.
-
-    ⚠ 중간 tier에서 pick/place 자체가 실패하면(물리적으로 이동/파지
-    불가) 그 시점에서 멈추고 status="partial"로 그때까지의 결과만
-    반환한다. tiers 배열의 마지막 항목을 보고 어디서 멈췄는지 판단하라
-    -- 실패한 tier의 박스는 이미 집었을 수도(place 단계 실패) 아예 못
-    집었을 수도(pick 단계 실패) 있으니, list_detected_objects로 실제
-    상태를 확인 후 필요하면 개별 pick_object/place_object로 이어서
-    처리하라.
-    allow_reorder=True일 때는 status="partial"/pick 실패가 곧바로 전체
-    중단을 의미하지 않을 수 있으니, 먼저 tiers[].substituted(대체된
-    박스로 성공했는지)와 skipped_candidates(시도했다가 제외된 후보들)를
-    확인하라 -- 실제로는 다른 박스로 대체돼 그 tier가 성공했을 수 있다.
-
-    ⚠ [2026-08-17 변경] placement_verified=False는 더 이상 중단시키지
-    않는다 -- 물리적으로 place가 끝났으면(카메라 재확인 결과와 무관하게)
-    다음 tier로 계속 진행한다. 즉 status="success"로 끝나도 중간 tier가
-    불안정하게 놓였을 수 있다 -- **반드시 tiers[].placement_verified를
-    각 tier마다 확인하라.** false가 하나라도 있으면 그 위에 쌓인 박스들은
-    불안정한 기반 위에 있을 수 있으니 list_detected_objects로 실제
-    상태를 재확인하는 것을 권장한다.
-
-    Returns:
-        {"status": "success"|"partial"|"rejected"|"timeout",
-         "tiers": [{"tier":0,"stage":"place","status":"success",
-                     "box_used":{"x":..,"y":..,"z":..,...},
-                     "substituted":false,
-                     "place_pos":{"x":..,"y":..,"z":..},
-                     "placement_verified":true|false|null,
-                     "verification_reason":"..."}, ...],
-         "skipped_candidates": [{"tier":0,"box":{...},"reason":"...",
-                                   "prefiltered":false}, ...],
-         "backtrack_attempts_used": 0,
-         "remaining_scanned_boxes": [...]}
-        allow_reorder=False(기본값)면 skipped_candidates는 항상 존재하고
-        (실패한 tier가 있으면 그 항목만 담김), box_used/substituted 필드가
-        추가되는 것 외엔 기존 응답과 동일하다.
-    """
-    _ensure_ros()
-    target_label = target_label.strip().lower()
-    if not box_indices:
-        return json.dumps({'status': 'rejected', 'reason': 'box_indices가 비어있습니다.'},
-                          ensure_ascii=False)
-    payload = {
-        'action': 'stack',
-        'target_label': target_label,
-        'box_indices': list(box_indices),
-        'base_pos': {'x': base_x, 'y': base_y, 'z': base_z},
-        'box_height_m': box_height_m,
-        'allow_reorder': allow_reorder,
-    }
-    if grasp_dir and grasp_dir != 'auto':
-        payload['grasp_dir'] = grasp_dir
-    _ros_node.publish_command(payload)
-    # [2026-08 수정] allow_reorder=True면 서버가 pick 실패 시 fallback
-    # 후보로 최대 DEFAULT_MAX_BACKTRACK_ATTEMPTS번 더 시도할 수 있어
-    # 그만큼 시간이 더 걸린다. 이걸 타임아웃 계산에 반영하지 않으면,
-    # 서버는 백트래킹으로 실제 완료했는데 MCP 클라이언트 쪽이 먼저
-    # 타임아웃나서 거짓 "timeout"을 반환하는 문제가 생긴다.
-    timeout = TIMEOUT_STACK_PER_BOX * (
-        max(1, len(box_indices))
-        + (DEFAULT_MAX_BACKTRACK_ATTEMPTS if allow_reorder else 0)
-    )
-    result = _ros_node.wait_for_result(timeout=timeout)
     return json.dumps(result, ensure_ascii=False)
 
 

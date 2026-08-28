@@ -1,7 +1,7 @@
 # MCP 로봇 서버 & Pick/Place 오케스트레이션
 
 대상 파일: `sj_pickplace/mcp_robot_server.py`, `sj_pickplace/planning_node.py`,
-`sj_pickplace/placement_verification.py`, `sj_pickplace/task_planner.py`
+`sj_pickplace/placement_verification.py`
 ([[repo_layout]] 참고 — 전부 `ros2_ws/src/nero_sj_pickplace`에만 존재)
 
 ## 요약
@@ -33,7 +33,6 @@ LLM 에이전트가 호출하는 MCP 툴(`pick_object`, `place_object`,
 | `get_scanned_boxes()` | 마지막 스캔 캐시 즉시 반환 |
 | `pick_object(target_label, grasp_dir, from_scan, box_index)` | timeout 75s. `remaining_scanned_boxes` 반환 |
 | `place_object(x,y,z, grasp_dir)` | timeout 60s. `place_pos`/`requested_place_pos`/`placement_verified`/`verification_reason` 반환 |
-| `stack_boxes(box_indices, base_x/y/z, ..., allow_reorder=False)` | 서버측에서 pick→place 루프를 한 번의 MCP 호출로 수행. 기본(`allow_reorder=False`)은 실패/verified=False 시 조기 중단("partial"). `allow_reorder=True`면 pick 실패 시 다른 스캔된 박스로 대체를 시도(최대 2회, `task_planner.py`) — 자세한 내용은 아래 "stack_boxes 백트래킹" 참고 |
 | `move_to_position` / `move_joints` / `move_joints_relative` / `go_home` / `get_system_status` | 기본 모션/상태 툴 |
 
 `box_index`, `place_pos` 자동보정, `placement_verified`/`go_home` 직후
@@ -43,10 +42,9 @@ LLM 에이전트가 호출하는 MCP 툴(`pick_object`, `place_object`,
 
 ## 주요 상수
 - `mcp_robot_server.py`: `TIMEOUT_PICK=75s`, `TIMEOUT_PLACE=60s`,
-  `TIMEOUT_MOVE=11s`, `TIMEOUT_HOME=16s`, `TIMEOUT_SCAN=60s`,
-  `TIMEOUT_STACK_PER_BOX=90s` — 2026-07에 실제 타임아웃으로 인한
-  거짓-실패/재시도 루프가 있어서 상향 조정됨. `DEFAULT_BOX_HEIGHT_M=0.05`
-  (CLAUDE.md 확정값과 동일 소스).
+  `TIMEOUT_MOVE=11s`, `TIMEOUT_HOME=16s`, `TIMEOUT_SCAN=60s` — 2026-07에
+  실제 타임아웃으로 인한 거짓-실패/재시도 루프가 있어서 상향 조정됨.
+  `DEFAULT_BOX_HEIGHT_M=0.05` (CLAUDE.md 확정값과 동일 소스).
 - `planning_node.py`: `APPROACH_Z=0.10`, `LIFT_Z=0.10`,
   `PLACE_DROP_Z=0.01`, `DESCEND_MIN_FINGERTIP_Z=0.03`,
   `MIN_REACH_R_M=0.20`(도달범위 안쪽 데드존), `BOUNDARY_R_M=0.30`,
@@ -58,12 +56,6 @@ LLM 에이전트가 호출하는 MCP 툴(`pick_object`, `place_object`,
 - `placement_verification.py`: `DEFAULT_XY_TOL_M=0.035`,
   `DEFAULT_Z_TOL_M=0.04`(z 노이즈 최대 26mm 관측 때문에 느슨하게 설정
   — CLAUDE.md의 "z 오차 관대하게 판정" 규칙의 근거), `MAX_STALE_SEC=2.0`.
-- `task_planner.py`: `DEFAULT_MAX_BACKTRACK_ATTEMPTS=2` — `stack_boxes`
-  호출 전체에서 공유되는 예산(tier별이 아님). `TIMEOUT_STACK_PER_BOX`가
-  박스당 이미 빠듯해서 예산을 낮게 잡음; `mcp_robot_server.py`가 이
-  상수를 직접 import해서 `allow_reorder=True`일 때 타임아웃 계산에
-  반영한다 (두 곳에 값을 따로 하드코딩하면 나중에 어긋날 위험이 있어
-  단일 소스로 유지).
 
 ## 코드 레벨 비하인드 (재발 방지 이력)
 - **pipeline_id/planner_id 리셋 누락 버그**: 직전 이동이 Pilz(PTP/LIN)
@@ -122,43 +114,15 @@ LLM 에이전트가 호출하는 MCP 툴(`pick_object`, `place_object`,
   교체. `colcon build` 후 재현 테스트(관절 1개만 지정 → 나머지 유지
   확인)로 검증.
 
-## stack_boxes 백트래킹 (task_planner.py, 2026-08 추가)
-기존 `_stack_sequence`는 어느 tier든 pick/place가 실패/거부되거나
-`placement_verified is False`면 무조건 전체 스택을 중단했다(비효율적
-이라는 문제의식). `task_planner.run_stack_plan`이 이 로직을 대체하되,
-**pick 실패와 place 실패를 비대칭으로 취급**한다:
-
-- **pick 실패는 후보(어떤 박스)에 좌우되는 문제** — 그래서
-  `allow_reorder=True`일 때만, 요청한 박스의 pick이 실패/거부되면
-  같은 라벨의 다른 스캔된 박스(`fallback_pool`)로 대체를 시도한다.
-  후보 랭킹은 (1) top-down 우선(side보다), (2) 도달범위 밴드
-  (`BOUNDARY_R_M` 밖 편안 > 경계 링 > `MIN_REACH_R_M` 안 데드존),
-  (3) confidence 순. side 그립 후보는 `side_reachability_check`로
-  먼저 걸러서(무료, 예산 소모 없음) 확정 실패가 뻔한 시도를 안 함.
-  대체는 전체 스택 호출에 공유되는 `DEFAULT_MAX_BACKTRACK_ATTEMPTS=2`
-  예산 안에서만 허용 — 무한 재시도로 `TIMEOUT_STACK_PER_BOX` 예산을
-  잡아먹지 않기 위함.
-- **place 실패는 tier의 목표 좌표(`base_pos + tier*box_height_m`)
-  문제라 어떤 박스를 들고 있어도 해결 안 됨** — 그래서 place 단계에는
-  후보 교체 로직이 아예 없고, `SequenceRejected`/`Exception`(place
-  자체가 물리적으로 실패)은 `allow_reorder` 값과 무관하게 지금까지와
-  동일하게 무조건 중단한다. **이 비대칭이 설계의 핵심이며, place
-  실패에도 후보 교체를 "완성"하려는 시도는 하지 말 것** —
-  `task_planner.py` 코드 주석에도 명시돼 있음.
-- **[2026-08-17 변경] `placement_verified is False`는 더 이상 중단
-  사유가 아니다.** 원래는 "카메라로 재확인했더니 목표에 없음/비스듬함"
-  이면 불안정한 위에 계속 쌓지 않도록 여기서도 무조건 중단했는데,
-  사용자 판단으로 이 안전장치를 제거함 — 이제 `tiers[]`에 기록만 하고
-  다음 tier로 계속 진행한다(`planning_node.py`가 경고 로그만 남김).
-  **불안정한 스택 위에 계속 쌓일 위험이 실제로 있으므로, 호출부는
-  `tiers[].placement_verified`를 반드시 확인해야 한다** — CLAUDE.md의
-  placement_verified 규칙(개별 place_object 호출에 대한 에이전트
-  행동 지침)은 이 변경과 별개로 여전히 유효.
-- 요청한 박스가 대체됐으면 응답 `tiers[].box_used`/`substituted`,
-  `skipped_candidates`로 확인 가능 — CLAUDE.md의 box_index 규칙에
-  이 캐비엇이 추가돼 있음.
-- 기본값은 `allow_reorder=False`로, 기존 호출자와 완전히 동일한 동작을
-  보장한다(하위호환) — `fallback_pool`이 있어도 완전히 무시됨.
+## stack_boxes 제거됨 (2026-08-28)
+`stack_boxes` MCP 툴과 그 지원 코드(`planning_node._stack_sequence`,
+`on_command`의 `action == 'stack'` 분기, `task_planner.py` 전체 —
+pick 백트래킹/후보 랭킹/`DEFAULT_MAX_BACKTRACK_ATTEMPTS` 등)를 삭제했다
+(사용자 요청). 여러 박스를 쌓는 작업은 이제 `pick_object`/`place_object`를
+`box_index`를 명시해 반복 호출하는 방식으로만 지원한다 — CLAUDE.md의
+"여러 박스를 다루는 작업" 절 참고. `task_planner.py`의 백트래킹
+알고리즘(도달범위 밴드/confidence 랭킹 등) 설계 자체를 참고하고 싶다면
+git 히스토리(이 커밋 이전)에서 찾을 것.
 
 ## placement_verification 상세
 `verify_placement`는 place 전 스냅샷(`before_objects`)에서 기존 물체와

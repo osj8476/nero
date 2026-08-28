@@ -80,17 +80,6 @@ grasp_dir이 `side`/`pinch`면, `infer_grasp` 응답의 `suggested_side_approach
 확인됐다(2026-07-22). 매 `pick_object` 응답의 `remaining_scanned_boxes`
 에서 원하는 항목의 인덱스를 확인하고 다음 호출에 그대로 넘겨라.
 
-**`stack_boxes`의 `allow_reorder=True` 사용 시 예외 (2026-08 추가):**
-이 플래그를 켜면 요청한 `box_indices`의 특정 tier에서 pick이
-실패/거부됐을 때 서버가 스캔된 다른 동일 라벨 박스로 자동 대체를
-시도할 수 있다 — 즉 **실제로 쌓인 박스가 요청한 인덱스의 박스와 다를
-수 있다.** `allow_reorder=True`로 호출한 뒤에는 요청값이 아니라 응답의
-`tiers[].box_used`/`substituted`/`skipped_candidates`를 반드시 확인해서
-실제로 어떤 박스가 쓰였는지 판단하라. 기본값은 `False`(기존 동작과
-동일, 대체 없음)이니 이 캐비엇은 명시적으로 `allow_reorder=True`를
-넘겼을 때만 해당한다. 설계 배경은 `docs/wiki/mcp_pickplace_architecture.md`
-참고.
-
 ## place_object 좌표 자동 보정
 `place_object`가 성공했을 때 응답의 `place_pos`가 요청한 좌표와 다를
 수 있다 (서버가 도달불가 지점을 감지해 자동으로 ±0.05m 시프트하거나
