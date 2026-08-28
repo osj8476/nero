@@ -34,6 +34,9 @@ perception_node.py와 100% 동일하게 유지했다 (planning_node 변경 불�
   DEDUP_XY_THRESH_M   : 3D dedup 시 x,y 임계값(미터) (기본: 0.03)
   DEDUP_Z_THRESH_M    : 3D dedup 시 z(depth) 임계값(미터) — 이보다 z가 가까우면 같은
                         박스로 보고 병합, 이보다 멀면 쌓인 별개 박스로 보고 유지 (기본: 0.03)
+  FACE_NORMAL_GRID_STEP/MIN_POINTS/MAX_POINTS/PLANARITY_MIN/VERTICALITY_MIN :
+                        [2026-08 추가, 프로토타입] face_normal_yaw_deg 계산 파라미터.
+                        perception_node.py 모듈 상단 주석 참고.
 """
 
 import os
@@ -116,6 +119,7 @@ CAMERA_INFO_TOPIC  = os.environ.get("CAMERA_INFO_TOPIC", "/camera/camera_info")
 # 값은 그대로 이 파일에서 관리하고, 호출 시 인자로 넘긴다.
 from sj_pickplace.perception_node import (   # noqa: E402
     _compute_box_angle_base, _transform_with_fallback, _dedup_3d,
+    _compute_face_normal_yaw,
 )
 
 
@@ -316,6 +320,12 @@ class PerceptionNodeSim(Node):
                     color, d, self.tf_buffer,
                     CAMERA_OPTICAL_FRAME, BASE_FRAME, TF_TIMEOUT_SEC, depth=depth,
                     stamp=_stamp, logger=self.get_logger())
+                # [2026-08 추가, 프로토타입 -- 실기 미검증] perception_node.py와
+                # 동일 패턴 재사용 (별개 필드로만 추가, 기존 소비 경로 무영향).
+                face_yaw_deg, face_conf, _face_n = _compute_face_normal_yaw(
+                    d, depth, self.tf_buffer,
+                    CAMERA_OPTICAL_FRAME, BASE_FRAME, TF_TIMEOUT_SEC,
+                    stamp=_stamp, logger=self.get_logger())
                 if refined_center_px is not None:
                     _rx, _ry = refined_center_px
                     if 0 <= _rx < w and 0 <= _ry < h:
@@ -356,6 +366,8 @@ class PerceptionNodeSim(Node):
                     "depth_m": round(float(depth_m), 3) if depth_m else None,
                     "confidence": round(float(d.get("confidence", 0.0)), 3),
                     "angle_base_deg": angle_deg,
+                    "face_normal_yaw_deg": face_yaw_deg,
+                    "face_normal_confidence": face_conf,
                 })
 
             # ── 3D 위치 기준 최종 dedup ──────────────────────────────────

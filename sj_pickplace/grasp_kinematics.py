@@ -378,6 +378,48 @@ def side_face_candidates_deg(position_yaw_deg: float, angle_base_deg,
     return candidates
 
 
+def side_face_candidates_from_normal_deg(position_yaw_deg: float, normal_azimuth_deg,
+                                          requested_offset_deg: float = 0.0) -> list:
+    """[2026-08 추가, 프로토타입 -- planning_node.py에 아직 연결 안 됨]
+    perception_node._compute_face_normal_yaw가 준 평면적합 기반 각도로
+    side/pinch 접근각 후보를 만든다.
+
+    side_face_candidates_deg(위)와의 차이: 그쪽은 _compute_box_angle_base의
+    mod-90(물체의 "어느 변인지" 모호함 + 평면의 앞/뒤 모호함, 둘 다 있음)
+    각도를 받아 4후보(0/90/180/270)를 만든다. 이 함수가 받는
+    normal_azimuth_deg는 이미 특정 평면(면)의 normal이므로 "어느 변인지"
+    모호함이 없다 -- 남은 건 평면의 앞/뒤 부호 모호함(mod-180)뿐이라
+    **2후보(0/180)만으로 충분하다**. 4후보를 그대로 재사용하면 실제로
+    존재하지 않는 방향(물체의 다른 변)까지 후보에 섞여 들어가 오히려
+    정밀도가 떨어진다 -- 그래서 side_face_candidates_deg와 별개 함수로
+    분리했다.
+
+    normal_azimuth_deg가 None이면(평면성/수직성 신뢰도 부족 -- perception
+    쪽 게이트에서 이미 걸러진 경우) 빈 리스트 반환 -- 호출부는
+    side_face_candidates_deg(각도를 안다면) 또는 기존 블라인드 스윕으로
+    폴백해야 한다는 신호.
+
+    Args:
+        position_yaw_deg: atan2(y,x) (도) -- 베이스에서 물체를 바라보는 방위각.
+        normal_azimuth_deg: perception이 준 평면 normal의 mod-180 각도(도,
+            base_link 절대각) 또는 None.
+        requested_offset_deg: 후보 정렬 우선순위로만 쓰임.
+
+    Returns:
+        offset_deg 후보 리스트(최대 2개, position_yaw 기준 상대각, 요청값에
+        가까운 순 정렬). normal_azimuth_deg가 None이면 빈 리스트.
+    """
+    if normal_azimuth_deg is None:
+        return []
+    world_candidates = [normal_azimuth_deg % 360.0, (normal_azimuth_deg + 180.0) % 360.0]
+    candidates = []
+    for world_deg in world_candidates:
+        offset = (world_deg - position_yaw_deg + 180.0) % 360.0 - 180.0
+        candidates.append(offset)
+    candidates.sort(key=lambda o: abs(((o - requested_offset_deg + 180.0) % 360.0) - 180.0))
+    return candidates
+
+
 def auto_grasp_quat(pos: dict, label: str, use_moveit2: bool = False) -> list:
     """라벨 힌트 -> 없으면 위치 기반 휴리스틱(y가 x보다 훨씬 크면 side)으로
     top-down 또는 side 쿼터니언을 결정한다."""

@@ -113,6 +113,26 @@ BASE_FRAME = os.environ.get("BASE_FRAME", "base_link")
 CAMERA_OPTICAL_FRAME = os.environ.get("CAMERA_OPTICAL_FRAME", "camera_color_optical_frame")
 TF_TIMEOUT_SEC = float(os.environ.get("TF_TIMEOUT_SEC", "0.2"))
 
+# [2026-08 추가, 프로토타입 -- 실기 미검증] 평면적합(point cloud plane fit)
+# 기반 face normal yaw 계산용 파라미터. _compute_box_angle_base(2D Hough
+# edge 각도)와 다른 신호 -- depth로 3D 평면을 직접 맞춰서 그 평면이 실제로
+# 향하는 방향(normal)을 구한다. side/pinch 그립처럼 물체의 "옆면"을 볼 때만
+# 의미 있는 신호이고(카메라가 top-down으로 물체 윗면을 볼 때는 normal이
+# 거의 수직이라 방위각 정보가 없음 -- 아래 verticality 게이트가 이 경우를
+# 걸러낸다), 아직 planning_node.py 소비 경로에는 연결하지 않았다(설계
+# 배경은 docs/wiki 참고 예정).
+FACE_NORMAL_GRID_STEP      = int(os.environ.get("FACE_NORMAL_GRID_STEP", "8"))
+FACE_NORMAL_MIN_POINTS     = int(os.environ.get("FACE_NORMAL_MIN_POINTS", "25"))
+FACE_NORMAL_MAX_POINTS     = int(os.environ.get("FACE_NORMAL_MAX_POINTS", "400"))
+# planarity: 점군이 평면 하나에 얼마나 잘 맞는지(1=완벽한 평면, 0=평면
+# 아님). surface-variation(최소고유값/전체합) 기반 -- 포인트클라우드
+# 처리에서 흔히 쓰는 "flatness/curvature" 지표.
+FACE_NORMAL_PLANARITY_MIN    = float(os.environ.get("FACE_NORMAL_PLANARITY_MIN", "0.7"))
+# verticality: normal의 수평성분 크기(단위벡터라 0~1, 완전 수직면=1,
+# 완전 수평면=0). 수평면(물체 윗면)을 보고 있으면 방위각이 노이즈에
+# 불과하므로 이 임계값 밑이면 아예 값을 안 낸다.
+FACE_NORMAL_VERTICALITY_MIN  = float(os.environ.get("FACE_NORMAL_VERTICALITY_MIN", "0.5"))
+
 
 def _transform_with_fallback(tf_buffer, msg, target_frame: str, timeout_sec: float,
                               logger=None):
@@ -364,6 +384,123 @@ def _compute_box_angle_base(color: np.ndarray, d: dict,
         return round(base_angle_deg, 1), refined_center_px
     except Exception:
         return None, refined_center_px
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# [2026-08 추가, 프로토타입 -- 실기 미검증] 평면적합 기반 face normal yaw
+# ═══════════════════════════════════════════════════════════════════════
+# 배경: _compute_box_angle_base는 2D 이미지의 Hough edge 각도만 본다 --
+# 카메라가 물체 "윗면"을 top-down에 가깝게 볼 때는 이게 실제 회전과 잘
+# 맞지만, 원근왜곡에 취약하다(perception_calibration.md의 "사선각도
+# Y축 25~35mm 계통오차"와 동일 계열 문제). 이 함수들은 depth를 직접 써서
+# 물체 "표면이 실제로 향하는 3D 방향"(평면 normal)을 구한다 -- 단,
+# 이 신호는 카메라가 그 면을 옆에서(수직에 가깝게) 보고 있을 때만
+# 의미가 있다. 물체 윗면(수평면)을 보고 있으면 normal이 거의 수직이라
+# 방위각 성분이 노이즈에 불과하므로, verticality 게이트로 이 경우를
+# 걸러내고 None을 반환한다(호출부는 기존 angle_base_deg로 폴백해야 함).
+#
+# _compute_box_angle_base의 mod-90(변 대칭) 각도와 달리, 이 함수는
+# mod-180(평면의 앞/뒤 부호만 모호, "어느 변인지"의 모호함은 없음)
+# 각도를 반환한다 -- grasp_kinematics.side_face_candidates_from_normal_deg
+# 가 이 mod-180 성질을 전제로 2후보(mod-90의 절반)만 생성한다.
+
+
+def _fit_plane_normal(points):
+    """3D 점들(N,3 array-like)에 평면을 맞춰 (normal_unit_vector, planarity)
+    반환. ROS 의존성 없는 순수 함수 -- 단위테스트 가능.
+
+    planarity(0~1, 1=완벽한 평면)는 surface variation(최소 고유값 / 전체
+    고유값 합) 기반 -- 점군 표면이 평평할수록 최소 고유값(평면에 수직인
+    방향의 분산)이 다른 두 고유값(평면 내 분산)보다 훨씬 작아진다.
+    점이 3개 미만이거나 SVD가 실패하면 (None, 0.0).
+    """
+    pts = np.asarray(points, dtype=np.float64)
+    if pts.shape[0] < 3:
+        return None, 0.0
+    centroid = pts.mean(axis=0)
+    centered = pts - centroid
+    try:
+        _, s, vt = np.linalg.svd(centered, full_matrices=False)
+    except np.linalg.LinAlgError:
+        return None, 0.0
+    eigvals = (s ** 2) / max(1, len(pts))  # 내림차순 (SVD 관례)
+    l_min = eigvals[-1]
+    total = float(eigvals.sum())
+    if total <= 1e-12:
+        return None, 0.0
+    surface_variation = l_min / total
+    planarity = max(0.0, 1.0 - 3.0 * surface_variation)
+    normal = vt[-1]  # 최소 고유값에 대응하는 축 = 평면 normal
+    # 부호를 카메라(원점) 쪽으로 통일 -- 완전한 "바깥쪽" 해석은 아니고
+    # (그런 의미는 애초에 단일 시점 depth만으로는 확정 불가), 최소한
+    # 재현 가능하게 한쪽으로 고정해서 mod-180 후보 생성이 일관되게 한다.
+    if np.dot(normal, centroid) > 0:
+        normal = -normal
+    return normal, planarity
+
+
+def _compute_face_normal_yaw(d: dict, depth: Optional[np.ndarray],
+                              tf_buffer, cam_frame: str, base_frame: str,
+                              timeout_sec: float = 0.2, stamp=None, logger=None):
+    """bbox ROI의 depth를 점군으로 역투영해 평면을 맞추고, 그 평면 normal의
+    수평(azimuth) 성분을 base_link 절대각(도, mod 180)으로 반환한다.
+
+    Returns:
+        (yaw_deg, confidence, n_points) 튜플.
+        yaw_deg: base_link 기준 mod-180 각도. 신뢰 불가(점 부족/평면 아님/
+            수평면이라 방위각 무의미)면 None.
+        confidence: planarity * verticality (0~1). yaw_deg가 None이어도
+            디버깅/로그용으로 반환(왜 걸러졌는지 참고).
+        n_points: 실제 역투영에 쓰인 유효 점 개수.
+    """
+    if depth is None:
+        return None, 0.0, 0
+    _stamp = stamp if stamp is not None else rclpy.time.Time().to_msg()
+
+    H, W = depth.shape[:2]
+    x1 = max(0, int(d["x_min"] * W)); y1 = max(0, int(d["y_min"] * H))
+    x2 = min(W, int(d["x_max"] * W)); y2 = min(H, int(d["y_max"] * H))
+    if x2 - x1 < FACE_NORMAL_GRID_STEP or y2 - y1 < FACE_NORMAL_GRID_STEP:
+        return None, 0.0, 0
+
+    points_cam = []
+    for py in range(y1, y2, FACE_NORMAL_GRID_STEP):
+        for px in range(x1, x2, FACE_NORMAL_GRID_STEP):
+            depth_m = float(depth[py, px])
+            pt = pixel_to_camera_xyz(float(px), float(py), depth_m)
+            if pt is not None:
+                points_cam.append((pt['x'], pt['y'], pt['z']))
+            if len(points_cam) >= FACE_NORMAL_MAX_POINTS:
+                break
+        if len(points_cam) >= FACE_NORMAL_MAX_POINTS:
+            break
+
+    if len(points_cam) < FACE_NORMAL_MIN_POINTS:
+        return None, 0.0, len(points_cam)
+
+    normal_cam, planarity = _fit_plane_normal(points_cam)
+    if normal_cam is None or planarity < FACE_NORMAL_PLANARITY_MIN:
+        return None, round(planarity, 3), len(points_cam)
+
+    # 카메라 좌표계 normal → base_link로 "회전만" 변환 (평행이동 없음).
+    # _compute_box_angle_base가 이미 쓰는 Vector3Stamped 패턴과 동일.
+    try:
+        v = Vector3Stamped()
+        v.header.frame_id = cam_frame
+        v.header.stamp = _stamp
+        v.vector.x, v.vector.y, v.vector.z = [float(c) for c in normal_cam]
+        v_base = _transform_with_fallback(tf_buffer, v, base_frame, timeout_sec, logger=logger)
+        nx, ny, nz = v_base.vector.x, v_base.vector.y, v_base.vector.z
+    except Exception:
+        return None, round(planarity, 3), len(points_cam)
+
+    verticality = math.hypot(nx, ny)  # 단위벡터이므로 수평성분 크기 = sin(면 기울기각)
+    confidence = round(planarity * verticality, 3)
+    if verticality < FACE_NORMAL_VERTICALITY_MIN:
+        return None, confidence, len(points_cam)
+
+    yaw_deg = math.degrees(math.atan2(ny, nx)) % 180.0
+    return round(yaw_deg, 1), confidence, len(points_cam)
 
 
 def filter_detections(dets):
@@ -628,6 +765,14 @@ class PerceptionNode(Node):
                 color, d, self.tf_buffer,
                 CAMERA_OPTICAL_FRAME, BASE_FRAME, TF_TIMEOUT_SEC, depth=depth,
                 stamp=_stamp, logger=self.get_logger())
+            # [2026-08 추가, 프로토타입 -- 실기 미검증] depth 평면적합 기반
+            # face normal yaw. angle_base_deg(2D Hough, mod-90)와 별개 필드로
+            # 추가만 하고 기존 필드/소비 경로는 그대로 둔다 -- planning_node.py는
+            # 아직 이 필드를 읽지 않으므로 기존 pick 동작에 영향 없음.
+            face_yaw_deg, face_conf, _face_n = _compute_face_normal_yaw(
+                d, depth, self.tf_buffer,
+                CAMERA_OPTICAL_FRAME, BASE_FRAME, TF_TIMEOUT_SEC,
+                stamp=_stamp, logger=self.get_logger())
             if refined_center_px is not None:
                 rx, ry = refined_center_px
                 if 0 <= rx < cw and 0 <= ry < ch:
@@ -676,6 +821,11 @@ class PerceptionNode(Node):
                 "depth_m": round(float(depth_m), 3) if depth_m else None,
                 "confidence": round(float(d.get("confidence", 0.0)), 3),
                 "angle_base_deg": angle_deg,
+                # [2026-08 추가, 프로토타입] mod-180 각도(각도가 없으면 None).
+                # face_normal_confidence는 yaw가 None이어도 참고용으로 채워짐
+                # (예: 0.3이면 "평면성/수직성이 낮아서 걸렀다"는 뜻).
+                "face_normal_yaw_deg": face_yaw_deg,
+                "face_normal_confidence": face_conf,
             })
 
         # ── 3D 위치 기준 최종 dedup ──────────────────────────────────
