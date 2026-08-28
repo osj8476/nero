@@ -15,6 +15,7 @@ mcp_robot_server.py  (경로 패치)
 
 import os
 import json
+import math
 import time
 import threading
 import logging
@@ -33,12 +34,19 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from std_msgs.msg import String
 from sensor_msgs.msg import Image, JointState, CameraInfo
-from geometry_msgs.msg import PointStamped
+from geometry_msgs.msg import PointStamped, Vector3Stamped
 from rclpy.duration import Duration
 import tf2_ros
-import tf2_geometry_msgs  # noqa: F401 — PointStamped 변환 등록용
+import tf2_geometry_msgs  # noqa: F401 — PointStamped/Vector3Stamped 변환 등록용
 
 from mcp.server.fastmcp import FastMCP
+
+# [2026-08 추가, 프로토타입] YOLO가 못 잡은 물체(ground_object/infer_grasp의
+# VLM 폴백 경로)에도 face normal yaw를 적용하기 위해 순수 함수만 재사용.
+# perception_node.py는 별도 프로세스(ROS 노드)지만 같은 sj_pickplace 패키지
+# 안의 순수 함수 import라 문제 없음 (perception_node_sim.py가 이미
+# _compute_box_angle_base/_dedup_3d를 같은 방식으로 재사용 중).
+from .perception_node import _fit_plane_normal
 
 # ── 타임아웃 설정 ──────────────────────────────────────────────────────────────
 TIMEOUT_PICK  = 75.0  # [2026-07 수정] IK 후보비교, 재조회 재시도,
@@ -339,6 +347,83 @@ def _cam_to_base(cam_xyz: dict) -> Optional[dict]:
         }
     except Exception:
         return None
+
+
+# [2026-08 추가, 프로토타입 -- 실기 미검증] YOLO가 못 잡은 물체(VLM
+# grounding으로만 bbox를 얻은 경우)용 평면적합 face normal yaw.
+# perception_node._compute_face_normal_yaw와 같은 수학(_fit_plane_normal
+# 재사용)이지만, 이 파일 자체의 depth/intrinsics/tf 접근자(_px2cam,
+# get_depth, get_cam_intrinsics, tf_buffer)로 다시 감싼 것 -- 프로세스가
+# 달라서(mcp_robot_server는 perception_node의 ROS 노드 인스턴스에 접근
+# 불가) 로직만 재사용하고 배선은 이 파일 자체 것을 쓴다.
+FACE_NORMAL_GRID_STEP     = int(os.environ.get("FACE_NORMAL_GRID_STEP", "8"))
+FACE_NORMAL_MIN_POINTS    = int(os.environ.get("FACE_NORMAL_MIN_POINTS", "25"))
+FACE_NORMAL_MAX_POINTS    = int(os.environ.get("FACE_NORMAL_MAX_POINTS", "400"))
+FACE_NORMAL_PLANARITY_MIN   = float(os.environ.get("FACE_NORMAL_PLANARITY_MIN", "0.7"))
+FACE_NORMAL_VERTICALITY_MIN = float(os.environ.get("FACE_NORMAL_VERTICALITY_MIN", "0.5"))
+
+
+def _compute_face_normal_yaw_from_bbox(bbox_px: list, depth: np.ndarray,
+                                        fx: float, fy: float, cx: float, cy: float) -> tuple:
+    """bbox_px([x1,y1,x2,y2]) 영역의 depth를 점군으로 역투영해 평면을 맞추고,
+    그 평면 normal의 mod-180 방위각을 base_link 기준으로 반환한다.
+
+    perception_node._compute_face_normal_yaw와 동일한 설계(평면성/수직성
+    2단 게이트, verticality 낮으면 -- 즉 카메라가 물체 윗면처럼 수평에
+    가까운 면을 보고 있으면 -- None 반환)이지만, 이 노드가 이미 들고 있는
+    depth/intrinsics(_ros_node.get_depth/get_cam_intrinsics)와 _px2cam으로
+    다시 구현했다. 값이 없으면(신뢰 불가) 무조건 None -- angle_base_deg 같은
+    필드가 YOLO 못 잡은 물체엔 원래 없었으니, 실패 시에도 기존 응답 스키마를
+    깨지 않는다(단순히 필드가 null로 채워짐).
+
+    Returns:
+        (yaw_deg, confidence, n_points) -- perception_node 버전과 동일 계약.
+    """
+    if depth is None or fx is None:
+        return None, 0.0, 0
+
+    h, w = depth.shape[:2]
+    x1 = max(0, int(bbox_px[0])); y1 = max(0, int(bbox_px[1]))
+    x2 = min(w, int(bbox_px[2])); y2 = min(h, int(bbox_px[3]))
+    if x2 - x1 < FACE_NORMAL_GRID_STEP or y2 - y1 < FACE_NORMAL_GRID_STEP:
+        return None, 0.0, 0
+
+    points_cam = []
+    for py in range(y1, y2, FACE_NORMAL_GRID_STEP):
+        for px in range(x1, x2, FACE_NORMAL_GRID_STEP):
+            depth_m = float(depth[py, px])
+            pt = _px2cam(float(px), float(py), depth_m, fx, fy, cx, cy)
+            if pt is not None:
+                points_cam.append((pt['x'], pt['y'], pt['z']))
+            if len(points_cam) >= FACE_NORMAL_MAX_POINTS:
+                break
+        if len(points_cam) >= FACE_NORMAL_MAX_POINTS:
+            break
+
+    if len(points_cam) < FACE_NORMAL_MIN_POINTS:
+        return None, 0.0, len(points_cam)
+
+    normal_cam, planarity = _fit_plane_normal(points_cam)
+    if normal_cam is None or planarity < FACE_NORMAL_PLANARITY_MIN:
+        return None, round(planarity, 3), len(points_cam)
+
+    try:
+        v = Vector3Stamped()
+        v.header.frame_id = "camera_color_optical_frame"
+        v.header.stamp = rclpy.time.Time().to_msg()
+        v.vector.x, v.vector.y, v.vector.z = [float(c) for c in normal_cam]
+        v_base = _ros_node.tf_buffer.transform(v, "base_link", timeout=Duration(seconds=0.3))
+        nx, ny = v_base.vector.x, v_base.vector.y
+    except Exception:
+        return None, round(planarity, 3), len(points_cam)
+
+    verticality = math.hypot(nx, ny)
+    confidence = round(planarity * verticality, 3)
+    if verticality < FACE_NORMAL_VERTICALITY_MIN:
+        return None, confidence, len(points_cam)
+
+    yaw_deg = math.degrees(math.atan2(ny, nx)) % 180.0
+    return round(yaw_deg, 1), confidence, len(points_cam)
 
 
 def _crop_b64(img_bgr: np.ndarray, bbox_norm: list, padding: float = 0.07) -> tuple:
@@ -1502,12 +1587,17 @@ def infer_grasp(target_label: str) -> str:
                "bbox_px": [x1,y1,x2,y2], "image_age_sec": 0.1,
                "grounding_source": "yolo"|"vlm", "grounding_confidence": 0.85|null,
                "approach_direction": "FRONT|LEFT|RIGHT|BACK",
-               "suggested_side_approach_deg": 0.0}
+               "suggested_side_approach_deg": 0.0,
+               "face_normal_yaw_deg": 37.2|null, "face_normal_confidence": 0.81}
                (grasp_type이 SIDE/PINCH면 suggested_side_approach_deg를
                pick_object/slide_object의 side_approach_deg에 그대로 넣어라
                -- 대략적인 시작 각도일 뿐, 틀려도 서버의 접근각 후보 탐색이
                안전망 역할을 한다. 구버전 VLM 서버는 이 필드를 안 주므로
-               항상 FRONT/0.0으로 채워진다.)
+               항상 FRONT/0.0으로 채워진다. face_normal_yaw_deg는 [2026-08
+               추가, 프로토타입] depth 평면적합 기반 -- 카메라가 마침 물체
+               옆면을 보고 있을 때만 값이 나오고(윗면 위주로 보고 있으면
+               null) suggested_side_approach_deg보다 더 정밀할 수 있지만
+               아직 모션 결정에는 연결 안 됨, 참고용으로만 볼 것.)
         실패: {"status": "error", "reason": "..."}
     """
     _ensure_ros()
@@ -1646,6 +1736,17 @@ def infer_grasp(target_label: str) -> str:
         approach_direction = 'FRONT'
     suggested_side_approach_deg = _APPROACH_DEG_MAP[approach_direction]
 
+    # [2026-08 추가, 프로토타입 -- 실기 미검증] SIDE/PINCH일 때 접근각
+    # 추정에 참고할 만한 depth 평면적합 방위각. suggested_side_approach_deg
+    # (VLM의 정성적 FRONT/LEFT/RIGHT/BACK 추측)보다 더 정밀할 수 있지만,
+    # 카메라가 마침 물체 옆면을 보고 있어야만 값이 나온다(윗면 위주로 보고
+    # 있으면 null) -- 항상 나오는 값이 아니므로 suggested_side_approach_deg
+    # 를 대체하지 않고 나란히 노출만 한다.
+    depth_arr, _ = _ros_node.get_depth()
+    fx, fy, cx, cy, _cw, _ch = _ros_node.get_cam_intrinsics()
+    face_yaw_deg, face_conf, _face_n = _compute_face_normal_yaw_from_bbox(
+        bbox_px, depth_arr, fx, fy, cx, cy)
+
     return json.dumps({
         'status':           'success',
         'object':           data.get('object', target_label),
@@ -1665,6 +1766,11 @@ def infer_grasp(target_label: str) -> str:
         # 원본 응답(FRONT/LEFT/RIGHT/BACK), 구버전 VLM 서버면 항상 FRONT/0.0.
         'approach_direction': approach_direction,
         'suggested_side_approach_deg': suggested_side_approach_deg,
+        # [2026-08 추가, 프로토타입] depth 평면적합 기반 mod-180 방위각 --
+        # 신뢰 불가(카메라가 물체 윗면 위주로 보고 있음/평면성 낮음)면 null.
+        # pick_object 등 모션 결정에는 아직 연결 안 됨, 참고용.
+        'face_normal_yaw_deg': face_yaw_deg,
+        'face_normal_confidence': face_conf,
     }, ensure_ascii=False)
 
 
@@ -1838,7 +1944,13 @@ def ground_object(target_label: str, parent_label: str = None) -> str:
           {"label":"silver shelf", "source":"vlm", "grounding":"approximate",
            "center_px":[u,v], "bbox_approx":[x1,y1,x2,y2],
            "camera_point":{x,y,z}, "base_link_point":{x,y,z},
-           "confidence":0.78, "position_confidence":"approximate"}
+           "confidence":0.78, "position_confidence":"approximate",
+           "face_normal_yaw_deg":37.2|null, "face_normal_confidence":0.81}
+          (face_normal_yaw_deg는 [2026-08 추가, 프로토타입] depth 평면적합
+          기반 mod-180 방위각 -- YOLO는 원래 이 필드가 없었으니 VLM경로
+          에서만 시도하는 신규 정보. 카메라가 물체 옆면을 볼 때만 값이
+          나오고, 윗면을 보고 있거나 평면성이 낮으면 null. 아직
+          pick_object 등 모션 결정에는 연결 안 됨 -- 참고용으로만 볼 것.)
         Hierarchical grounding 3D 성공 시:
           {"success":true, "label":"drawer handle", "source":"vlm",
            "grounding":"hierarchical", "center_px":[u,v], "bbox_approx":[x1,y1,x2,y2],
@@ -2023,6 +2135,15 @@ def ground_object(target_label: str, parent_label: str = None) -> str:
     if base_xyz is None:
         return json.dumps({'success': False, 'reason': 'tf_unavailable'})
 
+    # [2026-08 추가, 프로토타입 -- 실기 미검증] YOLO 못 잡은 물체는 원래
+    # angle_base_deg 자체가 없었다 -- 여기서라도 평면적합으로 방위각을
+    # 시도한다. bbox_px가 있어야(면적 있는 영역이어야) 의미 있으므로
+    # center_norm만 온 경우(bbox_px is None)는 스킵.
+    face_yaw_deg, face_conf, _face_n = (
+        _compute_face_normal_yaw_from_bbox(bbox_px, depth_arr, fx, fy, cx, cy)
+        if bbox_px is not None else (None, 0.0, 0)
+    )
+
     return json.dumps({
         'label':              gdata.get('label', target_label),
         'source':             'vlm',
@@ -2036,6 +2157,10 @@ def ground_object(target_label: str, parent_label: str = None) -> str:
         'description':        gdata.get('description', ''),
         'inference_ms':       gdata.get('inference_ms', 0.0),
         'depth_m':            round(depth_m, 3),
+        # [2026-08 추가, 프로토타입] mod-180 각도, 신뢰 불가 시 null.
+        # side_approach_deg 계산의 참고용 -- planning_node.py엔 아직 미연결.
+        'face_normal_yaw_deg': face_yaw_deg,
+        'face_normal_confidence': face_conf,
     }, ensure_ascii=False)
 
 
