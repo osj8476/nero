@@ -2175,7 +2175,7 @@ def find_placement() -> str:
     """
     _ensure_ros()
 
-    PLACEMENT_URL = "http://127.0.0.1:8003/find_placement"
+    PLACEMENT_URL = f"{VLM_SERVER_URL}/find_placement"
     VLM_TIMEOUT = 45.0
 
     img_bgr, img_stamp = _ros_node.get_image()
@@ -2208,7 +2208,7 @@ def find_placement() -> str:
                               timeout=VLM_TIMEOUT)
     except _requests.exceptions.ConnectionError:
         return json.dumps({'status': 'error',
-                           'reason': 'vlm_server_unavailable — http://127.0.0.1:8003 연결 거부'})
+                           'reason': f'vlm_server_unavailable — {VLM_SERVER_URL} 연결 거부'})
     except _requests.exceptions.Timeout:
         return json.dumps({'status': 'error',
                            'reason': f'vlm_timeout — {VLM_TIMEOUT}s 초과'})
