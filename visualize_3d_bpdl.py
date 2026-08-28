@@ -57,6 +57,11 @@ class Visualizer3D(Node):
 
     def _img_cb(self, msg):
         img = np.frombuffer(bytes(msg.data), dtype=np.uint8).reshape((msg.height, msg.width, 3))
+        # [2026-08-26 수정] ROS 이미지가 rgb8인데 변환 없이 그대로 cv2에
+        # 넘겨서(OpenCV는 BGR 기대) R/B 채널이 뒤바뀌어 보이던 버그.
+        # perception_node_sim.py의 동일 변환 로직과 맞춤.
+        if msg.encoding == 'rgb8':
+            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
         with self.lock:
             self.latest_img = img.copy()
 

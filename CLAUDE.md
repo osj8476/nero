@@ -23,6 +23,55 @@ top_down place가 전부 ABORTED난 사고가 있었다. 이 두 상수는 **절
 임시로 재사용 중). side 그립 관련 수치 조정은 이 값이 정식 검증되기
 전까지 보류한다.
 
+## 그립 형태(top/side/pinch)가 애매할 때 — infer_grasp 필수 (2026-08-26 추가)
+`pick_object`를 `grasp_dir='auto'`(기본값)로 부르거나, Claude가 임의로
+top/side/pinch 중 하나를 추측해서 지정하지 마라. approach 실패 후
+에러 메시지나 정황만으로 "이게 top이었나 side였나"를 역추론하는 것도
+신뢰할 수 없다 — 실제로 이 방식으로 오판한 사고가 있었다(cup pick 실패를
+side 문제로 잘못 짚었다가, 실제로는 top-down 시도였던 것으로 드러남,
+2026-08-26). **그립 형태가 명확하지 않은 물체는 pick 전에 반드시
+`infer_grasp(label)`을 먼저 호출해서 VLM이 추론한 그립 형태를 확인하라.**
+LABEL_GRASP_HINT 같은 서버 내부 휴리스틱값을 믿고 넘어가지 말 것 — 그
+휴리스틱이 실제로 어떤 grasp_dir을 골랐는지조차 로그 메시지 버그로
+신뢰 못 하는 경우가 있었다.
+
+**주의 — VLM의 `grasp_type`을 `grasp_dir`에 그대로 문자열 매칭하지 마라
+(2026-08-26 추가, 개념 불일치 발견).** VLM의 PINCH는 "손끝으로 얇은
+단면을 잡는다"는 일반적 분류학 용어이고, 이 프로젝트의 `grasp_dir='pinch'`
+는 특정 실측 각도(`roll=90°,pitch=180°` — 손잡이 같은 **가로로 놓인**
+얇은 물체용으로 검증된 값)를 가리키는, 이름만 같은 별개의 것이다. 병처럼
+**세로로 긴** 물체를 VLM이 PINCH로 분류해도 그 각도 그대로 쓰면 기하학적으로
+안 맞는다. `infer_grasp` 응답의 `grasp_type`과 `orientation`을 같이 보고
+아래 표로 변환한 값을 `pick_object`/`slide_object`의 `grasp_dir`에 넣어라:
+
+| infer_grasp 응답 | 실제로 넘길 grasp_dir |
+|---|---|
+| grasp_type=TOP | `top` |
+| grasp_type=SIDE | `side` |
+| grasp_type=PINCH, orientation=HORIZONTAL (손잡이/바 등 가로로 놓인 물체) | `pinch` |
+| grasp_type=PINCH, orientation=VERTICAL (병 등 세로로 긴 물체) | `side` (세로 원통을 감싸쥐는 덴 side 공식이 기하학적으로 더 맞음) |
+
+**VLM의 grasp_type=TOP을 z높이 확인 없이 그대로 믿지 마라 (2026-08-26 추가,
+사용자 실측 지적).** `infer_grasp`는 크롭 이미지의 2D 형태만 보고 판단한다
+— 그 물체의 실제 z좌표(로봇 팔 기준 "허리 높이" 대역인지)는 크롭 이미지에
+안 담기는 정보라 VLM이 원천적으로 고려할 수 없다. 이 로봇은 z가 대략
+0.3~0.5m대(로봇 허리 높이)인 물체는 top-down 접근이 IK 실패하기 쉽고
+side가 되는 경우가 실측으로 여러 번 확인됐다(2026-08-26, 책 z=0.388에서
+재현). **`grasp_type=TOP`이 나와도, 물체의 z좌표(YOLO center_3d.z 또는
+ground_object의 base_link_point.z)가 이 대역이면 곧이곧대로 top으로
+pick하지 말고 side로 시도하거나, 최소한 top 실패 시 곧바로 side로
+전환하라.** 이 z 대역의 정확한 경계는 아직 체계적으로 측정된 게 아니라
+이번 세션에서 반복 관찰된 경험적 범위다 — 확정값 아님.
+
+**접근각(`side_approach_deg`)도 infer_grasp 응답에서 가져와라 (2026-08-26 추가).**
+grasp_dir이 `side`/`pinch`면, `infer_grasp` 응답의 `suggested_side_approach_deg`
+필드를 그대로 `pick_object`/`slide_object`의 `side_approach_deg`에 넣어라.
+이건 VLM이 이미지에서 본 대략적인 접근 방향(FRONT/LEFT/RIGHT/BACK)을 각도로
+바꾼 추정값일 뿐이지 정밀한 계산값이 아니다 — 틀려도 서버의 접근각 후보
+자동 탐색(±15~90° 스윕)이 안전망 역할을 하니 그냥 그대로 넘기면 된다.
+구버전 VLM 서버(approach_direction 필드 없음)는 항상 0.0(FRONT)으로 채워져서
+기존 동작과 동일하게 유지된다.
+
 ## 여러 박스를 다루는 작업(쌓기 등) — box_index 필수
 `pick_object(from_scan=True)`를 여러 번 연속 호출할 때는 반드시
 `box_index`를 명시하라. 생략하면 "스캔 큐 맨 앞 항목"을 집는데, 이미

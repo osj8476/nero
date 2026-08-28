@@ -100,6 +100,11 @@ QUAT_SIDE_FRONT  = [0.481, -0.527,  0.427,  0.556]
 
 # side 계열 식별용 마커 (쿼터니언 비교 대신 이 태그로 판별)
 SIDE_TAG = 'DYNAMIC'
+# pinch(핀치그립) 식별용 마커. side와 접근 시퀀스(TCP오프셋/standoff/각도
+# 후보탐색/사전회전없음)는 동일하지만 자세 공식(pitch)이 다르므로 별도
+# 태그로 구분 -- SIDE_TAG로 합치면 2026-06-30 TOP/SIDE 통합 사고와
+# 같은 종류의 문제가 재발한다.
+PINCH_TAG = 'DYNAMIC_PINCH'
 
 GRASP_DIR_MAP = {
     'top':         QUAT_TOP_DOWN,
@@ -111,6 +116,13 @@ GRASP_DIR_MAP = {
     'side_front':  SIDE_TAG,
     'side_left':   SIDE_TAG,
     'side_right':  SIDE_TAG,
+    # [2026-08-26 확정] 핀치그립 전용 공식(PINCH_TAG, 아래 pinch_quat_for/
+    # sim_pinch_quat_for). 실측(move_to_position quat_override 비교)으로
+    # roll=90°,pitch=180°,yaw=90°+position_yaw가 채택됨 -- side(pitch=-90)
+    # 와 pitch만 다르고 나머지 접근 시퀀스(TCP오프셋/standoff/각도후보
+    # 탐색/사전회전없음)는 동일하게 취급된다 (planning_node.py의 is_side
+    # 판정을 그대로 재사용).
+    'pinch':       PINCH_TAG,
 }
 
 LABEL_GRASP_HINT = {
@@ -231,22 +243,52 @@ def side_quat_for(pos: dict, approach_offset_deg: float = 0.0) -> list:
 
 def sim_side_quat_for(pos: dict, approach_offset_deg: float = 0.0) -> list:
     """시뮬(MoveIt2) 전용 — 물체 방향으로 수평 접근하는 side 그립 쿼터니언.
-    ZYX euler: roll=+90°, pitch=0°, yaw=position_yaw
 
-    도출 근거:
+    [2026-08-26 재검증, 이전 공식 폐기] roll=+90°,pitch=0°,yaw=position_yaw
+    (아래 옛 도출 근거 참고)는 실측(Isaac Sim 스크린샷, move_to_position
+    quat_override로 여러 후보 비교)해보니 그리퍼가 세워진 채 옆에서 직각
+    으로 파고드는 자세였다 — 사용자가 원한 "그리퍼가 수평으로 평평한 채
+    정면에서 접근"하는 자세가 아니었음. (0.4,0)/(0.3,0.3)/(-0.3,0.3)/
+    (0.3,-0.3)/(0,-0.5)/(0.1,-0.5)/(0.5,0) 등 여러 위치에서 재검증된
+    새 공식:
+      ZYX euler: roll=+90°, pitch=-90°, yaw=90°+position_yaw+offset
+    (x=0 근접 지점(0,-0.3)처럼 특이점 근방에서는 이 공식도 NO_IK_SOLUTION
+    날 수 있음 — 같은 방향이라도 좀 더 먼 지점(0,-0.5)에서는 풀림.)
+
+    [옛 도출 근거 (폐기됨, 기록용)]
       sim top-down(roll=0, pitch=180°, yaw=py+π)의 회전행렬에 Rx(-90°)를
       추가 적용하면 body_X → 물체방향, body_Y → 세계上, body_Z → 수평측면
-      의 수평 그립 자세가 된다. 이 행렬을 ZYX로 역산하면:
-        R[2,0]=0 → pitch=0°
-        R[2,1]=1 → roll=+90°
-        R[0,0]=cosθ₀ → yaw=position_yaw (보정항 없음)
-      결과적으로 실물(roll=-90°)과 roll 부호만 다르다.
-      실물과 시뮬의 side 축 정의 차이가 roll 방향 반전으로 흡수된 것.
+      의 수평 그립 자세가 된다는 추론이었으나, 실측 결과와 맞지 않았다.
     """
     x, y = pos.get('x', 0.0), pos.get('y', 0.0)
     position_yaw = math.atan2(y, x)
-    yaw = position_yaw + math.radians(approach_offset_deg)
-    return euler_to_quat(math.radians(90.0), 0.0, yaw)
+    yaw = math.pi / 2 + position_yaw + math.radians(approach_offset_deg)
+    return euler_to_quat(math.radians(90.0), math.radians(-90.0), yaw)
+
+
+def sim_pinch_quat_for(pos: dict, approach_offset_deg: float = 0.0) -> list:
+    """시뮬(MoveIt2) 전용 — 핀치그립(손끝으로 좁게 집는) 쿼터니언.
+
+    [2026-08-26 확정] move_to_position(quat_override=)로 (roll=90,pitch=0),
+    (roll=90,pitch=180) 두 후보를 실측 비교 -- pitch=180(위에서 접근,
+    top-down과 동일 계열)이 가장 자연스러운 자세로 채택됨. roll=90 twist는
+    side와 동일(손끝/손 방향 유지), yaw도 side와 동일 공식(90°+position_yaw
+    +offset)이라 접근 시퀀스(TCP오프셋/standoff/각도후보탐색)를 side와
+    그대로 공유해도 기하학적으로 일관된다.
+    ZYX euler: roll=+90°, pitch=180°, yaw=90°+position_yaw+offset
+    """
+    x, y = pos.get('x', 0.0), pos.get('y', 0.0)
+    position_yaw = math.atan2(y, x)
+    yaw = math.pi / 2 + position_yaw + math.radians(approach_offset_deg)
+    return euler_to_quat(math.radians(90.0), math.pi, yaw)
+
+
+def pinch_quat_for(pos: dict, approach_offset_deg: float = 0.0) -> list:
+    """실물 전용 — 핀치그립. [2026-08-26 임시, 미검증] 실물에서 별도
+    검증 전까지 side_quat_for와 동일 공식을 재사용한다 (SIDE_TCP_OFFSET이
+    top값을 임시 재사용하는 것과 동일한 패턴 -- CLAUDE.md 참고).
+    """
+    return side_quat_for(pos, approach_offset_deg)
 
 
 def side_reachability_check(pos: dict) -> tuple:
@@ -255,17 +297,22 @@ def side_reachability_check(pos: dict) -> tuple:
     Returns:
         (True, '') 이면 도달 가능. (False, reason) 이면 거부 사유 포함.
     """
+    # [2026-08-26 임시 비활성화, 사용자 요청] IK 도달성 자체를 직접
+    # 확인해보기 위해 SIDE_MIN_DIST 사전 거부를 잠시 꺼둠 -- 실제 IK가
+    # 되는지 안 되는지로 바로 판단하려는 목적. 다시 켜려면 아래 return
+    # (True, '')를 지우고 원래 검사 로직(주석 처리된 부분)을 복원할 것.
     x, y = pos.get('x', 0.0), pos.get('y', 0.0)
     dist = math.sqrt(x * x + y * y)
     effective_dist = dist - SIDE_TCP_OFFSET
-    if effective_dist < SIDE_MIN_DIST:
-        return (False,
-                f'물체가 로봇 베이스로부터 너무 가깝습니다 '
-                f'(물체거리 {dist:.3f}m, TCP오프셋 적용 후 {effective_dist:.3f}m, '
-                f'side 그립 최소 거리 {SIDE_MIN_DIST}m). '
-                f'이 위치는 옆에서 수평으로 잡는 자세로 도달할 수 없는 영역입니다. '
-                f'물체를 더 멀리 옮기거나 top(위에서 잡기) 방식을 사용하세요.')
     return (True, '')
+    # if effective_dist < SIDE_MIN_DIST:
+    #     return (False,
+    #             f'물체가 로봇 베이스로부터 너무 가깝습니다 '
+    #             f'(물체거리 {dist:.3f}m, TCP오프셋 적용 후 {effective_dist:.3f}m, '
+    #             f'side 그립 최소 거리 {SIDE_MIN_DIST}m). '
+    #             f'이 위치는 옆에서 수평으로 잡는 자세로 도달할 수 없는 영역입니다. '
+    #             f'물체를 더 멀리 옮기거나 top(위에서 잡기) 방식을 사용하세요.')
+    # return (True, '')
 
 
 def auto_grasp_quat(pos: dict, label: str, use_moveit2: bool = False) -> list:
@@ -301,10 +348,13 @@ def resolve_grasp_quat(grasp_dir, pos: dict, label: str = '',
         (quat: list[4], is_side: bool)
     """
     _side_fn = sim_side_quat_for if use_moveit2 else side_quat_for
+    _pinch_fn = sim_pinch_quat_for if use_moveit2 else pinch_quat_for
     if grasp_dir and grasp_dir != 'auto':
         quat = GRASP_DIR_MAP.get(grasp_dir, QUAT_HOME)
         if quat == SIDE_TAG:
             return _side_fn(pos, side_approach_offset_deg), True
+        if quat == PINCH_TAG:
+            return _pinch_fn(pos, side_approach_offset_deg), True
         return quat, False
     quat = auto_grasp_quat(pos, label, use_moveit2=use_moveit2)
     is_side = (

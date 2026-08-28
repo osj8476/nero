@@ -1018,15 +1018,25 @@ def scan_for_boxes(target_label: str = 'box') -> str:
     계속 움직이므로, pick 전후로 list_detected_objects를 다시 부르면
     카메라 각도가 달라져 다른(부정확한) 좌표를 받게 될 수 있다.
 
+    [2026-08-26 확장] 이전엔 target_label과 정확히 일치하는 물체만 기억하고
+    스윕 중 스쳐지나간 나머지는 버렸다. 이제 라벨 무관하게 스윕 중 보인
+    물체를 전부(YOLO dual 백엔드가 인식하는 box + COCO 클래스 전체)
+    기억한다 -- 한 번 스캔으로 box든 cup이든 bottle이든 나중에
+    pick_object(from_scan=True, target_label=<원하는 라벨>)로 바로 꺼내
+    쓸 수 있다. target_label 인자는 더 이상 결과를 필터링하지 않는다
+    (하위호환용으로 남아있을 뿐).
+
     Args:
-        target_label: 찾을 물체 라벨 (기본값 'box')
+        target_label: [하위호환용, 현재는 결과에 영향 없음] 과거엔 필터링에
+            썼으나 이제 스윕 중 보인 모든 라벨을 기억한다.
 
     Returns:
         성공: {"status": "success", "reason": "scan_complete:N",
                "boxes": [{"x":0.22,"y":0.19,"z":0.022,
                           "confidence":0.78,"angle_base_deg":45.0,
-                          "label":"box"}, ...]}
-               (N=발견한 개수, boxes 각 항목의 x/y/z는 물체 중심좌표)
+                          "label":"box"}, {"x":..,"label":"cup",...}, ...]}
+               (N=발견한 개수, 라벨 다양할 수 있음. 각 항목의 x/y/z는
+               물체 중심좌표)
         실패: {"status": "failed"|"timeout", "reason": "..."}
     """
     global _last_scanned_boxes, _last_scan_stamp
@@ -1080,10 +1090,13 @@ def pick_object(target_label: str, grasp_dir: str = 'auto',
         from_scan: True면 scan_for_boxes로 미리 찾아둔 좌표를 사용한다
             (현재 카메라 시야 밖에 있는 물체도 집을 수 있음). scan_for_boxes를
             먼저 호출해서 물체를 찾아둔 경우에만 True로 설정하라.
-        side_approach_deg: side 그립 시 접근 방향 (world 절대각, 도). 생략 시 물체
-            정면(atan2(y,x)) 기준 0도 오프셋. VLM이 장면 분석 후 "어느 방향에서
-            접근할지"를 world 좌표계 각도로 넘기면, 내부에서 position_yaw 기준
-            offset으로 자동 역산한다.
+        side_approach_deg: [2026-08-26 기준 변경] side 그립 시 접근 방향 --
+            물체 방위각(position_yaw = atan2(y,x)) 기준 상대각(도), top-down의
+            angle_rel과 동일 개념. 생략(또는 0)이면 물체 정면(가장 자연스럽고
+            도달 가능성이 높은 방향)에서 접근. +/-로 그 방위각 대비 회전한
+            방향에서 접근한다 (world 절대각이 아님 -- 이전엔 world 절대각을
+            받았으나, 물체 위치가 바뀔 때마다 "정면"에 해당하는 값을 매번
+            다시 계산해야 해서 상대각 기준으로 변경).
         box_index: [신규] from_scan=True일 때, get_scanned_boxes()/이전
             pick_object 응답의 remaining_scanned_boxes 배열에서 몇 번째
             항목(0부터 시작)을 집을지 명시적으로 지정한다. 생략하면
@@ -1152,12 +1165,70 @@ def pick_object(target_label: str, grasp_dir: str = 'auto',
 
 
 @mcp.tool()
-def place_object(x: float, y: float, z: float, grasp_dir: str = 'auto') -> str:
+def slide_object(target_label: str, grasp_dir: str, x: float = None, y: float = None,
+                  z: float = None, side_approach_deg: float = None,
+                  slide_distance_m: float = None, from_scan: bool = False,
+                  box_index: int = None) -> str:
+    """문고리/서랍 손잡이 등을 잡아서 "당겨 여는" 동작. pick_object와 달리
+    들어올리지 않는다 -- 접근각 반대 방향으로 slide_distance_m만큼 직선
+    이동한 뒤 그리퍼를 놓는다. [2026-08-26 추가]
+
+    ⚠ grasp_dir는 "side" 또는 "pinch"만 가능하다. top-down은 애초에
+    수평 당김 동작과 기하학적으로 안 맞아서 미지원(요청하면 rejected).
+
+    side/pinch의 접근 시퀀스(TCP오프셋 보정, standoff에서 직선 진입,
+    접근각 후보 자동 탐색, 사전회전 없음)를 pick_object와 완전히
+    동일하게 재사용한다 -- 차이는 마지막 단계뿐이다(들어올리기 대신
+    당겨서 놓기).
+
+    Args:
+        target_label: 손잡이/물체 라벨 (예: "handle", "drawer").
+        grasp_dir: "side" 또는 "pinch" (필수, 다른 값은 거부됨).
+        x, y, z: override 좌표 (base_link 기준, 미터). 지정하면 인지
+            재조회 없이 이 좌표로 바로 접근한다.
+        side_approach_deg: 접근각 -- 물체 방위각(atan2(y,x)) 기준
+            상대각(도). 생략(또는 0)이면 정면 접근.
+        slide_distance_m: 당길 거리(미터). 생략 시 서버 기본값(0.08m).
+        from_scan: True면 scan_for_boxes로 미리 찾아둔 좌표 사용.
+        box_index: from_scan=True일 때 remaining_scanned_boxes에서
+            몇 번째 항목을 쓸지 (pick_object와 동일 규칙).
+
+    Returns:
+        성공: {"status": "success", "reason": "slide_complete"}
+        거부: {"status": "rejected", "reason": "..."} (grasp_dir가
+              side/pinch가 아니거나 접근 불가 영역)
+        실패: {"status": "failed"|"timeout", "reason": "..."}
+    """
+    _ensure_ros()
+    payload = {'action': 'slide', 'target_label': target_label, 'grasp_dir': grasp_dir}
+    if side_approach_deg is not None:
+        payload['side_approach_deg'] = side_approach_deg
+    if slide_distance_m is not None:
+        payload['slide_distance_m'] = slide_distance_m
+    if x is not None and y is not None and z is not None:
+        payload['override_pos'] = {'x': x, 'y': y, 'z': z}
+    elif from_scan:
+        payload['from_scan'] = True
+        if box_index is not None:
+            payload['box_index'] = box_index
+    _ros_node.publish_command(payload)
+    result = _ros_node.wait_for_result(timeout=TIMEOUT_PICK)
+    result['target_label'] = target_label
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+def place_object(x: float, y: float, z: float, grasp_dir: str = 'auto',
+                  side_approach_deg: float = None) -> str:
     """집은 물체를 지정한 좌표(base_link 기준, 미터)에 내려놓는다. place 완료까지 블로킹.
 
     Args:
         x, y, z: 내려놓을 위치 (base_link 기준, 미터)
         grasp_dir: 내려놓을 때 자세. pick_object 와 동일한 값 사용 권장.
+        side_approach_deg: [2026-08-26 추가] grasp_dir이 side/pinch일 때
+            접근각 -- 물체 방위각(atan2(y,x)) 기준 상대각(도). 생략(또는 0)
+            이면 정면 접근. pick_object와 동일한 접근각 후보 자동 탐색이
+            place에도 적용된다.
 
     ⚠ 요청한 좌표가 로봇의 국소 도달불가 지점(singularity)이거나 비정상적
     으로 높은 z일 경우, 서버가 자동으로 근처 좌표(±0.05m y시프트 또는
@@ -1193,6 +1264,8 @@ def place_object(x: float, y: float, z: float, grasp_dir: str = 'auto') -> str:
     payload = {'action': 'place', 'place_pos': place_pos}
     if grasp_dir and grasp_dir != 'auto':
         payload['grasp_dir'] = grasp_dir
+        if side_approach_deg is not None:
+            payload['side_approach_deg'] = side_approach_deg
     _ros_node.publish_command(payload)
     result = _ros_node.wait_for_result(timeout=TIMEOUT_PLACE)
     # [신규] planning_node가 도달 불가 지점을 감지해 좌표를 자동으로
@@ -1312,11 +1385,38 @@ def stack_boxes(box_indices: list, base_x: float, base_y: float, base_z: float,
 
 
 @mcp.tool()
-def move_to_position(x: float, y: float, z: float) -> str:
+def move_to_position(x: float, y: float, z: float, grasp_dir: str = 'auto',
+                      side_approach_deg: float = None,
+                      quat_override: list = None,
+                      apply_side_tcp_offset: bool = False) -> str:
     """로봇 팔 끝(end-effector)을 지정 좌표로 이동한다. 완료까지 블로킹.
+    pick_object와 달리 그리퍼를 닫지 않는다 -- 자세(orientation) 후보를
+    실제로 뭔가 집지 않고 미리 확인해볼 때 씀. side 그립 후보 검증용으로
+    [2026-08-26] 추가됨 -- 자세한 배경은 grasp-kinematics-design 스킬 참고.
+
+    ⚠ pick_object의 side 그립과 달리 이 도구는 기본적으로
+    side_reachability_check(최소거리 0.32m)나 SIDE_TCP_OFFSET 보정을
+    거치지 않는다 -- 순수하게 지정한 (x,y,z)로 지정한 자세로 이동만
+    해본다. apply_side_tcp_offset=True로 켜지 않는 한 실제 pick 최종
+    도달 지점과 다를 수 있다.
 
     Args:
         x, y, z: 목표 좌표 (base_link 기준, 미터)
+        grasp_dir: 자세. 생략(기본 'auto')하면 기존 동작과 동일(top-down,
+            마지막 스캔 각도 기반). "top"/"side"/"side_left"/"side_right" 등
+            pick_object와 동일한 값 사용 가능.
+        side_approach_deg: [2026-08-26 기준 변경] side 그립일 때 접근 방향 --
+            물체 방위각(atan2(y,x)) 기준 상대각(도, world 절대각 아님).
+            생략(또는 0)이면 정면 접근.
+        quat_override: [x,y,z,w] 쿼터니언을 직접 지정해서 grasp_dir 계산을
+            완전히 건너뛴다 (여러 후보 자세를 직접 실험할 때 사용).
+            지정하면 grasp_dir/side_approach_deg는 무시된다.
+        apply_side_tcp_offset: [2026-08-26 추가] True + side 계열
+            grasp_dir이면, pick_object와 동일하게 SIDE_TCP_OFFSET을
+            (position_yaw+side_approach_deg 방향으로) 적용한 뒤 이동한다
+            -- 실제 pick 시 그리퍼 손끝이 도달할 지점을 그리퍼를 닫지
+            않고 미리 확인할 때 켜라. quat_override 지정 시에는 무시됨
+            (원본 좌표 그대로 이동).
 
     Returns:
         성공: {"status": "success", "reason": "move_complete", "target_pos": {...}}
@@ -1324,7 +1424,16 @@ def move_to_position(x: float, y: float, z: float) -> str:
     """
     _ensure_ros()
     target_pos = {'x': x, 'y': y, 'z': z}
-    _ros_node.publish_command({'action': 'move', 'target_pos': target_pos})
+    payload = {'action': 'move', 'target_pos': target_pos}
+    if quat_override is not None:
+        payload['quat_override'] = list(quat_override)
+    elif grasp_dir and grasp_dir != 'auto':
+        payload['grasp_dir'] = grasp_dir
+        if side_approach_deg is not None:
+            payload['side_approach_deg'] = side_approach_deg
+        if apply_side_tcp_offset:
+            payload['apply_side_tcp_offset'] = True
+    _ros_node.publish_command(payload)
     result = _ros_node.wait_for_result(timeout=TIMEOUT_MOVE)
     result['target_pos'] = target_pos
     return json.dumps(result, ensure_ascii=False)
@@ -1413,21 +1522,83 @@ def go_home() -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
+def _vlm_ground_bbox_for_grasp(target_label: str, img_bgr: np.ndarray, objects: list):
+    """[2026-08-26 추가] infer_grasp 전용 -- YOLO에 없는 물체를 VLM
+    /ground_object로 찾아 bbox_norm만 얻는다 (ground_object() MCP 도구와
+    동일 엔드포인트/페이로드 재사용, 3D 좌표 계산은 생략하고 bbox만 필요).
+
+    Returns:
+        (bbox_norm: list[4] 또는 None, confidence: float, error_reason: str 또는 None)
+    """
+    GROUND_URL  = f"{VLM_SERVER_URL}/ground_object"
+    VLM_TIMEOUT = 45.0
+
+    def _encode(bgr: np.ndarray) -> str:
+        ok, buf = cv2.imencode('.jpg', bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if not ok:
+            raise RuntimeError('JPEG 인코딩 실패')
+        return base64.b64encode(buf.tobytes()).decode()
+
+    try:
+        full_b64 = _encode(img_bgr)
+    except Exception as e:
+        return None, 0.0, f'encode_failed — {e}'
+
+    yolo_detections = [
+        {'label': o.get('label', '?'), 'bbox': o.get('bbox', []),
+         'confidence': round(float(o.get('confidence', 0.0)), 3)}
+        for o in objects
+    ]
+    payload = {
+        'full_image_b64': full_b64,
+        'target_label':   target_label,
+        'detections':     yolo_detections,
+        'timestamp':      time.time(),
+    }
+    try:
+        resp = _requests.post(GROUND_URL, json=payload, timeout=VLM_TIMEOUT)
+    except _requests.exceptions.ConnectionError:
+        return None, 0.0, 'vlm_server_unavailable'
+    except _requests.exceptions.Timeout:
+        return None, 0.0, f'vlm_timeout — {VLM_TIMEOUT}s 초과'
+    except Exception as e:
+        return None, 0.0, f'vlm_request_failed — {e}'
+
+    if resp.status_code != 200:
+        return None, 0.0, f'vlm_http_error — {resp.status_code}'
+    try:
+        gdata = resp.json()
+    except Exception:
+        return None, 0.0, 'vlm_invalid_json'
+
+    if not gdata.get('found', False):
+        return None, 0.0, 'target_not_found'
+
+    conf = float(gdata.get('confidence', 0.0))
+    bbox_norm = gdata.get('bbox_norm')
+    if not bbox_norm or len(bbox_norm) != 4:
+        return None, conf, 'no_valid_bbox_from_vlm'
+    return bbox_norm, conf, None
+
+
 @mcp.tool()
 def infer_grasp(target_label: str) -> str:
     """지정한 물체에 대해 VLM grasp 타입을 추론한다 (명시적 온디맨드 호출).
 
-    VLM은 "어떻게 잡을 것인가?"만 판단한다. "어디 있는가?"는 YOLO가 담당한다.
-    VLM이 object를 다시 탐지하지 않는다 — YOLO bbox와 crop 이미지를 VLM에 전달한다.
+    VLM은 "어떻게 잡을 것인가?"만 판단한다. "어디 있는가?"는 1차로 YOLO가
+    담당한다. /detected_objects 에서 target_label과 일치하는 물체를 찾고,
+    있으면 그 bbox로 crop해서 VLM_SERVER_URL/infer_grasp 에 POST한다.
 
-    /detected_objects 에서 target_label 과 일치하는 물체를 찾고,
-    /camera/color/image_raw 의 최신 프레임에서 bbox crop을 만들어
-    VLM_SERVER_URL(기본 http://127.0.0.1:8003)/infer_grasp 에 POST 한다.
+    [2026-08-26 추가] YOLO 목록에 없는 라벨(예: dual-yolo box+coco 25종
+    밖의 물체)이면 더 이상 바로 에러 내지 않고, ground_object()와 동일한
+    VLM /ground_object 엔드포인트로 bbox를 자동으로 확보해서 계속
+    진행한다 — 응답의 grounding_source 필드로 어느 쪽이었는지 확인 가능
+    ("yolo"=정밀 bbox, "vlm"=근사 bbox라 crop이 다소 부정확할 수 있음).
+    이제 ground_object로 미리 위치를 확보할 필요 없이 바로 호출해도 된다.
 
     ─── 라우팅 규칙 ──────────────────────────────────────────────────────────
     "컵 어떻게 잡아?"  → infer_grasp("cup")
     "컵 어디 있어?"   → list_detected_objects()  ← VLM 불필요
-    target이 YOLO에 없으면 먼저 ground_object()로 위치를 확보한 뒤 호출한다.
 
     Args:
         target_label: 추론할 물체의 YOLO 탐지 라벨 (예: "box", "cup")
@@ -1436,7 +1607,15 @@ def infer_grasp(target_label: str) -> str:
         성공: {"status": "success", "object": "...", "grasp_type": "TOP|SIDE|PINCH",
                "orientation": "HORIZONTAL|VERTICAL", "confidence": 0.95,
                "reason": "...", "inference_ms": 1200.0,
-               "bbox_px": [x1,y1,x2,y2], "image_age_sec": 0.1}
+               "bbox_px": [x1,y1,x2,y2], "image_age_sec": 0.1,
+               "grounding_source": "yolo"|"vlm", "grounding_confidence": 0.85|null,
+               "approach_direction": "FRONT|LEFT|RIGHT|BACK",
+               "suggested_side_approach_deg": 0.0}
+               (grasp_type이 SIDE/PINCH면 suggested_side_approach_deg를
+               pick_object/slide_object의 side_approach_deg에 그대로 넣어라
+               -- 대략적인 시작 각도일 뿐, 틀려도 서버의 접근각 후보 탐색이
+               안전망 역할을 한다. 구버전 VLM 서버는 이 필드를 안 주므로
+               항상 FRONT/0.0으로 채워진다.)
         실패: {"status": "error", "reason": "..."}
     """
     _ensure_ros()
@@ -1444,24 +1623,7 @@ def infer_grasp(target_label: str) -> str:
     VLM_URL     = f"{VLM_SERVER_URL}/infer_grasp"
     VLM_TIMEOUT = 30.0   # Qwen2.5-VL inference 시간 여유 확보
 
-    # ── 1. 감지된 물체 목록에서 target_label 찾기 ────────────────────────────
-    objects, obj_stamp = _ros_node.get_objects()
-    if not objects:
-        return json.dumps({'status': 'error',
-                           'reason': 'no_objects_detected — /detected_objects 수신 없음'})
-
-    label_lower = target_label.strip().lower()
-    matched = [o for o in objects if str(o.get('label', '')).lower() == label_lower]
-    if not matched:
-        available = [o.get('label', '') for o in objects]
-        return json.dumps({'status': 'error',
-                           'reason': f'object_not_found — "{target_label}" 없음. '
-                                     f'현재 감지 목록: {available}'})
-
-    obj = matched[0]
-    bbox_norm = obj.get('bbox')   # [x_min, y_min, x_max, y_max] 0~1 정규화
-
-    # ── 2. 최신 카메라 이미지 가져오기 ──────────────────────────────────────
+    # ── 1. 최신 카메라 이미지 가져오기 (YOLO 폴백 시에도 필요해서 먼저 확보) ──
     img_bgr, img_stamp = _ros_node.get_image()
     if img_bgr is None:
         return json.dumps({'status': 'error',
@@ -1473,6 +1635,34 @@ def infer_grasp(target_label: str) -> str:
                            'reason': f'image_stale — 이미지가 {img_age:.1f}초 경과 (>3s)'})
 
     h, w = img_bgr.shape[:2]
+
+    # ── 2. 감지된 물체 목록에서 target_label 찾기 (YOLO 우선) ──────────────
+    objects, obj_stamp = _ros_node.get_objects()
+    label_lower = target_label.strip().lower()
+    matched = [o for o in objects if str(o.get('label', '')).lower() == label_lower] if objects else []
+
+    grounding_source = 'yolo'
+    grounding_conf = None
+    if matched:
+        obj = matched[0]
+        bbox_norm = obj.get('bbox')   # [x_min, y_min, x_max, y_max] 0~1 정규화
+    else:
+        # [2026-08-26 추가] YOLO 목록에 없으면(라벨을 아예 모르거나 confidence
+        # 미달) 바로 에러 내지 않고 ground_object()와 동일한 VLM
+        # /ground_object 엔드포인트로 bbox를 확보해서 계속 진행한다.
+        # 이전엔 여기서 무조건 'object_not_found'였는데, "book"처럼
+        # dual-yolo(box+coco 25종) 밖의 라벨은 infer_grasp 자체를 못 쓰는
+        # 문제가 있었다 — VLM(ground_object)은 보는데 infer_grasp만 못 보는
+        # 불일치가 실측 확인됨.
+        bbox_norm, grounding_conf, ground_err = _vlm_ground_bbox_for_grasp(
+            target_label, img_bgr, objects or [])
+        if bbox_norm is None:
+            available = [o.get('label', '') for o in objects] if objects else []
+            return json.dumps({'status': 'error',
+                               'reason': f'not_found_by_yolo_or_vlm — yolo_labels={available}, '
+                                         f'vlm_ground_error={ground_err}'})
+        grounding_source = 'vlm'
+        obj = {'label': target_label, 'confidence': grounding_conf}
 
     # ── 3. bbox crop 생성 ────────────────────────────────────────────────────
     if bbox_norm and len(bbox_norm) == 4:
@@ -1551,16 +1741,38 @@ def infer_grasp(target_label: str) -> str:
     except (TypeError, ValueError):
         confidence = 0.0
 
+    # [2026-08-26 추가] VLM이 준 정성적 접근방향(FRONT/LEFT/RIGHT/BACK,
+    # 카메라 시점 기준)을 pick_object/slide_object의 side_approach_deg
+    # (position_yaw 기준 상대각, 도)로 쓸 대략적인 시작값으로 변환한다.
+    # 정밀한 각도가 아니라 "후보 탐색의 1순위 추측값" 용도 -- 틀려도
+    # planning_node의 접근각 후보 스윕(±15~90°)이 안전망 역할을 한다.
+    # VLM 서버가 이 필드를 아직 안 보내는 구버전이면 기본 FRONT(0°)로
+    # 처리해서 하위호환된다.
+    _APPROACH_DEG_MAP = {'FRONT': 0.0, 'LEFT': 90.0, 'RIGHT': -90.0, 'BACK': 180.0}
+    approach_direction = str(data.get('approach_direction', 'FRONT')).upper()
+    if approach_direction not in _APPROACH_DEG_MAP:
+        approach_direction = 'FRONT'
+    suggested_side_approach_deg = _APPROACH_DEG_MAP[approach_direction]
+
     return json.dumps({
-        'status':        'success',
-        'object':        data.get('object', target_label),
-        'grasp_type':    grasp_type,
-        'orientation':   orientation,
-        'confidence':    round(confidence, 3),
-        'reason':        data.get('reason', ''),
-        'inference_ms':  data.get('inference_ms', 0.0),
-        'bbox_px':       bbox_px,
-        'image_age_sec': img_age,
+        'status':           'success',
+        'object':           data.get('object', target_label),
+        'grasp_type':       grasp_type,
+        'orientation':      orientation,
+        'confidence':       round(confidence, 3),
+        'reason':           data.get('reason', ''),
+        'inference_ms':     data.get('inference_ms', 0.0),
+        'bbox_px':          bbox_px,
+        'image_age_sec':    img_age,
+        # [2026-08-26 추가] bbox 출처 -- 'yolo'면 정밀, 'vlm'이면 ground_object
+        # 경유 근사 bbox라 crop이 다소 부정확할 수 있음(참고용으로 노출).
+        'grounding_source': grounding_source,
+        'grounding_confidence': round(grounding_conf, 3) if grounding_conf is not None else None,
+        # [2026-08-26 추가] side/pinch일 때 pick_object(side_approach_deg=)에
+        # 그대로 넣을 수 있는 대략적 시작 각도. approach_direction은 VLM
+        # 원본 응답(FRONT/LEFT/RIGHT/BACK), 구버전 VLM 서버면 항상 FRONT/0.0.
+        'approach_direction': approach_direction,
+        'suggested_side_approach_deg': suggested_side_approach_deg,
     }, ensure_ascii=False)
 
 
