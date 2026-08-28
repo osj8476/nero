@@ -315,6 +315,69 @@ def side_reachability_check(pos: dict) -> tuple:
     # return (True, '')
 
 
+# side/pinch 접근각 블라인드 스윕 폭 (도, position_yaw 기준 상대 오프셋).
+# _do_pick/_do_slide/_do_place가 공유하던 하드코딩 튜플을 여기로 뽑아냄
+# (2026-08 side/pinch 각도인식 무시 버그 수정 시 side_face_candidates_deg의
+# 폴백용으로 재사용하기 위해 단일 소스로 관리).
+SIDE_BLIND_SWEEP_DEG = (15.0, -15.0, 30.0, -30.0, 45.0, -45.0,
+                        60.0, -60.0, 75.0, -75.0, 90.0, -90.0)
+
+
+def side_face_candidates_deg(position_yaw_deg: float, angle_base_deg,
+                              requested_offset_deg: float = 0.0) -> list:
+    """물체의 실측 각도(angle_base_deg)가 있을 때, side/pinch 접근각 후보를
+    물체의 면(face-normal) 방향으로 한정한다.
+
+    [배경, 2026-08 발견] 기존 side/pinch 접근각 탐색(_do_pick 등)은
+    position_yaw를 중심으로 15도 간격 블라인드 스윕(SIDE_BLIND_SWEEP_DEG)을
+    돌며 IK가 풀리는 "아무 각도"에서 처음 성공하면 그걸로 확정했다. 병처럼
+    원형 단면인 물체는 어느 각도로 접근해도 그립이 성립하므로 문제없지만,
+    책/각진 물병처럼 사각 단면인 물체는 평평한 면에 수직으로(면-법선 방향)
+    접근해야 두 손끝이 평행면에 밀착한다 -- 그 외 각도는 IK가 풀려서
+    "성공"으로 보고돼도 실제로는 모서리를 비스듬히 무는 불안정한 그립이다.
+    top-down 그립은 YawCandidateSelector가 이미 mod-90(박스 변 대칭) x
+    mod-180(그리퍼 좌우 대칭) 4후보로 이 문제를 해결하고 있었는데, side/pinch
+    경로만 이 처리가 없어서 놓친 것 -- 동일한 원리를 접근각(월드 절대각)에
+    적용한다.
+
+    perception(perception_node._compute_box_angle_base)이 모든 감지 물체에
+    대해 angle_base_deg를 계산하므로(box 라벨 전용 아님) 이 값을 그대로
+    재사용한다. 원형 물체는 Hough 직선 투표가 안정적인 우세선을 못 찾아
+    angle_base_deg=None으로 나오는 경향이 있어(perception 쪽 실측 관찰,
+    보장된 규칙은 아님), None이면 "각도 모름/방향 무관"으로 보고 빈 리스트를
+    반환한다 -- 호출부는 기존 블라인드 스윕으로 그대로 폴백해야 한다는 신호.
+    즉 이 함수는 perception이 각도를 준 경우에만 개입하고, 원형 물체나 인식
+    실패 시의 기존 동작(블라인드 스윕)은 건드리지 않는다.
+
+    Args:
+        position_yaw_deg: atan2(y,x) (도) -- 베이스에서 물체를 바라보는 방위각.
+        angle_base_deg: perception이 준 물체 자체 회전각(도, base_link 절대각,
+            0~90 정규화됨) 또는 None.
+        requested_offset_deg: 호출부가(Claude/infer_grasp가) 원한 접근각
+            오프셋(도, position_yaw 기준 상대값) -- 후보 정렬 우선순위로만 쓰임.
+
+    Returns:
+        offset_deg 후보 리스트(position_yaw 기준 상대각, 요청값에 가까운 순
+        정렬). angle_base_deg가 None이면 빈 리스트.
+    """
+    if angle_base_deg is None:
+        return []
+    # 물체 자신의 면-법선 방향 4개(mod-90 변 대칭 x mod-180 반대편 대칭) --
+    # world 절대각 기준. YawCandidateSelector의 4후보 구성과 동일한 원리.
+    face_normals_world = [(angle_base_deg + k) % 360.0 for k in (0.0, 90.0, 180.0, 270.0)]
+    candidates = []
+    for world_deg in face_normals_world:
+        # position_yaw 기준 상대 offset으로 변환, -180~180으로 정규화
+        # (side_quat_for류가 기대하는 approach_offset_deg와 동일한 정의).
+        offset = (world_deg - position_yaw_deg + 180.0) % 360.0 - 180.0
+        candidates.append(offset)
+    # 요청 offset에 가까운 순으로 정렬 -- infer_grasp의 approach_direction
+    # 힌트나 사용자가 지정한 방향을 최대한 존중하되, 후보 자체는 면-법선
+    # 방향으로만 한정된 채 유지한다.
+    candidates.sort(key=lambda o: abs(((o - requested_offset_deg + 180.0) % 360.0) - 180.0))
+    return candidates
+
+
 def auto_grasp_quat(pos: dict, label: str, use_moveit2: bool = False) -> list:
     """라벨 힌트 -> 없으면 위치 기반 휴리스틱(y가 x보다 훨씬 크면 side)으로
     top-down 또는 side 쿼터니언을 결정한다."""

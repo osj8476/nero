@@ -83,6 +83,7 @@ from .grasp_kinematics import (
     side_quat_for, sim_side_quat_for, pinch_quat_for, sim_pinch_quat_for,
     side_reachability_check, auto_grasp_quat,
     resolve_grasp_quat, YawCandidateSelector, SequenceRejected,
+    SIDE_BLIND_SWEEP_DEG, side_face_candidates_deg,
 )
 # [신설] stack_boxes의 pick 단계 경량 백트래킹 플래너 (ROS 비의존, 순수 함수).
 # 상세: task_planner.py 모듈 docstring 참고.
@@ -355,7 +356,16 @@ class PlanningNode(Node):
                     _scan_match = _label_matches[0] if _label_matches else None
                 if _scan_match is not None:
                     pos = {'x': _scan_match['x'], 'y': _scan_match['y'], 'z': _scan_match['z']}
-                    angle_deg = _scan_match.get('angle_base_deg') or 0.0
+                    # [2026-08 수정] 기존엔 `or 0.0`으로 None(각도 인식 실패/
+                    # 원형 물체)을 실측 0.0도와 구분 못 하게 뭉갰다 --
+                    # side/pinch의 면-정렬 후보 탐색(side_face_candidates_deg)이
+                    # 이 None 여부로 "물체 각도를 아는지"를 판단하므로, 여기서
+                    # 뭉개면 from_scan 경로에서만 그 판단이 항상 무력화된다.
+                    # _find_object_with_angle(비-scan 경로)은 원래도 None을
+                    # 그대로 보존하고 있었음 -- 여기도 동일하게 맞춘다.
+                    # top-down 쪽 numeric 사용처는 이미 None-safe(아래 align
+                    # 재조회 폴백, _approach_angle_cands 계산부 참고).
+                    angle_deg = _scan_match.get('angle_base_deg')
                     skip_reacquire = False
                     self.get_logger().info(
                         f'[from_scan] 저장된 좌표 사용 -> pos={pos} angle_deg={angle_deg} '
@@ -409,6 +419,11 @@ class PlanningNode(Node):
             label = cmd.get('target_label', '')
             use_from_scan = cmd.get('from_scan', False)
             override_pos = cmd.get('override_pos')
+            # [2026-08 추가] 손잡이 각도(angle_base_deg) -- pick과 동일하게
+            # side/pinch 접근각 후보를 물체(손잡이) 면-법선 방향으로 한정하는
+            # 데 쓴다. 기존엔 여기서 버려져서 slide가 pick과 동일한 "아무
+            # 각도로나 접근" 버그를 그대로 갖고 있었다.
+            angle_deg = None
             if override_pos is not None:
                 pos = override_pos
                 self.get_logger().info(f'[slide][override] pos={pos}')
@@ -421,6 +436,7 @@ class PlanningNode(Node):
                     _scan_match = _label_matches[0] if _label_matches else None
                 if _scan_match is not None:
                     pos = {'x': _scan_match['x'], 'y': _scan_match['y'], 'z': _scan_match['z']}
+                    angle_deg = _scan_match.get('angle_base_deg')
                     try:
                         self._scanned_boxes.remove(_scan_match)
                     except ValueError:
@@ -429,7 +445,7 @@ class PlanningNode(Node):
                     pos = None
                     self.get_logger().warn(f"[slide][from_scan] 저장된 '{label}' 없음.")
             else:
-                pos, _ = self._find_object_with_angle(label)
+                pos, angle_deg = self._find_object_with_angle(label)
             if pos is None:
                 self.get_logger().warn(f"[slide] '{label}' 못 찾음.")
                 with self.lock:
@@ -456,7 +472,8 @@ class PlanningNode(Node):
                                   args=(pos, quat, label),
                                   kwargs={'side_approach_offset_deg': _side_approach_offset_deg,
                                           'is_pinch': grasp_dir == 'pinch',
-                                          'slide_distance_m': slide_distance_m})
+                                          'slide_distance_m': slide_distance_m,
+                                          'angle_deg': angle_deg})
             t.daemon = False
             t.start()
         elif action == 'place':
@@ -759,6 +776,13 @@ class PlanningNode(Node):
     # ── 시퀀스 ────────────────────────────────────────────────────────────────
     def _do_pick(self, pos, quat, is_side=False, label='', skip_reacquire=False, angle_deg=0.0,
                  side_approach_offset_deg=0.0, is_pinch=False):
+        # [2026-08 추가] side/pinch 그립의 면-정렬 신뢰도를 결과에 실어보내기
+        # 위한 진단값. top-down이면 계속 None(해당 없음). is_side면 아래에서
+        # 'unknown'(각도 모름, 원형 물체이거나 인식 실패 -- 기존 동작과 동일)
+        # / 'face_aligned'(물체 면-법선 후보로 성공) / 'blind_fallback'(면
+        # 후보 전부 실패해서 각도 무관 블라인드 스윕으로 폴백, 그립 불안정
+        # 가능성 있음) 중 하나로 채워진다.
+        side_grasp_alignment = None
         if is_side:
             ok, reason = side_reachability_check(pos)
             if not ok:
@@ -776,9 +800,23 @@ class PlanningNode(Node):
             # 목록만 만들고, 실제 px/py/standoff/quat 확정은 그 루프에서 함.
             dx, dy = pos['x'], pos['y']
             position_yaw = math.atan2(dy, dx)
-            _side_offset_candidates = [side_approach_offset_deg]
-            for _d in (15.0, -15.0, 30.0, -30.0, 45.0, -45.0,
-                       60.0, -60.0, 75.0, -75.0, 90.0, -90.0):
+            # [2026-08 수정] 사각/각진 물체(책, 각진 물병 등)는 접근각이
+            # 아무거나 되는 게 아니라 물체의 면-법선 방향이어야 두 손끝이
+            # 평행면에 밀착한다 -- perception이 준 angle_base_deg(물체
+            # 실측 각도)가 있으면 그 방향 4후보로 먼저 한정해서 시도하고,
+            # 전부 IK 실패할 때만 기존 블라인드 스윕으로 폴백한다(never
+            # 완전히 새 실패를 만들지 않도록, 대신 폴백 시 로그로 경고).
+            # angle_base_deg=None(원형 물체이거나 인식 실패)이면 기존과
+            # 동일하게 처음부터 블라인드 스윕만 쓴다.
+            # 상세: grasp_kinematics.side_face_candidates_deg docstring 참고.
+            _face_offset_candidates = side_face_candidates_deg(
+                math.degrees(position_yaw), angle_deg, side_approach_offset_deg)
+            _num_face_candidates = len(_face_offset_candidates)
+            if _face_offset_candidates:
+                _side_offset_candidates = list(_face_offset_candidates)
+            else:
+                _side_offset_candidates = [side_approach_offset_deg]
+            for _d in SIDE_BLIND_SWEEP_DEG:
                 _cand = side_approach_offset_deg + _d
                 if _cand not in _side_offset_candidates:
                     _side_offset_candidates.append(_cand)
@@ -922,7 +960,12 @@ class PlanningNode(Node):
                 # 정렬할 필요가 없어 중복 move를 줄인다(아래
                 # _align_quat_override). _box_aligned_quat_for 내부에서
                 # position_yaw 기준 상대각으로 변환됨.
-                _approach_angle_cands = [angle_deg % 180.0, (angle_deg + 90.0) % 180.0]
+                # [2026-08 수정] angle_deg가 None일 수 있음(아래 side_face_
+                # candidates_deg 도입으로 from_scan 경로가 더 이상 None을
+                # 0.0으로 뭉개지 않게 됨) -- top-down은 각도 불명이면 0.0
+                # (축정렬) 취급이 기존과 동일하게 안전한 기본값.
+                _angle_deg_num = angle_deg if angle_deg is not None else 0.0
+                _approach_angle_cands = [_angle_deg_num % 180.0, (_angle_deg_num + 90.0) % 180.0]
                 ok = False
                 quat = None
                 _approach_angle_deg = 0.0
@@ -957,6 +1000,14 @@ class PlanningNode(Node):
             # 시도, 첫 성공(standoff 지점 IK 존재)한 각도를 채택한다.
             # _move는 실패 시 IK 사전조회 단계에서 조기 종료하므로(fail-fast)
             # 여러 후보를 시도해도 비용이 크지 않다.
+            # [2026-08 수정] _num_face_candidates > 0이면 앞쪽 후보들은
+            # "면-법선 정렬" 후보(물체가 각진 경우 그립 안정성 보장), 뒤쪽은
+            # 기존 블라인드 스윕 폴백 -- 어느 쪽에서 성공했는지 로그로 구분한다.
+            if _num_face_candidates:
+                self.get_logger().info(
+                    f'  [{_grip_name} approach] 물체 각도 인식됨(angle_base_deg='
+                    f'{angle_deg:.1f}°) -- 면 정렬 후보 {_num_face_candidates}개 우선 시도, '
+                    f'실패 시 블라인드 스윕 폴백')
             ok = False
             for _i, _cand_offset in enumerate(_side_offset_candidates):
                 _cand_yaw = position_yaw + math.radians(_cand_offset)
@@ -976,13 +1027,31 @@ class PlanningNode(Node):
                     px, py = _cand_px, _cand_py
                     side_standoff_px, side_standoff_py = _cand_standoff_px, _cand_standoff_py
                     approach_yaw = _cand_yaw
-                    if _cand_offset != side_approach_offset_deg:
+                    _used_blind_fallback = _num_face_candidates and _i >= _num_face_candidates
+                    if _used_blind_fallback:
+                        side_grasp_alignment = 'blind_fallback'
                         self.get_logger().warn(
-                            f'  [{_grip_name} approach] 요청 접근각(offset={side_approach_offset_deg:+.1f}°)은 '
-                            f'IK 실패 -- 대체 각도(offset={_cand_offset:+.1f}°, '
-                            f'접근각={math.degrees(approach_yaw):.1f}°)로 진행')
+                            f'  [{_grip_name} approach] ⚠ 면 정렬 후보 {_num_face_candidates}개 '
+                            f'전부 IK 실패 -- 블라인드 폴백 각도(offset={_cand_offset:+.1f}°)로 '
+                            f'진행. 물체가 각진 형태라면 모서리를 무는 불안정한 그립일 수 있음.')
+                    elif _num_face_candidates:
+                        side_grasp_alignment = 'face_aligned'
+                        if _cand_offset != side_approach_offset_deg:
+                            self.get_logger().warn(
+                                f'  [{_grip_name} approach] 요청 접근각(offset={side_approach_offset_deg:+.1f}°)은 '
+                                f'IK 실패 -- 면 정렬 대체 각도(offset={_cand_offset:+.1f}°, '
+                                f'접근각={math.degrees(approach_yaw):.1f}°)로 진행')
+                        else:
+                            self.get_logger().info(f'  [{_grip_name} approach] 요청 접근각 그대로 성공 (면 정렬)')
                     else:
-                        self.get_logger().info(f'  [{_grip_name} approach] 요청 접근각 그대로 성공')
+                        side_grasp_alignment = 'unknown'
+                        if _cand_offset != side_approach_offset_deg:
+                            self.get_logger().warn(
+                                f'  [{_grip_name} approach] 요청 접근각(offset={side_approach_offset_deg:+.1f}°)은 '
+                                f'IK 실패 -- 대체 각도(offset={_cand_offset:+.1f}°, '
+                                f'접근각={math.degrees(approach_yaw):.1f}°)로 진행')
+                        else:
+                            self.get_logger().info(f'  [{_grip_name} approach] 요청 접근각 그대로 성공')
                     break
         if not ok:
             if is_side:
@@ -1127,13 +1196,14 @@ class PlanningNode(Node):
                 break
         if not ok:
             raise RuntimeError('lift 이동 실패 (모든 높이 재시도 초과)')
-        return _current_top_angle_deg
+        return _current_top_angle_deg, side_grasp_alignment
     def _pick_sequence(self, pos, quat, is_side=False, label='', skip_reacquire=False, angle_deg=0.0,
                         side_approach_offset_deg=0.0, is_pinch=False):
         try:
-            align_angle_deg = self._do_pick(pos, quat, is_side, label, skip_reacquire, angle_deg,
-                                             side_approach_offset_deg=side_approach_offset_deg,
-                                             is_pinch=is_pinch)
+            align_angle_deg, side_grasp_alignment = self._do_pick(
+                pos, quat, is_side, label, skip_reacquire, angle_deg,
+                side_approach_offset_deg=side_approach_offset_deg,
+                is_pinch=is_pinch)
             self.get_logger().info('✅ PICK 완료')
             # busy 해제를 발행보다 먼저 (레이스 방지 -- _scan_box_sequence 참고)
             with self.lock:
@@ -1141,7 +1211,15 @@ class PlanningNode(Node):
             self._publish_result(
                 'success', 'pick_complete',
                 extra={'remaining_scanned_boxes': self._scanned_boxes,
-                       'align_angle_deg': align_angle_deg})
+                       'align_angle_deg': align_angle_deg,
+                       # [2026-08 추가] side/pinch 그립 면-정렬 신뢰도.
+                       # top-down이면 항상 None. side/pinch면:
+                       #   'face_aligned'    -- 물체의 실측 면-법선 방향으로 정상 접근
+                       #   'blind_fallback'  -- 면 정렬 후보 전부 IK 실패, 각도 무관
+                       #                        폴백 -- 각진 물체면 불안정한 그립일 수 있음
+                       #   'unknown'         -- perception이 물체 각도를 못 줌(원형
+                       #                        물체이거나 인식 실패) -- 기존 동작과 동일
+                       'side_grasp_alignment': side_grasp_alignment})
         except SequenceRejected as e:
             with self.lock:
                 self.busy = False
@@ -1156,10 +1234,12 @@ class PlanningNode(Node):
                 self.busy = False
 
     def _slide_sequence(self, pos, quat, label='', side_approach_offset_deg=0.0,
-                         is_pinch=False, slide_distance_m=DEFAULT_SLIDE_DISTANCE_M):
+                         is_pinch=False, slide_distance_m=DEFAULT_SLIDE_DISTANCE_M,
+                         angle_deg=None):
         try:
             self._do_slide(pos, quat, label, side_approach_offset_deg=side_approach_offset_deg,
-                            is_pinch=is_pinch, slide_distance_m=slide_distance_m)
+                            is_pinch=is_pinch, slide_distance_m=slide_distance_m,
+                            angle_deg=angle_deg)
             self.get_logger().info('✅ SLIDE 완료')
             with self.lock:
                 self.busy = False
@@ -1178,7 +1258,8 @@ class PlanningNode(Node):
                 self.busy = False
 
     def _do_slide(self, pos, quat, label='', side_approach_offset_deg=0.0,
-                  is_pinch=False, slide_distance_m=DEFAULT_SLIDE_DISTANCE_M):
+                  is_pinch=False, slide_distance_m=DEFAULT_SLIDE_DISTANCE_M,
+                  angle_deg=None):
         """문고리/서랍 손잡이 등 -- 잡아서 들어올리는 pick이 아니라, 잡은
         채로 접근방향 반대로 당겨서 여는 동작. _do_pick의 side/pinch
         approach 루프(TCP오프셋/standoff/각도후보탐색)를 그대로 재사용하고
@@ -1191,9 +1272,17 @@ class PlanningNode(Node):
 
         dx, dy = pos['x'], pos['y']
         position_yaw = math.atan2(dy, dx)
-        _offset_candidates = [side_approach_offset_deg]
-        for _d in (15.0, -15.0, 30.0, -30.0, 45.0, -45.0,
-                   60.0, -60.0, 75.0, -75.0, 90.0, -90.0):
+        # [2026-08 수정] _do_pick과 동일한 면-정렬 후보 우선 탐색 -- 손잡이도
+        # 대개 각진 바 형태라 아무 각도에서나 핀치하면 안정적으로 안 물린다.
+        # 상세 원리는 grasp_kinematics.side_face_candidates_deg docstring 참고.
+        _face_offset_candidates = side_face_candidates_deg(
+            math.degrees(position_yaw), angle_deg, side_approach_offset_deg)
+        _num_face_candidates = len(_face_offset_candidates)
+        if _face_offset_candidates:
+            _offset_candidates = list(_face_offset_candidates)
+        else:
+            _offset_candidates = [side_approach_offset_deg]
+        for _d in SIDE_BLIND_SWEEP_DEG:
             _cand = side_approach_offset_deg + _d
             if _cand not in _offset_candidates:
                 _offset_candidates.append(_cand)
@@ -1209,9 +1298,15 @@ class PlanningNode(Node):
         self._gripper(SIM_GRIPPER_OPEN, GRIPPER_OPEN)
         time.sleep(GRIPPER_DELAY)
 
-        self.get_logger().info(
-            f'1/5: 접근 (approach) | {_grip_name}(TCP오프셋 {SIDE_TCP_OFFSET}m 적용, '
-            f'접근각 후보 {len(_offset_candidates)}개 탐색)')
+        if _num_face_candidates:
+            self.get_logger().info(
+                f'1/5: 접근 (approach) | {_grip_name}(TCP오프셋 {SIDE_TCP_OFFSET}m 적용, '
+                f'물체 각도 인식됨(angle_base_deg={angle_deg:.1f}°) -- 면 정렬 후보 '
+                f'{_num_face_candidates}개 우선, 총 {len(_offset_candidates)}개 탐색)')
+        else:
+            self.get_logger().info(
+                f'1/5: 접근 (approach) | {_grip_name}(TCP오프셋 {SIDE_TCP_OFFSET}m 적용, '
+                f'접근각 후보 {len(_offset_candidates)}개 탐색)')
         ok = False
         px = py = standoff_px = standoff_py = approach_yaw = ux = uy = None
         for _i, _cand_offset in enumerate(_offset_candidates):
@@ -1233,6 +1328,11 @@ class PlanningNode(Node):
                 standoff_px, standoff_py = _cand_standoff_px, _cand_standoff_py
                 approach_yaw = _cand_yaw
                 ux, uy = _cux, _cuy
+                if _num_face_candidates and _i >= _num_face_candidates:
+                    self.get_logger().warn(
+                        f'  [{_grip_name} approach] ⚠ 면 정렬 후보 {_num_face_candidates}개 '
+                        f'전부 IK 실패 -- 블라인드 폴백 각도(offset={_cand_offset:+.1f}°)로 진행. '
+                        f'손잡이가 각진 형태라면 불안정하게 물릴 수 있음.')
                 break
         if not ok:
             raise RuntimeError(f'{_grip_name} approach 이동 실패 (재시도 초과, 접근각 후보 전부 실패)')

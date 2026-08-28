@@ -200,7 +200,13 @@ def run_stack_plan(
                 backtrack_attempts_used += 1
             pos = {'x': candidate_box['x'], 'y': candidate_box['y'],
                    'z': candidate_box['z']}
-            angle_deg = candidate_box.get('angle_base_deg') or 0.0
+            # [2026-08 수정] `or 0.0`으로 None(각도 인식 실패/원형 물체)을
+            # 실측 0.0도와 뭉개지 않는다 -- pick_fn(planning_node._do_pick)의
+            # side/pinch 면-정렬 후보 탐색이 이 None 여부로 "물체 각도를
+            # 아는지"를 판단하므로, 여기서 뭉개면 stack_boxes 경로에서만 그
+            # 판단이 무력화된다. _do_pick의 top-down 쪽 numeric 사용처는
+            # None-safe하게 처리돼 있음(주석 참고).
+            angle_deg = candidate_box.get('angle_base_deg')
             quat, is_side = resolve_grasp_quat_fn(grasp_dir, pos, target_label)
             try:
                 pick_fn(pos, quat, is_side, target_label, True, angle_deg)
