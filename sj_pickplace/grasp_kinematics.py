@@ -100,6 +100,11 @@ QUAT_SIDE_FRONT  = [0.481, -0.527,  0.427,  0.556]
 
 # side 계열 식별용 마커 (쿼터니언 비교 대신 이 태그로 판별)
 SIDE_TAG = 'DYNAMIC'
+# pinch(핀치그립) 식별용 마커. side와 접근 시퀀스(TCP오프셋/standoff/각도
+# 후보탐색/사전회전없음)는 동일하지만 자세 공식(pitch)이 다르므로 별도
+# 태그로 구분 -- SIDE_TAG로 합치면 2026-06-30 TOP/SIDE 통합 사고와
+# 같은 종류의 문제가 재발한다.
+PINCH_TAG = 'DYNAMIC_PINCH'
 
 GRASP_DIR_MAP = {
     'top':         QUAT_TOP_DOWN,
@@ -111,6 +116,13 @@ GRASP_DIR_MAP = {
     'side_front':  SIDE_TAG,
     'side_left':   SIDE_TAG,
     'side_right':  SIDE_TAG,
+    # [2026-08-26 확정] 핀치그립 전용 공식(PINCH_TAG, 아래 pinch_quat_for/
+    # sim_pinch_quat_for). 실측(move_to_position quat_override 비교)으로
+    # roll=90°,pitch=180°,yaw=90°+position_yaw가 채택됨 -- side(pitch=-90)
+    # 와 pitch만 다르고 나머지 접근 시퀀스(TCP오프셋/standoff/각도후보
+    # 탐색/사전회전없음)는 동일하게 취급된다 (planning_node.py의 is_side
+    # 판정을 그대로 재사용).
+    'pinch':       PINCH_TAG,
 }
 
 LABEL_GRASP_HINT = {
@@ -219,19 +231,64 @@ def sim_box_aligned_quat(angle_deg: float) -> list:
 
 
 def side_quat_for(pos: dict, approach_offset_deg: float = 0.0) -> list:
-    """로봇(base_link 원점) -> 물체 위치 방향을 바라보는 '옆에서 수평 그립' 쿼터니언.
-    탑다운 : math.radians(-angle_deg), math.radians(90), position_yaw
-
-    approach_offset_deg: position_yaw 기준 접근 방향 오프셋 (도). 0이면 정면 직선 접근.
+    """실물 전용 — 물체 방향으로 수평 접근하는 side 그립 쿼터니언.
+    ZYX euler: roll=-90°, pitch=0°, yaw=position_yaw
+    실물 AGX IK 실측 검증 기준. 시뮬은 sim_side_quat_for() 사용.
     """
     x, y = pos.get('x', 0.0), pos.get('y', 0.0)
     position_yaw = math.atan2(y, x)
-
     yaw = position_yaw + math.radians(approach_offset_deg)
-    pitch = 0.0
-    roll = math.radians(-90.0)
+    return euler_to_quat(math.radians(-90.0), 0.0, yaw)
 
-    return euler_to_quat(roll, pitch, yaw)
+
+def sim_side_quat_for(pos: dict, approach_offset_deg: float = 0.0) -> list:
+    """시뮬(MoveIt2) 전용 — 물체 방향으로 수평 접근하는 side 그립 쿼터니언.
+
+    [2026-08-26 재검증, 이전 공식 폐기] roll=+90°,pitch=0°,yaw=position_yaw
+    (아래 옛 도출 근거 참고)는 실측(Isaac Sim 스크린샷, move_to_position
+    quat_override로 여러 후보 비교)해보니 그리퍼가 세워진 채 옆에서 직각
+    으로 파고드는 자세였다 — 사용자가 원한 "그리퍼가 수평으로 평평한 채
+    정면에서 접근"하는 자세가 아니었음. (0.4,0)/(0.3,0.3)/(-0.3,0.3)/
+    (0.3,-0.3)/(0,-0.5)/(0.1,-0.5)/(0.5,0) 등 여러 위치에서 재검증된
+    새 공식:
+      ZYX euler: roll=+90°, pitch=-90°, yaw=90°+position_yaw+offset
+    (x=0 근접 지점(0,-0.3)처럼 특이점 근방에서는 이 공식도 NO_IK_SOLUTION
+    날 수 있음 — 같은 방향이라도 좀 더 먼 지점(0,-0.5)에서는 풀림.)
+
+    [옛 도출 근거 (폐기됨, 기록용)]
+      sim top-down(roll=0, pitch=180°, yaw=py+π)의 회전행렬에 Rx(-90°)를
+      추가 적용하면 body_X → 물체방향, body_Y → 세계上, body_Z → 수평측면
+      의 수평 그립 자세가 된다는 추론이었으나, 실측 결과와 맞지 않았다.
+    """
+    x, y = pos.get('x', 0.0), pos.get('y', 0.0)
+    position_yaw = math.atan2(y, x)
+    yaw = math.pi / 2 + position_yaw + math.radians(approach_offset_deg)
+    return euler_to_quat(math.radians(90.0), math.radians(-90.0), yaw)
+
+
+def sim_pinch_quat_for(pos: dict, approach_offset_deg: float = 0.0) -> list:
+    """시뮬(MoveIt2) 전용 — 핀치그립(손끝으로 좁게 집는) 쿼터니언.
+
+    [2026-08-26 확정] move_to_position(quat_override=)로 (roll=90,pitch=0),
+    (roll=90,pitch=180) 두 후보를 실측 비교 -- pitch=180(위에서 접근,
+    top-down과 동일 계열)이 가장 자연스러운 자세로 채택됨. roll=90 twist는
+    side와 동일(손끝/손 방향 유지), yaw도 side와 동일 공식(90°+position_yaw
+    +offset)이라 접근 시퀀스(TCP오프셋/standoff/각도후보탐색)를 side와
+    그대로 공유해도 기하학적으로 일관된다.
+    ZYX euler: roll=+90°, pitch=180°, yaw=90°+position_yaw+offset
+    """
+    x, y = pos.get('x', 0.0), pos.get('y', 0.0)
+    position_yaw = math.atan2(y, x)
+    yaw = math.pi / 2 + position_yaw + math.radians(approach_offset_deg)
+    return euler_to_quat(math.radians(90.0), math.pi, yaw)
+
+
+def pinch_quat_for(pos: dict, approach_offset_deg: float = 0.0) -> list:
+    """실물 전용 — 핀치그립. [2026-08-26 임시, 미검증] 실물에서 별도
+    검증 전까지 side_quat_for와 동일 공식을 재사용한다 (SIDE_TCP_OFFSET이
+    top값을 임시 재사용하는 것과 동일한 패턴 -- CLAUDE.md 참고).
+    """
+    return side_quat_for(pos, approach_offset_deg)
 
 
 def side_reachability_check(pos: dict) -> tuple:
@@ -240,65 +297,233 @@ def side_reachability_check(pos: dict) -> tuple:
     Returns:
         (True, '') 이면 도달 가능. (False, reason) 이면 거부 사유 포함.
     """
+    # [2026-08-26 임시 비활성화, 사용자 요청] IK 도달성 자체를 직접
+    # 확인해보기 위해 SIDE_MIN_DIST 사전 거부를 잠시 꺼둠 -- 실제 IK가
+    # 되는지 안 되는지로 바로 판단하려는 목적. 다시 켜려면 아래 return
+    # (True, '')를 지우고 원래 검사 로직(주석 처리된 부분)을 복원할 것.
     x, y = pos.get('x', 0.0), pos.get('y', 0.0)
     dist = math.sqrt(x * x + y * y)
     effective_dist = dist - SIDE_TCP_OFFSET
-    if effective_dist < SIDE_MIN_DIST:
-        return (False,
-                f'물체가 로봇 베이스로부터 너무 가깝습니다 '
-                f'(물체거리 {dist:.3f}m, TCP오프셋 적용 후 {effective_dist:.3f}m, '
-                f'side 그립 최소 거리 {SIDE_MIN_DIST}m). '
-                f'이 위치는 옆에서 수평으로 잡는 자세로 도달할 수 없는 영역입니다. '
-                f'물체를 더 멀리 옮기거나 top(위에서 잡기) 방식을 사용하세요.')
     return (True, '')
+    # if effective_dist < SIDE_MIN_DIST:
+    #     return (False,
+    #             f'물체가 로봇 베이스로부터 너무 가깝습니다 '
+    #             f'(물체거리 {dist:.3f}m, TCP오프셋 적용 후 {effective_dist:.3f}m, '
+    #             f'side 그립 최소 거리 {SIDE_MIN_DIST}m). '
+    #             f'이 위치는 옆에서 수평으로 잡는 자세로 도달할 수 없는 영역입니다. '
+    #             f'물체를 더 멀리 옮기거나 top(위에서 잡기) 방식을 사용하세요.')
+    # return (True, '')
 
 
-def auto_grasp_quat(pos: dict, label: str) -> list:
+# side/pinch 접근각 블라인드 스윕 폭 (도, position_yaw 기준 상대 오프셋).
+# _do_pick/_do_slide/_do_place가 공유하던 하드코딩 튜플을 여기로 뽑아냄
+# (2026-08 side/pinch 각도인식 무시 버그 수정 시 side_face_candidates_deg의
+# 폴백용으로 재사용하기 위해 단일 소스로 관리).
+SIDE_BLIND_SWEEP_DEG = (15.0, -15.0, 30.0, -30.0, 45.0, -45.0,
+                        60.0, -60.0, 75.0, -75.0, 90.0, -90.0)
+
+
+def side_face_candidates_deg(position_yaw_deg: float, angle_base_deg,
+                              requested_offset_deg: float = 0.0) -> list:
+    """물체의 실측 각도(angle_base_deg)가 있을 때, side/pinch 접근각 후보를
+    물체의 면(face-normal) 방향으로 한정한다.
+
+    [배경, 2026-08 발견] 기존 side/pinch 접근각 탐색(_do_pick 등)은
+    position_yaw를 중심으로 15도 간격 블라인드 스윕(SIDE_BLIND_SWEEP_DEG)을
+    돌며 IK가 풀리는 "아무 각도"에서 처음 성공하면 그걸로 확정했다. 병처럼
+    원형 단면인 물체는 어느 각도로 접근해도 그립이 성립하므로 문제없지만,
+    책/각진 물병처럼 사각 단면인 물체는 평평한 면에 수직으로(면-법선 방향)
+    접근해야 두 손끝이 평행면에 밀착한다 -- 그 외 각도는 IK가 풀려서
+    "성공"으로 보고돼도 실제로는 모서리를 비스듬히 무는 불안정한 그립이다.
+    top-down 그립은 YawCandidateSelector가 이미 mod-90(박스 변 대칭) x
+    mod-180(그리퍼 좌우 대칭) 4후보로 이 문제를 해결하고 있었는데, side/pinch
+    경로만 이 처리가 없어서 놓친 것 -- 동일한 원리를 접근각(월드 절대각)에
+    적용한다.
+
+    perception(perception_node._compute_box_angle_base)이 모든 감지 물체에
+    대해 angle_base_deg를 계산하므로(box 라벨 전용 아님) 이 값을 그대로
+    재사용한다. 원형 물체는 Hough 직선 투표가 안정적인 우세선을 못 찾아
+    angle_base_deg=None으로 나오는 경향이 있어(perception 쪽 실측 관찰,
+    보장된 규칙은 아님), None이면 "각도 모름/방향 무관"으로 보고 빈 리스트를
+    반환한다 -- 호출부는 기존 블라인드 스윕으로 그대로 폴백해야 한다는 신호.
+    즉 이 함수는 perception이 각도를 준 경우에만 개입하고, 원형 물체나 인식
+    실패 시의 기존 동작(블라인드 스윕)은 건드리지 않는다.
+
+    Args:
+        position_yaw_deg: atan2(y,x) (도) -- 베이스에서 물체를 바라보는 방위각.
+        angle_base_deg: perception이 준 물체 자체 회전각(도, base_link 절대각,
+            0~90 정규화됨) 또는 None.
+        requested_offset_deg: 호출부가(Claude/infer_grasp가) 원한 접근각
+            오프셋(도, position_yaw 기준 상대값) -- 후보 정렬 우선순위로만 쓰임.
+
+    Returns:
+        offset_deg 후보 리스트(position_yaw 기준 상대각, 요청값에 가까운 순
+        정렬). angle_base_deg가 None이면 빈 리스트.
+    """
+    if angle_base_deg is None:
+        return []
+    # 물체 자신의 면-법선 방향 4개(mod-90 변 대칭 x mod-180 반대편 대칭) --
+    # world 절대각 기준. YawCandidateSelector의 4후보 구성과 동일한 원리.
+    face_normals_world = [(angle_base_deg + k) % 360.0 for k in (0.0, 90.0, 180.0, 270.0)]
+    candidates = []
+    for world_deg in face_normals_world:
+        # position_yaw 기준 상대 offset으로 변환, -180~180으로 정규화
+        # (side_quat_for류가 기대하는 approach_offset_deg와 동일한 정의).
+        offset = (world_deg - position_yaw_deg + 180.0) % 360.0 - 180.0
+        candidates.append(offset)
+    # 요청 offset에 가까운 순으로 정렬 -- infer_grasp의 approach_direction
+    # 힌트나 사용자가 지정한 방향을 최대한 존중하되, 후보 자체는 면-법선
+    # 방향으로만 한정된 채 유지한다.
+    candidates.sort(key=lambda o: abs(((o - requested_offset_deg + 180.0) % 360.0) - 180.0))
+    return candidates
+
+
+def side_face_candidates_from_normal_deg(position_yaw_deg: float, normal_azimuth_deg,
+                                          requested_offset_deg: float = 0.0) -> list:
+    """[2026-08 추가, 프로토타입 -- planning_node.py에 아직 연결 안 됨]
+    perception_node._compute_face_normal_yaw가 준 평면적합 기반 각도로
+    side/pinch 접근각 후보를 만든다.
+
+    side_face_candidates_deg(위)와의 차이: 그쪽은 _compute_box_angle_base의
+    mod-90(물체의 "어느 변인지" 모호함 + 평면의 앞/뒤 모호함, 둘 다 있음)
+    각도를 받아 4후보(0/90/180/270)를 만든다. 이 함수가 받는
+    normal_azimuth_deg는 이미 특정 평면(면)의 normal이므로 "어느 변인지"
+    모호함이 없다 -- 남은 건 평면의 앞/뒤 부호 모호함(mod-180)뿐이라
+    **2후보(0/180)만으로 충분하다**. 4후보를 그대로 재사용하면 실제로
+    존재하지 않는 방향(물체의 다른 변)까지 후보에 섞여 들어가 오히려
+    정밀도가 떨어진다 -- 그래서 side_face_candidates_deg와 별개 함수로
+    분리했다.
+
+    normal_azimuth_deg가 None이면(평면성/수직성 신뢰도 부족 -- perception
+    쪽 게이트에서 이미 걸러진 경우) 빈 리스트 반환 -- 호출부는
+    side_face_candidates_deg(각도를 안다면) 또는 기존 블라인드 스윕으로
+    폴백해야 한다는 신호.
+
+    Args:
+        position_yaw_deg: atan2(y,x) (도) -- 베이스에서 물체를 바라보는 방위각.
+        normal_azimuth_deg: perception이 준 평면 normal의 mod-180 각도(도,
+            base_link 절대각) 또는 None.
+        requested_offset_deg: 후보 정렬 우선순위로만 쓰임.
+
+    Returns:
+        offset_deg 후보 리스트(최대 2개, position_yaw 기준 상대각, 요청값에
+        가까운 순 정렬). normal_azimuth_deg가 None이면 빈 리스트.
+    """
+    if normal_azimuth_deg is None:
+        return []
+    world_candidates = [normal_azimuth_deg % 360.0, (normal_azimuth_deg + 180.0) % 360.0]
+    candidates = []
+    for world_deg in world_candidates:
+        offset = (world_deg - position_yaw_deg + 180.0) % 360.0 - 180.0
+        candidates.append(offset)
+    candidates.sort(key=lambda o: abs(((o - requested_offset_deg + 180.0) % 360.0) - 180.0))
+    return candidates
+
+
+def auto_grasp_quat(pos: dict, label: str, use_moveit2: bool = False) -> list:
     """라벨 힌트 -> 없으면 위치 기반 휴리스틱(y가 x보다 훨씬 크면 side)으로
     top-down 또는 side 쿼터니언을 결정한다."""
+    _side_fn = sim_side_quat_for if use_moveit2 else side_quat_for
     hint = LABEL_GRASP_HINT.get(label, None)
     if hint:
         entry = GRASP_DIR_MAP[hint]
         if entry == SIDE_TAG:
-            return side_quat_for(pos)
+            return _side_fn(pos)
         return entry
     x, y = pos.get('x', 0.0), pos.get('y', 0.0)
     if abs(y) > abs(x) * 1.5:
-        return side_quat_for(pos)
+        return _side_fn(pos)
     return QUAT_TOP_DOWN
 
 
 def resolve_grasp_quat(grasp_dir, pos: dict, label: str = '',
-                       side_approach_offset_deg: float = 0.0) -> tuple:
+                       side_approach_offset_deg: float = 0.0,
+                       use_moveit2: bool = False) -> tuple:
     """[신설] planning_node.py의 on_command 안에 pick/place/move 세 곳에
     거의 동일하게 반복돼 있던 "grasp_dir 문자열 -> (quat, is_side)" 해석
     로직을 하나로 통합한 것. 기존에는 이 세 곳이 서로 미묘하게 달랐다
     (move 분기만 기본값이 QUAT_HOME이고 pick/place는 None이었음 — 실질적
     동작 차이는 없었지만 유지보수 시 혼동 요인이었다). 이제 이 함수
-    하나만 보고 판단하면 된다.
+    하나만 보고 판단하면 된다. sim/real 축 정의 차이는 use_moveit2
+    플래그로 흡수한다.
 
     Args:
-        grasp_dir: 사용자가 명시한 자세 문자열('top', 'side', ...) 또는
-            None/'auto' (라벨/위치 기반 자동 판단에 위임)
+        grasp_dir: 자세 문자열('top', 'side', ...) 또는 None/'auto'
         pos: {'x', 'y', 'z'} 물체 또는 목표 위치
         label: 물체 라벨 (auto 판단 시에만 사용, 없으면 위치 휴리스틱만 적용)
         side_approach_offset_deg: side 그립 시 position_yaw 기준 접근 방향 오프셋 (도).
+        use_moveit2: True=시뮬(sim_side_quat_for), False=실물(side_quat_for)
 
     Returns:
         (quat: list[4], is_side: bool)
     """
+    _side_fn = sim_side_quat_for if use_moveit2 else side_quat_for
+    _pinch_fn = sim_pinch_quat_for if use_moveit2 else pinch_quat_for
     if grasp_dir and grasp_dir != 'auto':
         quat = GRASP_DIR_MAP.get(grasp_dir, QUAT_HOME)
         if quat == SIDE_TAG:
-            return side_quat_for(pos, side_approach_offset_deg), True
+            return _side_fn(pos, side_approach_offset_deg), True
+        if quat == PINCH_TAG:
+            return _pinch_fn(pos, side_approach_offset_deg), True
         return quat, False
-    quat = auto_grasp_quat(pos, label)
+    quat = auto_grasp_quat(pos, label, use_moveit2=use_moveit2)
     is_side = (
         LABEL_GRASP_HINT.get(label) in ('side', 'side_front')
         or (label not in LABEL_GRASP_HINT
             and abs(pos.get('y', 0.0)) > abs(pos.get('x', 0.0)) * 1.5)
     )
     return quat, is_side
+
+
+def candidate_quat_for(pos: dict, approach_vector, grasp_dir_hint: str = 'side',
+                       angle_deg: float = None, use_moveit2: bool = False,
+                       side_approach_offset_deg: float = None) -> tuple:
+    """[2026-08 추가] grasp_pose_generator.GraspCandidate의 approach_vector를
+    기존 TCP orientation 공식(quaternion)으로 변환한다.
+
+    [설계 원칙] 이 함수는 gripper local axis를 새로 추측하지 않는다 --
+    기존에 실측 검증된 side_quat_for/sim_side_quat_for/pinch_quat_for/
+    sim_pinch_quat_for/top_down_angle_quat/sim_top_down_angle_quat/
+    sim_box_aligned_quat 공식을 그대로 재사용하고, candidate의
+    approach_vector/각도는 그 공식들이 이미 받는 파라미터
+    (approach_offset_deg 또는 angle_deg)로 "번역"만 한다. 즉 이 함수는
+    resolve_grasp_quat()의 "candidate 버전"이지 새 자세 계산 로직이 아니다.
+
+    Args:
+        pos: {'x','y','z'} 목표 위치.
+        approach_vector: (x,y,z) 단위벡터 -- side/pinch일 때만 수평 방위각
+            추출에 쓰임(top이면 무시).
+        grasp_dir_hint: 'top' | 'side' | 'pinch'. GraspCandidate.grasp_dir_hint
+            그대로 전달받는다 -- 이 함수가 top/side/pinch를 스스로 판단하지
+            않는다(그 판단은 grasp_pose_generator.py 책임, VLM grasp_type
+            또는 approach_vector 수직성 휴리스틱 등).
+        angle_deg: top-down일 때 물체 edge 정렬각(도, base_link 절대각) --
+            보통 GeometryResult.major_axis_yaw_deg 또는 기존
+            angle_base_deg. None이면 0.0(자유 twist, 자세 최적화만).
+        side_approach_offset_deg: side/pinch일 때 이미 계산된 offset이
+            있으면 그대로 사용(재계산 방지). None이면 approach_vector에서
+            역산한다.
+
+    Returns:
+        (quat, is_side)
+    """
+    if grasp_dir_hint == 'top':
+        _angle = angle_deg if angle_deg is not None else 0.0
+        if use_moveit2:
+            return sim_box_aligned_quat(_angle), False
+        return top_down_angle_quat(pos['x'], pos['y'], _angle), False
+
+    if side_approach_offset_deg is None:
+        x, y = pos.get('x', 0.0), pos.get('y', 0.0)
+        position_yaw_deg = math.degrees(math.atan2(y, x))
+        approach_yaw_deg = math.degrees(math.atan2(approach_vector[1], approach_vector[0]))
+        side_approach_offset_deg = ((approach_yaw_deg - position_yaw_deg + 180.0) % 360.0) - 180.0
+
+    if grasp_dir_hint == 'pinch':
+        _fn = sim_pinch_quat_for if use_moveit2 else pinch_quat_for
+    else:
+        _fn = sim_side_quat_for if use_moveit2 else side_quat_for
+    return _fn(pos, approach_offset_deg=side_approach_offset_deg), True
 
 
 class YawCandidateSelector:

@@ -80,12 +80,11 @@ from .grasp_kinematics import (
     QUAT_HOME, QUAT_SIDE_FRONT, SIDE_TAG, GRASP_DIR_MAP, LABEL_GRASP_HINT,
     quat_angle_diff, top_down_angle_quat, sim_top_down_angle_quat,
     sim_box_aligned_quat,
-    side_quat_for, side_reachability_check, auto_grasp_quat,
+    side_quat_for, sim_side_quat_for, pinch_quat_for, sim_pinch_quat_for,
+    side_reachability_check, auto_grasp_quat,
     resolve_grasp_quat, YawCandidateSelector, SequenceRejected,
+    SIDE_BLIND_SWEEP_DEG, side_face_candidates_deg,
 )
-# [신설] stack_boxes의 pick 단계 경량 백트래킹 플래너 (ROS 비의존, 순수 함수).
-# 상세: task_planner.py 모듈 docstring 참고.
-from .task_planner import run_stack_plan, DEFAULT_MAX_BACKTRACK_ATTEMPTS
 # [신설] 폐루프(closed-loop) place 검증 -- 그리퍼를 열고 물러난 뒤 실제로
 # 목표 위치에 물체가 안착했는지 perception으로 재확인한다.
 # 상세: placement_verification.py 모듈 docstring 참고.
@@ -115,6 +114,16 @@ SIM_GRIPPER_CLOSE = [0.01]
 APPROACH_Z = 0.10
 DESCEND_Z  = 0.0
 LIFT_Z     = 0.10
+# [2026-08-26 추가] side 그립 approach standoff (미터, 접근방향 반대쪽으로
+# 후퇴한 거리). top이 APPROACH_Z만큼 위에서 내려오는 것과 동일한 목적 --
+# 이전엔 side가 approach에서 바로 최종 목표점(px,py)으로 이동해서, PTP
+# 구간의 곡선 경로 때문에 물체를 툭 치는 문제가 실측 확인됐다(2026-08-26).
+# 이제 approach는 이 standoff만큼 물러난 지점으로 가고, descend에서
+# 접근방향을 따라 LIN(직선)으로 최종 지점까지 들어간다.
+SIDE_APPROACH_STANDOFF_M = 0.10
+# [2026-08-26 추가] slide 액션(문고리/서랍 손잡이) 기본 후퇴 거리(미터) --
+# 손잡이를 쥔 채로 접근각 반대방향으로 이만큼 직선 이동한 뒤 놓는다.
+DEFAULT_SLIDE_DISTANCE_M = 0.08
 # [이관] SIDE_MIN_DIST, SIDE_PITCH_DEG, TOP_ANGLE_PITCH_DEG -> grasp_kinematics.py (import 참고)
 # [이관] top_down_angle_quat, sim_top_down_angle_quat ->
 # grasp_kinematics.top_down_angle_quat / sim_top_down_angle_quat
@@ -165,6 +174,13 @@ DEFAULT_SCAN_BASE_JOINTS = {
     'joint4': 1.8273, 'joint5': 0.0, 'joint6': 0.0, 'joint7': 1.3,
 }
 DEFAULT_SCAN_STEP_DEG = 60.0
+# [2026-08-26 추가, 사용자 요청 -- 방향(부호) 미검증] 스캔 스윕의 매 스텝마다
+# joint7을 이만큼 추가로 틀어서("고개를 든다") 더 먼 영역까지 스캔되도록
+# 하기 위한 값. camera_stand_link가 gripper_flange(= joint7 하류)에 고정
+# 마운트돼 있어 joint7을 돌리면 카메라 시야각이 바뀐다(Isaac Sim USD 트리
+# 확인). 부호(+/-)가 실제로 "고개를 드는" 방향인지는 아직 실측 검증
+# 안 됨 -- 첫 스캔 후 결과를 보고 반대 부호가 맞으면 뒤집을 것.
+SCAN_JOINT7_TILT_DELTA = -0.15
 SCAN_STEP_SETTLE_SEC = 2.0
 SCAN_DEDUP_DIST_M = 0.05
 # [이관] QUAT_TOP_DOWN 계열, GRASP_DIR_MAP, SIDE_TAG, LABEL_GRASP_HINT,
@@ -337,7 +353,16 @@ class PlanningNode(Node):
                     _scan_match = _label_matches[0] if _label_matches else None
                 if _scan_match is not None:
                     pos = {'x': _scan_match['x'], 'y': _scan_match['y'], 'z': _scan_match['z']}
-                    angle_deg = _scan_match.get('angle_base_deg') or 0.0
+                    # [2026-08 수정] 기존엔 `or 0.0`으로 None(각도 인식 실패/
+                    # 원형 물체)을 실측 0.0도와 구분 못 하게 뭉갰다 --
+                    # side/pinch의 면-정렬 후보 탐색(side_face_candidates_deg)이
+                    # 이 None 여부로 "물체 각도를 아는지"를 판단하므로, 여기서
+                    # 뭉개면 from_scan 경로에서만 그 판단이 항상 무력화된다.
+                    # _find_object_with_angle(비-scan 경로)은 원래도 None을
+                    # 그대로 보존하고 있었음 -- 여기도 동일하게 맞춘다.
+                    # top-down 쪽 numeric 사용처는 이미 None-safe(아래 align
+                    # 재조회 폴백, _approach_angle_cands 계산부 참고).
+                    angle_deg = _scan_match.get('angle_base_deg')
                     skip_reacquire = False
                     self.get_logger().info(
                         f'[from_scan] 저장된 좌표 사용 -> pos={pos} angle_deg={angle_deg} '
@@ -358,22 +383,115 @@ class PlanningNode(Node):
                     self.busy = False
                 return
             grasp_dir = cmd.get('grasp_dir', None)
-            # side 접근각도: VLM이 넘긴 절대 world 각도를 position_yaw 기준 offset으로 역산
-            _side_approach_deg = cmd.get('side_approach_deg')
-            if _side_approach_deg is not None:
-                _position_yaw_deg = math.degrees(math.atan2(pos['y'], pos['x']))
-                _side_approach_offset_deg = _side_approach_deg - _position_yaw_deg
+            # [2026-08-26 수정] side_approach_deg의 기준을 world 절대각에서
+            # 물체 방위각(position_yaw) 기준 상대각(+-)으로 바꿈 -- top-down의
+            # angle_rel과 동일한 개념. 0(기본)이면 물체 정면(자연스러운 방향)
+            # 에서 접근, +/-로 그 방위각 대비 회전한 방향에서 접근한다.
+            # (이전엔 world 절대각을 받아 position_yaw를 빼서 상대각으로
+            # 역산했는데, 절대각 기준이라 물체 위치가 바뀔 때마다 "정면"에
+            # 해당하는 값을 사용자가 매번 다시 계산해야 했다.)
+            _side_approach_offset_deg = cmd.get('side_approach_deg') or 0.0
+            # [2026-08 추가, 프로토타입] grasp_pose_generator.py가 만든 후보를
+            # 그대로 실행하고 싶은 호출부를 위한 옵션 경로. payload에
+            # {'grasp_candidate': {'quaternion':[x,y,z,w], 'is_side':bool, ...}}
+            # 가 있으면 resolve_grasp_quat() 계산을 건너뛰고 그 quat/is_side를
+            # 그대로 쓴다 -- _do_pick 이후의 approach/descend/lift 시퀀스는
+            # 전혀 안 바뀌므로(quat/is_side는 원래도 이 시퀀스에 전달되는
+            # 파라미터일 뿐) 회귀 위험이 없다. 필드가 없으면(기존 모든
+            # 호출부) 100% 기존 동작과 동일 -- 이 분기 자체가 새 로직을
+            # 추가한 게 아니라 quat/is_side를 "어디서 계산했는지"만 바뀐다.
+            _grasp_candidate = cmd.get('grasp_candidate')
+            if (isinstance(_grasp_candidate, dict)
+                    and isinstance(_grasp_candidate.get('quaternion'), list)
+                    and len(_grasp_candidate['quaternion']) == 4):
+                quat = [float(v) for v in _grasp_candidate['quaternion']]
+                is_side = bool(_grasp_candidate.get('is_side', False))
+                self.get_logger().info(
+                    f'[grasp_candidate] 외부 제공 후보 사용 -- '
+                    f'source={_grasp_candidate.get("source", "?")} '
+                    f'total_score={_grasp_candidate.get("total_score", "?")}')
             else:
-                _side_approach_offset_deg = 0.0
-            # [단순화] GRASP_DIR_MAP 조회 + SIDE_TAG 체크 + 라벨/위치 휴리스틱을
-            # grasp_kinematics.resolve_grasp_quat() 하나로 통합 (동작 동일).
-            quat, is_side = resolve_grasp_quat(grasp_dir, pos, label,
-                                               side_approach_offset_deg=_side_approach_offset_deg)
+                # [단순화] GRASP_DIR_MAP 조회 + SIDE_TAG 체크 + 라벨/위치
+                # 휴리스틱을 grasp_kinematics.resolve_grasp_quat() 하나로
+                # 통합 (동작 동일, 기존 경로).
+                quat, is_side = resolve_grasp_quat(grasp_dir, pos, label,
+                                                   side_approach_offset_deg=_side_approach_offset_deg,
+                                                   use_moveit2=self.use_moveit2)
             self.get_logger().info(
                 f'PICK 시작: {label} @ {pos} | 자세: {grasp_dir or "auto"} '
                 f'({"side" if is_side else "top"}) {[round(v,3) for v in quat]} | '
                 f'박스각도={angle_deg}')
-            t = threading.Thread(target=self._pick_sequence, args=(pos, quat, is_side, label, skip_reacquire, angle_deg))
+            t = threading.Thread(target=self._pick_sequence,
+                                  args=(pos, quat, is_side, label, skip_reacquire, angle_deg),
+                                  kwargs={'side_approach_offset_deg': _side_approach_offset_deg,
+                                          'is_pinch': grasp_dir == 'pinch'})
+            t.daemon = False
+            t.start()
+        elif action == 'slide':
+            # [2026-08-26 추가] 문고리/서랍 손잡이 등 -- 잡아서 들어올리는
+            # pick이 아니라, 잡은 채로 접근방향 반대로 당겨서 여는 동작.
+            # side/pinch가 이미 공유하는 접근 시퀀스(TCP오프셋/standoff/
+            # 각도후보탐색/사전회전없음)를 그대로 재사용하고 마지막
+            # 단계(lift)만 slide(직선 후퇴+release)로 바꾼다. top-down은
+            # 이 시퀀스 자체에 안 걸리므로 자연스럽게 미지원.
+            label = cmd.get('target_label', '')
+            use_from_scan = cmd.get('from_scan', False)
+            override_pos = cmd.get('override_pos')
+            # [2026-08 추가] 손잡이 각도(angle_base_deg) -- pick과 동일하게
+            # side/pinch 접근각 후보를 물체(손잡이) 면-법선 방향으로 한정하는
+            # 데 쓴다. 기존엔 여기서 버려져서 slide가 pick과 동일한 "아무
+            # 각도로나 접근" 버그를 그대로 갖고 있었다.
+            angle_deg = None
+            if override_pos is not None:
+                pos = override_pos
+                self.get_logger().info(f'[slide][override] pos={pos}')
+            elif use_from_scan:
+                box_index = cmd.get('box_index')
+                _label_matches = [b for b in self._scanned_boxes if b.get('label') == label]
+                if box_index is not None and 0 <= box_index < len(_label_matches):
+                    _scan_match = _label_matches[box_index]
+                else:
+                    _scan_match = _label_matches[0] if _label_matches else None
+                if _scan_match is not None:
+                    pos = {'x': _scan_match['x'], 'y': _scan_match['y'], 'z': _scan_match['z']}
+                    angle_deg = _scan_match.get('angle_base_deg')
+                    try:
+                        self._scanned_boxes.remove(_scan_match)
+                    except ValueError:
+                        pass
+                else:
+                    pos = None
+                    self.get_logger().warn(f"[slide][from_scan] 저장된 '{label}' 없음.")
+            else:
+                pos, angle_deg = self._find_object_with_angle(label)
+            if pos is None:
+                self.get_logger().warn(f"[slide] '{label}' 못 찾음.")
+                with self.lock:
+                    self.busy = False
+                return
+            grasp_dir = cmd.get('grasp_dir', None)
+            if grasp_dir not in ('side', 'pinch'):
+                self.get_logger().warn(
+                    f"[slide] grasp_dir='{grasp_dir}' 미지원 -- 'side' 또는 'pinch'만 가능"
+                    f"(top-down은 slide 대상이 아님).")
+                with self.lock:
+                    self.busy = False
+                self._publish_result('rejected', "slide는 grasp_dir='side'|'pinch'만 지원합니다.")
+                return
+            _side_approach_offset_deg = cmd.get('side_approach_deg') or 0.0
+            slide_distance_m = cmd.get('slide_distance_m') or DEFAULT_SLIDE_DISTANCE_M
+            quat, is_side = resolve_grasp_quat(grasp_dir, pos, label,
+                                               side_approach_offset_deg=_side_approach_offset_deg,
+                                               use_moveit2=self.use_moveit2)
+            self.get_logger().info(
+                f'SLIDE 시작: {label} @ {pos} | grasp_dir={grasp_dir} | '
+                f'slide_distance={slide_distance_m}m')
+            t = threading.Thread(target=self._slide_sequence,
+                                  args=(pos, quat, label),
+                                  kwargs={'side_approach_offset_deg': _side_approach_offset_deg,
+                                          'is_pinch': grasp_dir == 'pinch',
+                                          'slide_distance_m': slide_distance_m,
+                                          'angle_deg': angle_deg})
             t.daemon = False
             t.start()
         elif action == 'place':
@@ -396,6 +514,11 @@ class PlanningNode(Node):
                     self.busy = False
                 return
             grasp_dir = cmd.get('grasp_dir', None)
+            # [2026-08-26 추가] pick과 동일 -- side_approach_deg는 물체
+            # 방위각(position_yaw) 기준 상대각(top-down의 angle_rel과 동일
+            # 개념). place에도 이제 side/pinch 접근각 후보 탐색이 있어서
+            # 필요해짐 (_try_place_at 참고).
+            _place_side_approach_offset_deg = cmd.get('side_approach_deg') or 0.0
             # [단순화] place는 grasp_dir 미지정 시 pick과 달리 라벨 휴리스틱이
             # 아니라 "스캔된 박스 각도(top-down)"가 기본값이라, 이 분기만은
             # resolve_grasp_quat의 auto 경로를 그대로 쓸 수 없다 (의도된
@@ -403,7 +526,10 @@ class PlanningNode(Node):
             # 없이는 top-down 유지가 기본 안전값). explicit 지정 시에만
             # resolve_grasp_quat로 통합.
             if grasp_dir:
-                quat, is_side = resolve_grasp_quat(grasp_dir, pos, label='')
+                quat, is_side = resolve_grasp_quat(
+                    grasp_dir, pos, label='',
+                    side_approach_offset_deg=_place_side_approach_offset_deg,
+                    use_moveit2=self.use_moveit2)
             else:
                 is_side = False
                 angle_deg = self._box_angle_deg if self._box_angle_deg is not None else 0.0
@@ -412,7 +538,10 @@ class PlanningNode(Node):
                 f'PLACE 시작 @ {pos} | 자세: {"side" if is_side else "top"} '
                 f'{[round(v,3) for v in quat]}')
             threading.Thread(
-                target=self._place_sequence, args=(pos, quat, is_side), daemon=True).start()
+                target=self._place_sequence, args=(pos, quat, is_side),
+                kwargs={'side_approach_offset_deg': _place_side_approach_offset_deg,
+                        'is_pinch': grasp_dir == 'pinch'},
+                daemon=True).start()
         elif action == 'move':
             pos = cmd.get('target_pos')
             if pos is None:
@@ -420,23 +549,51 @@ class PlanningNode(Node):
                 with self.lock:
                     self.busy = False
                 return
-            grasp_dir = cmd.get('grasp_dir', None)
-            # [단순화] move도 place와 동일 이유로 auto 기본값은 top-down 유지.
-            # (원본 버그 후보였던 기본값 불일치 — move만 QUAT_HOME을 fallback으로
-            # 썼던 것 — 는 resolve_grasp_quat 도입으로 place와 동일하게 통일됨.
-            # 실질 동작은 원래도 is_side=False 분기에서 top_down으로 덮어써져
-            # 차이가 없었으므로 회귀 아님.)
-            if grasp_dir:
-                quat, is_side = resolve_grasp_quat(grasp_dir, pos, label='')
+            quat_override = cmd.get('quat_override')
+            if quat_override is not None:
+                # [2026-08-26 추가] side 그립 등 RPY 후보를 grasp_dir 경유 없이
+                # 직접 실험하기 위한 우회 경로 -- move_to_position(quat_override=)
+                # 전용. resolve_grasp_quat/_box_aligned_quat_for를 전부 건너뛴다.
+                quat = list(quat_override)
+                self.get_logger().info(f'MOVE 시작 @ {pos} | 자세(override): {quat}')
+                threading.Thread(
+                    target=self._move_sequence, args=(pos, quat), daemon=True).start()
             else:
-                is_side = False
-                quat = None
-            if not is_side:
-                angle_deg = self._box_angle_deg if self._box_angle_deg is not None else 0.0
-                quat = self._box_aligned_quat_for(pos, angle_deg)
-            self.get_logger().info(f'MOVE 시작 @ {pos} | 자세: {quat}')
-            threading.Thread(
-                target=self._move_sequence, args=(pos, quat), daemon=True).start()
+                grasp_dir = cmd.get('grasp_dir', None)
+                # [2026-08-26 수정] pick과 동일 -- side_approach_deg는 이제
+                # 물체 방위각(position_yaw) 기준 상대각(top-down의 angle_rel과
+                # 동일 개념). world 절대각 역산 로직 제거.
+                _side_approach_offset_deg = cmd.get('side_approach_deg') or 0.0
+                # [단순화] move도 place와 동일 이유로 auto 기본값은 top-down 유지.
+                # (원본 버그 후보였던 기본값 불일치 — move만 QUAT_HOME을 fallback으로
+                # 썼던 것 — 는 resolve_grasp_quat 도입으로 place와 동일하게 통일됨.
+                # 실질 동작은 원래도 is_side=False 분기에서 top_down으로 덮어써져
+                # 차이가 없었으므로 회귀 아님.)
+                if grasp_dir:
+                    quat, is_side = resolve_grasp_quat(
+                        grasp_dir, pos, label='',
+                        side_approach_offset_deg=_side_approach_offset_deg,
+                        use_moveit2=self.use_moveit2)
+                else:
+                    is_side = False
+                    quat = None
+                if not is_side:
+                    angle_deg = self._box_angle_deg if self._box_angle_deg is not None else 0.0
+                    quat = self._box_aligned_quat_for(pos, angle_deg)
+                elif cmd.get('apply_side_tcp_offset'):
+                    # [2026-08-26 추가] pick_object의 _do_pick과 동일한 오프셋
+                    # 계산(접근각 기준, position_yaw 고정 아님)을 미리보기에도
+                    # 적용 -- 그리퍼를 안 닫고도 실제 pick 최종 도달 지점을
+                    # 확인하고 싶을 때 씀 (move_to_position apply_side_tcp_offset=True).
+                    dx, dy = pos['x'], pos['y']
+                    approach_yaw = math.atan2(dy, dx) + math.radians(_side_approach_offset_deg)
+                    pos = dict(pos)
+                    pos['x'] = dx - math.cos(approach_yaw) * SIDE_TCP_OFFSET
+                    pos['y'] = dy - math.sin(approach_yaw) * SIDE_TCP_OFFSET
+                self.get_logger().info(f'MOVE 시작 @ {pos} | 자세: {quat}')
+                threading.Thread(
+                    target=self._move_sequence, args=(pos, quat),
+                    kwargs={'is_side': is_side}, daemon=True).start()
         elif action == 'move_joints':
             joints = cmd.get('joints', {})
             if not joints:
@@ -461,51 +618,6 @@ class PlanningNode(Node):
         elif action == 'home':
             self.get_logger().info('HOME 시작')
             threading.Thread(target=self._home_sequence, daemon=True).start()
-        elif action == 'stack':
-            target_label = cmd.get('target_label', 'box').strip().lower()
-            box_indices = cmd.get('box_indices', [])
-            base_pos = cmd.get('base_pos')
-            box_height_m = cmd.get('box_height_m', 0.05)
-            grasp_dir = cmd.get('grasp_dir', None)
-            allow_reorder = cmd.get('allow_reorder', False)
-            if not box_indices or base_pos is None:
-                self.get_logger().warn("'stack' 명령에 box_indices 또는 base_pos 없음.")
-                with self.lock:
-                    self.busy = False
-                return
-            _label_matches = [b for b in self._scanned_boxes if b.get('label') == target_label]
-            box_refs, invalid = [], []
-            for idx in box_indices:
-                if isinstance(idx, int) and 0 <= idx < len(_label_matches):
-                    box_refs.append(_label_matches[idx])
-                else:
-                    invalid.append(idx)
-            if invalid or not box_refs:
-                reason = (f"잘못된 box_indices: {invalid} "
-                           f"(라벨 '{target_label}' 매칭 {len(_label_matches)}개)")
-                self.get_logger().warn(f'[stack] {reason}')
-                self._publish_result('rejected', reason)
-                with self.lock:
-                    self.busy = False
-                return
-            # [신설] allow_reorder=True일 때만 fallback pool을 채운다 --
-            # _label_matches는 원래 box_refs를 좁힌 뒤 버려지던 변수였으나,
-            # 여기서는 "지정되지 않은 나머지 같은 라벨 박스" 후보군으로
-            # 재활용한다 (task_planner.run_stack_plan의 pick 백트래킹용).
-            fallback_pool = (
-                [b for b in _label_matches if b not in box_refs]
-                if allow_reorder else []
-            )
-            self.get_logger().info(
-                f'STACK 시작: label={target_label} box_indices={box_indices} '
-                f'base={base_pos} height={box_height_m} allow_reorder={allow_reorder} '
-                f'fallback_pool={len(fallback_pool)}개')
-            t = threading.Thread(
-                target=self._stack_sequence,
-                args=(target_label, box_refs, base_pos, box_height_m, grasp_dir,
-                      fallback_pool, allow_reorder))
-            t.daemon = False
-            t.start()
         else:
             self.get_logger().warn(f"알 수 없는 action: '{action}'")
             with self.lock:
@@ -635,18 +747,64 @@ class PlanningNode(Node):
         직접 넘기는 경로에서 사용."""
         return self._box_aligned_quat_for(pos, angle_deg_abs)
     # ── 시퀀스 ────────────────────────────────────────────────────────────────
-    def _do_pick(self, pos, quat, is_side=False, label='', skip_reacquire=False, angle_deg=0.0):
+    def _do_pick(self, pos, quat, is_side=False, label='', skip_reacquire=False, angle_deg=0.0,
+                 side_approach_offset_deg=0.0, is_pinch=False):
+        # [2026-08 추가] side/pinch 그립의 면-정렬 신뢰도를 결과에 실어보내기
+        # 위한 진단값. top-down이면 계속 None(해당 없음). is_side면 아래에서
+        # 'unknown'(각도 모름, 원형 물체이거나 인식 실패 -- 기존 동작과 동일)
+        # / 'face_aligned'(물체 면-법선 후보로 성공) / 'blind_fallback'(면
+        # 후보 전부 실패해서 각도 무관 블라인드 스윕으로 폴백, 그립 불안정
+        # 가능성 있음) 중 하나로 채워진다.
+        side_grasp_alignment = None
         if is_side:
             ok, reason = side_reachability_check(pos)
             if not ok:
                 self.get_logger().warn(f'PICK 거부: {reason}')
                 raise SequenceRejected(reason)
         if is_side:
+            # [2026-08-26 수정] 오프셋 방향을 position_yaw(베이스→물체 반경
+            # 방향) 고정이 아니라, 실제 그리퍼 접근 방향
+            # (position_yaw + side_approach_offset_deg, sim_side_quat_for의
+            # yaw 계산과 동일 기준)으로 바꿈.
+            # [2026-08-26 추가] 접근각에 따라 IK 해 유무가 크게 갈리는 것이
+            # 실측 확인됨 -- 요청받은 각도를 최우선 후보로 하고, 그 주변을
+            # 스윕한 대체 후보들을 순서대로 시도해서 처음 IK가 풀리는
+            # 각도를 채택한다 (아래 "1/6: 접근" 루프 참고). 여기서는 후보
+            # 목록만 만들고, 실제 px/py/standoff/quat 확정은 그 루프에서 함.
             dx, dy = pos['x'], pos['y']
-            dist = math.sqrt(dx*dx + dy*dy) or 1.0
-            px = dx - (dx / dist) * SIDE_TCP_OFFSET
-            py = dy - (dy / dist) * SIDE_TCP_OFFSET
-            offset_desc = f'side(TCP오프셋 {SIDE_TCP_OFFSET}m 적용)'
+            position_yaw = math.atan2(dy, dx)
+            # [2026-08 수정] 사각/각진 물체(책, 각진 물병 등)는 접근각이
+            # 아무거나 되는 게 아니라 물체의 면-법선 방향이어야 두 손끝이
+            # 평행면에 밀착한다 -- perception이 준 angle_base_deg(물체
+            # 실측 각도)가 있으면 그 방향 4후보로 먼저 한정해서 시도하고,
+            # 전부 IK 실패할 때만 기존 블라인드 스윕으로 폴백한다(never
+            # 완전히 새 실패를 만들지 않도록, 대신 폴백 시 로그로 경고).
+            # angle_base_deg=None(원형 물체이거나 인식 실패)이면 기존과
+            # 동일하게 처음부터 블라인드 스윕만 쓴다.
+            # 상세: grasp_kinematics.side_face_candidates_deg docstring 참고.
+            _face_offset_candidates = side_face_candidates_deg(
+                math.degrees(position_yaw), angle_deg, side_approach_offset_deg)
+            _num_face_candidates = len(_face_offset_candidates)
+            if _face_offset_candidates:
+                _side_offset_candidates = list(_face_offset_candidates)
+            else:
+                _side_offset_candidates = [side_approach_offset_deg]
+            for _d in SIDE_BLIND_SWEEP_DEG:
+                _cand = side_approach_offset_deg + _d
+                if _cand not in _side_offset_candidates:
+                    _side_offset_candidates.append(_cand)
+            # [2026-08-26 추가] pinch는 side와 접근 시퀀스는 동일하지만
+            # 자세 공식(pitch)이 달라서 후보 재계산에 쓸 quat 함수도
+            # pinch 전용으로 골라야 한다 -- 안 그러면 pinch로 요청했는데
+            # candidate loop가 side 공식으로 재계산해버리는 버그가 생김.
+            if is_pinch:
+                _side_quat_fn = sim_pinch_quat_for if self.use_moveit2 else pinch_quat_for
+                _grip_name = 'pinch'
+            else:
+                _side_quat_fn = sim_side_quat_for if self.use_moveit2 else side_quat_for
+                _grip_name = 'side'
+            approach_yaw = position_yaw + math.radians(side_approach_offset_deg)
+            offset_desc = f'{_grip_name}(TCP오프셋 {SIDE_TCP_OFFSET}m 적용, 접근각 후보 {len(_side_offset_candidates)}개 탐색)'
         else:
             px = pos['x']
             py = pos['y']
@@ -661,6 +819,17 @@ class PlanningNode(Node):
             descend_z  = pz + DESCEND_Z + TOP_TCP_OFFSET
             descend_z  = max(descend_z, DESCEND_MIN_FLANGE_Z)
             lift_z     = pz + LIFT_Z + TOP_TCP_OFFSET
+        # [2026-08-26 추가] 그리퍼를 approach 이동 전에 미리 연다. 기존엔
+        # approach 완료 후(구 "2/6: 그리퍼 열기")에 열었는데, 직전 pick에서
+        # 이미 뭔가 쥔 채로 새 pick을 시작하면 닫힌 그리퍼가 approach 경로
+        # 내내 그 상태로 새 목표 쪽으로 이동해서 물체를 밀어내는 문제가
+        # 실측 확인됐다(2026-08-26). 이동 시작 전에 열어서 근본적으로
+        # 막는다 -- 어차피 기존 코드도 이전에 쥐고 있던 물체를 무조건
+        # 놓는 동작이었으므로(선행 조건 확인 없음), 순서만 앞당긴 것이지
+        # 새로운 부작용은 없다.
+        self.get_logger().info('0/6: 그리퍼 열기 (접근 전)')
+        self._gripper(SIM_GRIPPER_OPEN, GRIPPER_OPEN)
+        time.sleep(GRIPPER_DELAY)
         # [2026-08-17] 한 번 완전 삭제했다가 복원함. 삭제 근거였던 "잘못된
         # IK branch 선택"은 그립각도 공식 수정(position_yaw 반영+180도
         # axis-flip 보정, docs/wiki/grasp_kinematics_ik.md 참고)으로
@@ -670,64 +839,74 @@ class PlanningNode(Node):
         # 동시에 풀어야 해서 IK/모션플래너 부담이 커져 초반 approach가
         # 불안정해짐(사용자 실측 확인, yaw 공식 수정 이후에도 재현). 이
         # 두 번째 역할은 yaw 공식과 무관하므로 pre-rotate를 복원한다.
-        # [2026-07 추가, 원본] approach 진입 전 joint1만 먼저 물체 방향으로
-        # 회전. 스캔이 끝난 자세(예: joint1=145°)에서 바로 approach를
-        # 시도하면, 물체 방향까지의 큰 차이를 approach의 나머지
-        # 조인트(top-down 자세 유지)와 동시에 풀어야 해서 IK가 훨씬
-        # 어려워지는 것이 실측+로그 분석으로 확인됨. joint1만 먼저
-        # 물체 쪽으로 돌려 "쉬운 시작 상태"를 만든다.
-        # BEARING_OFFSET_DEG: joint1 명령각과 실측 물체 방향(atan2)
-        # 사이 오프셋. 스캔 실측 2개 지점(-155°→46°, 145°→-39°)의
-        # 평균 약 188°(범위 176~201°)로 확인됨. 카메라가 팔 끝에
-        # top-down으로 장착되어 "정면"의 의미가 base 기준과 반대에
-        # 가깝게 어긋나는 것으로 추정 — 완벽한 정렬이 목적이 아니라
-        # IK 부담을 줄이는 사전 회전이므로 이 정도 오차는 허용.
-        target_bearing = math.atan2(pos['y'], pos['x']) - math.radians(BEARING_OFFSET_DEG)
-        target_bearing = math.atan2(math.sin(target_bearing), math.cos(target_bearing))
-        js = self.latest_joint_state_sim
-        if js is not None:
-            joint_names = ['joint1','joint2','joint3','joint4','joint5','joint6','joint7']
-            current = dict(zip(js.name, js.position))
-            pre_target = [current.get(jn, 0.0) for jn in joint_names]
-            pre_target[0] = target_bearing
-            # home(all-zero)에서 joint1만 돌리면 특이점(SINGULARITY_POINT) 발생.
-            # 팔이 거의 뻗은 상태(joint2≈0, joint4≈0)이면 전형적 작업 자세로
-            # 미리 구부려 특이점을 회피한다.
-            if abs(pre_target[1]) < 0.15 and abs(pre_target[3]) < 0.15:
-                pre_target[1] = 0.6   # ~34°
-                pre_target[3] = 1.0   # ~57°
-            self.get_logger().info(
-                f'[pre-rotate] joint1을 물체 방향 근처'
-                f'({math.degrees(target_bearing):.1f}\xb0)로 사전 회전...')
-            if self.use_moveit2:
-                self.moveit2.force_reset_executing_state()
-                self.moveit2.max_velocity = 0.15
-                self.moveit2.max_acceleration = 0.3
-                self.moveit2.pipeline_id = ''
-                self.moveit2.planner_id = ''
-                self.moveit2.move_to_configuration(pre_target)
-                time.sleep(0.5)
-                deadline = time.time() + MOVE_TIMEOUT
-                while time.time() < deadline:
-                    if (not self.moveit2._MoveIt2__is_motion_requested and
-                            not self.moveit2._MoveIt2__is_executing):
-                        break
-                    time.sleep(0.1)
-                # [2026-08 수정, 코드리뷰 발견] 이전엔 motion_suceeded를
-                # 확인 안 하고 무조건 approach로 넘어갔음 -- pre-rotate가
-                # 조용히 실패해도 원인 불명의 "approach가 왜 이렇게 크게
-                # 도나"로만 보였음. 하드게이트(중단)는 걸지 않음 --
-                # pre-rotate는 순수 최적화라 실패해도 approach 자체의
-                # 재시도/OMPL 폴백이 이어받을 수 있음(handoff 6절 원칙).
-                if not self.moveit2.motion_suceeded:
-                    self.get_logger().warn(
-                        '[pre-rotate] 이동 실패/중단 (motion_suceeded=False) -- '
-                        '사전회전 안 된 자세에서 approach 시작함. '
-                        'approach 자체의 재시도/OMPL 폴백에 맡기고 계속 진행.')
+        # [2026-08-26 수정, 사용자 요청] side/pinch(is_side=True)는 joint1
+        # 사전회전을 완전히 건너뛴다. 아래 pre-rotate는 top-down 전용
+        # 최적화로 남긴다 -- side/pinch는 standoff+접근각 후보 탐색
+        # (아래 "1/6: 접근" 루프)이 이미 자체적으로 여러 각도를 시도하므로
+        # 사전회전의 원래 목적(단일 top-down IK 부담 경감)과 안 맞고,
+        # bearing 계산이 side_approach_deg/후보각을 전혀 모르는 채
+        # 원 위치 기준으로만 도는 게 오히려 불필요한 왕복이 될 수 있다.
+        if not is_side:
+            # [2026-07 추가, 원본] approach 진입 전 joint1만 먼저 물체 방향으로
+            # 회전. 스캔이 끝난 자세(예: joint1=145°)에서 바로 approach를
+            # 시도하면, 물체 방향까지의 큰 차이를 approach의 나머지
+            # 조인트(top-down 자세 유지)와 동시에 풀어야 해서 IK가 훨씬
+            # 어려워지는 것이 실측+로그 분석으로 확인됨. joint1만 먼저
+            # 물체 쪽으로 돌려 "쉬운 시작 상태"를 만든다.
+            # BEARING_OFFSET_DEG: joint1 명령각과 실측 물체 방향(atan2)
+            # 사이 오프셋. 스캔 실측 2개 지점(-155°→46°, 145°→-39°)의
+            # 평균 약 188°(범위 176~201°)로 확인됨. 카메라가 팔 끝에
+            # top-down으로 장착되어 "정면"의 의미가 base 기준과 반대에
+            # 가깝게 어긋나는 것으로 추정 — 완벽한 정렬이 목적이 아니라
+            # IK 부담을 줄이는 사전 회전이므로 이 정도 오차는 허용.
+            target_bearing = math.atan2(pos['y'], pos['x']) - math.radians(BEARING_OFFSET_DEG)
+            target_bearing = math.atan2(math.sin(target_bearing), math.cos(target_bearing))
+            js = self.latest_joint_state_sim
+            if js is not None:
+                joint_names = ['joint1','joint2','joint3','joint4','joint5','joint6','joint7']
+                current = dict(zip(js.name, js.position))
+                pre_target = [current.get(jn, 0.0) for jn in joint_names]
+                pre_target[0] = target_bearing
+                # home(all-zero)에서 joint1만 돌리면 특이점(SINGULARITY_POINT) 발생.
+                # 팔이 거의 뻗은 상태(joint2≈0, joint4≈0)이면 전형적 작업 자세로
+                # 미리 구부려 특이점을 회피한다.
+                if abs(pre_target[1]) < 0.15 and abs(pre_target[3]) < 0.15:
+                    pre_target[1] = 0.6   # ~34°
+                    pre_target[3] = 1.0   # ~57°
+                self.get_logger().info(
+                    f'[pre-rotate] joint1을 물체 방향 근처'
+                    f'({math.degrees(target_bearing):.1f}\xb0)로 사전 회전...')
+                if self.use_moveit2:
+                    self.moveit2.force_reset_executing_state()
+                    self.moveit2.max_velocity = 0.15
+                    self.moveit2.max_acceleration = 0.3
+                    self.moveit2.pipeline_id = ''
+                    self.moveit2.planner_id = ''
+                    self.moveit2.move_to_configuration(pre_target)
+                    time.sleep(0.5)
+                    deadline = time.time() + MOVE_TIMEOUT
+                    while time.time() < deadline:
+                        if (not self.moveit2._MoveIt2__is_motion_requested and
+                                not self.moveit2._MoveIt2__is_executing):
+                            break
+                        time.sleep(0.1)
+                    # [2026-08 수정, 코드리뷰 발견] 이전엔 motion_suceeded를
+                    # 확인 안 하고 무조건 approach로 넘어갔음 -- pre-rotate가
+                    # 조용히 실패해도 원인 불명의 "approach가 왜 이렇게 크게
+                    # 도나"로만 보였음. 하드게이트(중단)는 걸지 않음 --
+                    # pre-rotate는 순수 최적화라 실패해도 approach 자체의
+                    # 재시도/OMPL 폴백이 이어받을 수 있음(handoff 6절 원칙).
+                    if not self.moveit2.motion_suceeded:
+                        self.get_logger().warn(
+                            '[pre-rotate] 이동 실패/중단 (motion_suceeded=False) -- '
+                            '사전회전 안 된 자세에서 approach 시작함. '
+                            'approach 자체의 재시도/OMPL 폴백에 맡기고 계속 진행.')
+                else:
+                    self._move_joints_real_wait(pre_target)
             else:
-                self._move_joints_real_wait(pre_target)
+                self.get_logger().warn('[pre-rotate] latest_joint_state_sim=None, 사전 회전 스킵')
         else:
-            self.get_logger().warn('[pre-rotate] latest_joint_state_sim=None, 사전 회전 스킵')
+            self.get_logger().info('[pre-rotate] side/pinch 그립 -- 사전회전 스킵(설계상)')
         self.get_logger().info(
             f'1/6: 접근 (approach) | {offset_desc}')
         # [2026-07 수정] yaw tolerance=3.14(완전 자유)가 너무 넓어서, IK가
@@ -754,7 +933,12 @@ class PlanningNode(Node):
                 # 정렬할 필요가 없어 중복 move를 줄인다(아래
                 # _align_quat_override). _box_aligned_quat_for 내부에서
                 # position_yaw 기준 상대각으로 변환됨.
-                _approach_angle_cands = [angle_deg % 180.0, (angle_deg + 90.0) % 180.0]
+                # [2026-08 수정] angle_deg가 None일 수 있음(아래 side_face_
+                # candidates_deg 도입으로 from_scan 경로가 더 이상 None을
+                # 0.0으로 뭉개지 않게 됨) -- top-down은 각도 불명이면 0.0
+                # (축정렬) 취급이 기존과 동일하게 안전한 기본값.
+                _angle_deg_num = angle_deg if angle_deg is not None else 0.0
+                _approach_angle_cands = [_angle_deg_num % 180.0, (_angle_deg_num + 90.0) % 180.0]
                 ok = False
                 quat = None
                 _approach_angle_deg = 0.0
@@ -785,12 +969,69 @@ class PlanningNode(Node):
                 # approach가 angle=90°로 성공한 위치에서 align이 FAIL한다.
                 _align_quat_override = quat if ok else None
         else:
-            ok = self._move(px, py, approach_z, quat, tol_ori=TOL_ORI_LOOSE, planner_chain=['PTP', 'LIN'])
+            # [2026-08-26 추가] 접근각 후보 탐색 -- 요청 각도부터 순서대로
+            # 시도, 첫 성공(standoff 지점 IK 존재)한 각도를 채택한다.
+            # _move는 실패 시 IK 사전조회 단계에서 조기 종료하므로(fail-fast)
+            # 여러 후보를 시도해도 비용이 크지 않다.
+            # [2026-08 수정] _num_face_candidates > 0이면 앞쪽 후보들은
+            # "면-법선 정렬" 후보(물체가 각진 경우 그립 안정성 보장), 뒤쪽은
+            # 기존 블라인드 스윕 폴백 -- 어느 쪽에서 성공했는지 로그로 구분한다.
+            if _num_face_candidates:
+                self.get_logger().info(
+                    f'  [{_grip_name} approach] 물체 각도 인식됨(angle_base_deg='
+                    f'{angle_deg:.1f}°) -- 면 정렬 후보 {_num_face_candidates}개 우선 시도, '
+                    f'실패 시 블라인드 스윕 폴백')
+            ok = False
+            for _i, _cand_offset in enumerate(_side_offset_candidates):
+                _cand_yaw = position_yaw + math.radians(_cand_offset)
+                _cux, _cuy = math.cos(_cand_yaw), math.sin(_cand_yaw)
+                _cand_px = dx - _cux * SIDE_TCP_OFFSET
+                _cand_py = dy - _cuy * SIDE_TCP_OFFSET
+                _cand_standoff_px = _cand_px - _cux * SIDE_APPROACH_STANDOFF_M
+                _cand_standoff_py = _cand_py - _cuy * SIDE_APPROACH_STANDOFF_M
+                _cand_quat = _side_quat_fn(pos, approach_offset_deg=_cand_offset)
+                self.get_logger().info(
+                    f'  [{_grip_name} approach 후보 {_i+1}/{len(_side_offset_candidates)}] '
+                    f'접근각={math.degrees(_cand_yaw):.1f}° (offset={_cand_offset:+.1f}°) 시도...')
+                ok = self._move(_cand_standoff_px, _cand_standoff_py, approach_z, _cand_quat,
+                                tol_ori=TOL_ORI_LOOSE, planner_chain=['PTP', 'LIN'])
+                if ok:
+                    quat = _cand_quat
+                    px, py = _cand_px, _cand_py
+                    side_standoff_px, side_standoff_py = _cand_standoff_px, _cand_standoff_py
+                    approach_yaw = _cand_yaw
+                    _used_blind_fallback = _num_face_candidates and _i >= _num_face_candidates
+                    if _used_blind_fallback:
+                        side_grasp_alignment = 'blind_fallback'
+                        self.get_logger().warn(
+                            f'  [{_grip_name} approach] ⚠ 면 정렬 후보 {_num_face_candidates}개 '
+                            f'전부 IK 실패 -- 블라인드 폴백 각도(offset={_cand_offset:+.1f}°)로 '
+                            f'진행. 물체가 각진 형태라면 모서리를 무는 불안정한 그립일 수 있음.')
+                    elif _num_face_candidates:
+                        side_grasp_alignment = 'face_aligned'
+                        if _cand_offset != side_approach_offset_deg:
+                            self.get_logger().warn(
+                                f'  [{_grip_name} approach] 요청 접근각(offset={side_approach_offset_deg:+.1f}°)은 '
+                                f'IK 실패 -- 면 정렬 대체 각도(offset={_cand_offset:+.1f}°, '
+                                f'접근각={math.degrees(approach_yaw):.1f}°)로 진행')
+                        else:
+                            self.get_logger().info(f'  [{_grip_name} approach] 요청 접근각 그대로 성공 (면 정렬)')
+                    else:
+                        side_grasp_alignment = 'unknown'
+                        if _cand_offset != side_approach_offset_deg:
+                            self.get_logger().warn(
+                                f'  [{_grip_name} approach] 요청 접근각(offset={side_approach_offset_deg:+.1f}°)은 '
+                                f'IK 실패 -- 대체 각도(offset={_cand_offset:+.1f}°, '
+                                f'접근각={math.degrees(approach_yaw):.1f}°)로 진행')
+                        else:
+                            self.get_logger().info(f'  [{_grip_name} approach] 요청 접근각 그대로 성공')
+                    break
         if not ok:
+            if is_side:
+                raise RuntimeError(f'approach 이동 실패 (재시도 초과, {_grip_name} 접근각 후보 전부 실패)')
             raise RuntimeError('approach 이동 실패 (재시도 초과)')
-        self.get_logger().info('2/6: 그리퍼 열기')
-        self._gripper(SIM_GRIPPER_OPEN, GRIPPER_OPEN)
-        time.sleep(GRIPPER_DELAY)
+        # [2026-08-26] 그리퍼 열기는 0/6(approach 전)으로 이동함 -- 여기서는
+        # 더 이상 열지 않는다 (물체 밀어내기 방지, 위 주석 참고).
         _current_top_angle_deg = None  # side 그립이면 None 유지 (align 단계 자체가 없음)
         if not is_side:
             if skip_reacquire:
@@ -887,7 +1128,9 @@ class PlanningNode(Node):
                         _current_top_angle_deg)
 
         if is_side:
-            self.get_logger().info('4/6: 내려가기 (descend) — side는 approach와 동일 높이, 재확인만')
+            self.get_logger().info(
+                f'4/6: 내려가기 (descend) — side는 standoff에서 접근각 방향으로 '
+                f'{SIDE_APPROACH_STANDOFF_M}m 직선(LIN) 진입')
         else:
             self.get_logger().info('4/6: 내려가기 (descend) — tight tolerance (+ 실패 시 완화 폴백)')
         if not is_side:
@@ -926,10 +1169,14 @@ class PlanningNode(Node):
                 break
         if not ok:
             raise RuntimeError('lift 이동 실패 (모든 높이 재시도 초과)')
-        return _current_top_angle_deg
-    def _pick_sequence(self, pos, quat, is_side=False, label='', skip_reacquire=False, angle_deg=0.0):
+        return _current_top_angle_deg, side_grasp_alignment
+    def _pick_sequence(self, pos, quat, is_side=False, label='', skip_reacquire=False, angle_deg=0.0,
+                        side_approach_offset_deg=0.0, is_pinch=False):
         try:
-            align_angle_deg = self._do_pick(pos, quat, is_side, label, skip_reacquire, angle_deg)
+            align_angle_deg, side_grasp_alignment = self._do_pick(
+                pos, quat, is_side, label, skip_reacquire, angle_deg,
+                side_approach_offset_deg=side_approach_offset_deg,
+                is_pinch=is_pinch)
             self.get_logger().info('✅ PICK 완료')
             # busy 해제를 발행보다 먼저 (레이스 방지 -- _scan_box_sequence 참고)
             with self.lock:
@@ -937,7 +1184,15 @@ class PlanningNode(Node):
             self._publish_result(
                 'success', 'pick_complete',
                 extra={'remaining_scanned_boxes': self._scanned_boxes,
-                       'align_angle_deg': align_angle_deg})
+                       'align_angle_deg': align_angle_deg,
+                       # [2026-08 추가] side/pinch 그립 면-정렬 신뢰도.
+                       # top-down이면 항상 None. side/pinch면:
+                       #   'face_aligned'    -- 물체의 실측 면-법선 방향으로 정상 접근
+                       #   'blind_fallback'  -- 면 정렬 후보 전부 IK 실패, 각도 무관
+                       #                        폴백 -- 각진 물체면 불안정한 그립일 수 있음
+                       #   'unknown'         -- perception이 물체 각도를 못 줌(원형
+                       #                        물체이거나 인식 실패) -- 기존 동작과 동일
+                       'side_grasp_alignment': side_grasp_alignment})
         except SequenceRejected as e:
             with self.lock:
                 self.busy = False
@@ -950,7 +1205,135 @@ class PlanningNode(Node):
         finally:
             with self.lock:
                 self.busy = False
-    def _do_place(self, pos, quat, is_side=False) -> dict:
+
+    def _slide_sequence(self, pos, quat, label='', side_approach_offset_deg=0.0,
+                         is_pinch=False, slide_distance_m=DEFAULT_SLIDE_DISTANCE_M,
+                         angle_deg=None):
+        try:
+            self._do_slide(pos, quat, label, side_approach_offset_deg=side_approach_offset_deg,
+                            is_pinch=is_pinch, slide_distance_m=slide_distance_m,
+                            angle_deg=angle_deg)
+            self.get_logger().info('✅ SLIDE 완료')
+            with self.lock:
+                self.busy = False
+            self._publish_result('success', 'slide_complete')
+        except SequenceRejected as e:
+            with self.lock:
+                self.busy = False
+            self._publish_result('rejected', str(e))
+        except Exception as e:
+            self.get_logger().error(f'SLIDE 오류: {e}')
+            with self.lock:
+                self.busy = False
+            self._publish_result('failed', str(e))
+        finally:
+            with self.lock:
+                self.busy = False
+
+    def _do_slide(self, pos, quat, label='', side_approach_offset_deg=0.0,
+                  is_pinch=False, slide_distance_m=DEFAULT_SLIDE_DISTANCE_M,
+                  angle_deg=None):
+        """문고리/서랍 손잡이 등 -- 잡아서 들어올리는 pick이 아니라, 잡은
+        채로 접근방향 반대로 당겨서 여는 동작. _do_pick의 side/pinch
+        approach 루프(TCP오프셋/standoff/각도후보탐색)를 그대로 재사용하고
+        마지막 단계만 lift 대신 slide+release로 바꾼다.
+        """
+        ok, reason = side_reachability_check(pos)
+        if not ok:
+            self.get_logger().warn(f'SLIDE 거부: {reason}')
+            raise SequenceRejected(reason)
+
+        dx, dy = pos['x'], pos['y']
+        position_yaw = math.atan2(dy, dx)
+        # [2026-08 수정] _do_pick과 동일한 면-정렬 후보 우선 탐색 -- 손잡이도
+        # 대개 각진 바 형태라 아무 각도에서나 핀치하면 안정적으로 안 물린다.
+        # 상세 원리는 grasp_kinematics.side_face_candidates_deg docstring 참고.
+        _face_offset_candidates = side_face_candidates_deg(
+            math.degrees(position_yaw), angle_deg, side_approach_offset_deg)
+        _num_face_candidates = len(_face_offset_candidates)
+        if _face_offset_candidates:
+            _offset_candidates = list(_face_offset_candidates)
+        else:
+            _offset_candidates = [side_approach_offset_deg]
+        for _d in SIDE_BLIND_SWEEP_DEG:
+            _cand = side_approach_offset_deg + _d
+            if _cand not in _offset_candidates:
+                _offset_candidates.append(_cand)
+        if is_pinch:
+            _quat_fn = sim_pinch_quat_for if self.use_moveit2 else pinch_quat_for
+            _grip_name = 'pinch_slide'
+        else:
+            _quat_fn = sim_side_quat_for if self.use_moveit2 else side_quat_for
+            _grip_name = 'side_slide'
+        grip_z = pos['z']
+
+        self.get_logger().info('0/5: 그리퍼 열기 (접근 전)')
+        self._gripper(SIM_GRIPPER_OPEN, GRIPPER_OPEN)
+        time.sleep(GRIPPER_DELAY)
+
+        if _num_face_candidates:
+            self.get_logger().info(
+                f'1/5: 접근 (approach) | {_grip_name}(TCP오프셋 {SIDE_TCP_OFFSET}m 적용, '
+                f'물체 각도 인식됨(angle_base_deg={angle_deg:.1f}°) -- 면 정렬 후보 '
+                f'{_num_face_candidates}개 우선, 총 {len(_offset_candidates)}개 탐색)')
+        else:
+            self.get_logger().info(
+                f'1/5: 접근 (approach) | {_grip_name}(TCP오프셋 {SIDE_TCP_OFFSET}m 적용, '
+                f'접근각 후보 {len(_offset_candidates)}개 탐색)')
+        ok = False
+        px = py = standoff_px = standoff_py = approach_yaw = ux = uy = None
+        for _i, _cand_offset in enumerate(_offset_candidates):
+            _cand_yaw = position_yaw + math.radians(_cand_offset)
+            _cux, _cuy = math.cos(_cand_yaw), math.sin(_cand_yaw)
+            _cand_px = dx - _cux * SIDE_TCP_OFFSET
+            _cand_py = dy - _cuy * SIDE_TCP_OFFSET
+            _cand_standoff_px = _cand_px - _cux * SIDE_APPROACH_STANDOFF_M
+            _cand_standoff_py = _cand_py - _cuy * SIDE_APPROACH_STANDOFF_M
+            _cand_quat = _quat_fn(pos, approach_offset_deg=_cand_offset)
+            self.get_logger().info(
+                f'  [{_grip_name} approach 후보 {_i+1}/{len(_offset_candidates)}] '
+                f'접근각={math.degrees(_cand_yaw):.1f}° (offset={_cand_offset:+.1f}°) 시도...')
+            ok = self._move(_cand_standoff_px, _cand_standoff_py, grip_z, _cand_quat,
+                            tol_ori=TOL_ORI_LOOSE, planner_chain=['PTP', 'LIN'])
+            if ok:
+                quat = _cand_quat
+                px, py = _cand_px, _cand_py
+                standoff_px, standoff_py = _cand_standoff_px, _cand_standoff_py
+                approach_yaw = _cand_yaw
+                ux, uy = _cux, _cuy
+                if _num_face_candidates and _i >= _num_face_candidates:
+                    self.get_logger().warn(
+                        f'  [{_grip_name} approach] ⚠ 면 정렬 후보 {_num_face_candidates}개 '
+                        f'전부 IK 실패 -- 블라인드 폴백 각도(offset={_cand_offset:+.1f}°)로 진행. '
+                        f'손잡이가 각진 형태라면 불안정하게 물릴 수 있음.')
+                break
+        if not ok:
+            raise RuntimeError(f'{_grip_name} approach 이동 실패 (재시도 초과, 접근각 후보 전부 실패)')
+
+        self.get_logger().info('2/5: 손잡이까지 직선(LIN) 진입')
+        ok = self._move(px, py, grip_z, quat, tol_ori=TOL_ORI_LOOSE, planner_chain=['LIN'])
+        if not ok:
+            raise RuntimeError(f'{_grip_name} 진입 실패 (재시도 초과)')
+
+        self.get_logger().info('3/5: 그리퍼 닫기 (손잡이 파지)')
+        self._gripper(SIM_GRIPPER_CLOSE, GRIPPER_CLOSE)
+        time.sleep(GRIPPER_DELAY)
+
+        # 접근방향(ux,uy) 반대로 후퇴 -- 손잡이를 쥔 채로 당겨서 연다.
+        slide_px = px - ux * slide_distance_m
+        slide_py = py - uy * slide_distance_m
+        self.get_logger().info(
+            f'4/5: 슬라이드 ({slide_distance_m}m, 접근각 {math.degrees(approach_yaw):.1f}° 반대 방향)')
+        ok = self._move(slide_px, slide_py, grip_z, quat, tol_ori=TOL_ORI_LOOSE, planner_chain=['LIN'])
+        if not ok:
+            raise RuntimeError(f'{_grip_name} 슬라이드 이동 실패 (재시도 초과)')
+
+        self.get_logger().info('5/5: 그리퍼 열기 (놓기)')
+        self._gripper(SIM_GRIPPER_OPEN, GRIPPER_OPEN)
+        time.sleep(GRIPPER_DELAY)
+
+    def _do_place(self, pos, quat, is_side=False, side_approach_offset_deg=0.0,
+                  is_pinch=False) -> dict:
         """[2026-08 재설계] 실패 시 좌표를 자동으로 시프트해가며 재시도한다.
         근거: nero_robot_place_reachability memory (2026-07-30~08-03 실측).
           - approach/descend 실패는 특정 (x,y) 국소 도달불가 영역(singularity)일
@@ -990,7 +1373,10 @@ class PlanningNode(Node):
         last_err = None
         for i, cand in enumerate(candidates):
             try:
-                verification = self._try_place_at(cand, quat, is_side, before_objects)
+                verification = self._try_place_at(
+                    cand, quat, is_side, before_objects,
+                    side_approach_offset_deg=side_approach_offset_deg,
+                    is_pinch=is_pinch)
                 if i > 0:
                     self.get_logger().warn(
                         f'  PLACE: 원래 목표 {pos} 실패 -> 대체 좌표 {cand}로 성공')
@@ -1014,9 +1400,12 @@ class PlanningNode(Node):
         self.get_logger().error(f'PLACE 오류: 모든 후보 좌표 소진 ({last_err})')
         raise RuntimeError(f'모든 대체 좌표 실패: {last_err}')
 
-    def _place_sequence(self, pos, quat, is_side=False):
+    def _place_sequence(self, pos, quat, is_side=False, side_approach_offset_deg=0.0,
+                         is_pinch=False):
         try:
-            result_extra = self._do_place(pos, quat, is_side)
+            result_extra = self._do_place(pos, quat, is_side,
+                                          side_approach_offset_deg=side_approach_offset_deg,
+                                          is_pinch=is_pinch)
             # busy 해제를 발행보다 먼저 (레이스 방지 -- _scan_box_sequence 참고)
             with self.lock:
                 self.busy = False
@@ -1062,7 +1451,8 @@ class PlanningNode(Node):
             self.get_logger().warn(f'  [{label}] joint-space 이동 실패/중단')
         return ok
 
-    def _try_place_at(self, pos, quat, is_side=False, before_objects=None):
+    def _try_place_at(self, pos, quat, is_side=False, before_objects=None,
+                      side_approach_offset_deg=0.0, is_pinch=False):
         """실제 approach->descend->open->lift 시퀀스 1회 시도.
         기존 _place_sequence 본문과 100% 동일 (분리만 함). 실패 시
         self._publish_result를 직접 부르지 않고 RuntimeError만 던진다 --
@@ -1071,27 +1461,42 @@ class PlanningNode(Node):
         before_objects: place 시작 전 장면 스냅샷 (폐루프 검증용, 쌓기
         시나리오에서 베이스 박스 오탐 방지 -- placement_verification.py
         모듈 docstring 참고).
+
+        [2026-08-26 추가] side/pinch 분기를 _do_pick과 동일한 방식으로
+        재작성 -- 접근각 후보 탐색(offset 스윕) + standoff에서 직선 진입.
+        이전엔 position_yaw 고정 반경 방향 TCP오프셋 + 단일 시도뿐이라
+        pick에서 발견됐던 것과 동일한 버그(접근각 무시, 실패시 대안 없음,
+        standoff 없이 바로 최종점行)를 그대로 갖고 있었다.
         """
         if not is_side:
             place_angle_deg = self._box_angle_deg if self._box_angle_deg is not None else 0.0
-        if is_side:
-            ok, reason = side_reachability_check(pos)
-            if not ok:
-                raise RuntimeError(reason)
-            dx, dy = pos['x'], pos['y']
-            dist = math.sqrt(dx*dx + dy*dy) or 1.0
-            px = dx - (dx / dist) * SIDE_TCP_OFFSET
-            py = dy - (dy / dist) * SIDE_TCP_OFFSET
-            approach_z = pos['z'] + APPROACH_Z
-            descend_z = pos['z'] + APPROACH_Z
-            lift_z = pos['z'] + APPROACH_Z + LIFT_Z
-        else:
             px = pos['x']
             py = pos['y']
             approach_z = pos['z'] + APPROACH_Z + TOP_TCP_OFFSET
             descend_z = pos['z'] + PLACE_DROP_Z + TOP_TCP_OFFSET
             descend_z = max(descend_z, DESCEND_MIN_FLANGE_Z)
             lift_z = pos['z'] + LIFT_Z + TOP_TCP_OFFSET
+        else:
+            ok, reason = side_reachability_check(pos)
+            if not ok:
+                raise RuntimeError(reason)
+            dx, dy = pos['x'], pos['y']
+            position_yaw = math.atan2(dy, dx)
+            _offset_candidates = [side_approach_offset_deg]
+            for _d in (15.0, -15.0, 30.0, -30.0, 45.0, -45.0,
+                       60.0, -60.0, 75.0, -75.0, 90.0, -90.0):
+                _cand = side_approach_offset_deg + _d
+                if _cand not in _offset_candidates:
+                    _offset_candidates.append(_cand)
+            if is_pinch:
+                _quat_fn = sim_pinch_quat_for if self.use_moveit2 else pinch_quat_for
+                _grip_name = 'pinch'
+            else:
+                _quat_fn = sim_side_quat_for if self.use_moveit2 else side_quat_for
+                _grip_name = 'side'
+            approach_z = pos['z']
+            descend_z = pos['z']
+            lift_z = pos['z'] + LIFT_Z
         # [2026-07 삭제] place pre-rotate 제거. approach가 이미
         # yaw 자유(±91.7°)로 위치만 맞추면 되는 이동이라, 그 전에
         # joint1을 미리 돌려놓는 별도 스텝이 굳이 필요 없다고 판단됨
@@ -1102,11 +1507,36 @@ class PlanningNode(Node):
             entry_quat = self._top_down_quat_for(pos, 0.0)
             approach_tol_ori = (TOL_ORI_TIGHT, TOL_ORI_TIGHT, 1.6)
             ok = self._move(px, py, approach_z, entry_quat, tol_ori=approach_tol_ori, planner_chain=['PTP', 'LIN'])
+            if not ok:
+                raise RuntimeError('place approach 이동 실패 (재시도 초과)')
         else:
+            ok = False
             entry_quat = quat
-            ok = self._move(px, py, approach_z, entry_quat, tol_ori=TOL_ORI_LOOSE, planner_chain=['PTP', 'LIN'])
-        if not ok:
-            raise RuntimeError('place approach 이동 실패 (재시도 초과)')
+            for _i, _cand_offset in enumerate(_offset_candidates):
+                _cand_yaw = position_yaw + math.radians(_cand_offset)
+                _cux, _cuy = math.cos(_cand_yaw), math.sin(_cand_yaw)
+                _cand_px = dx - _cux * SIDE_TCP_OFFSET
+                _cand_py = dy - _cuy * SIDE_TCP_OFFSET
+                _cand_standoff_px = _cand_px - _cux * SIDE_APPROACH_STANDOFF_M
+                _cand_standoff_py = _cand_py - _cuy * SIDE_APPROACH_STANDOFF_M
+                _cand_quat = _quat_fn(pos, approach_offset_deg=_cand_offset)
+                self.get_logger().info(
+                    f'  [place {_grip_name} approach 후보 {_i+1}/{len(_offset_candidates)}] '
+                    f'접근각={math.degrees(_cand_yaw):.1f}° (offset={_cand_offset:+.1f}°) 시도...')
+                ok = self._move(_cand_standoff_px, _cand_standoff_py, approach_z, _cand_quat,
+                                tol_ori=TOL_ORI_LOOSE, planner_chain=['PTP', 'LIN'])
+                if ok:
+                    entry_quat = _cand_quat
+                    px, py = _cand_px, _cand_py
+                    if _cand_offset != side_approach_offset_deg:
+                        self.get_logger().warn(
+                            f'  [place {_grip_name} approach] 요청 접근각(offset='
+                            f'{side_approach_offset_deg:+.1f}°)은 IK 실패 -- 대체 각도'
+                            f'(offset={_cand_offset:+.1f}°)로 진행')
+                    break
+            if not ok:
+                raise RuntimeError(
+                    f'place approach 이동 실패 (재시도 초과, {_grip_name} 접근각 후보 전부 실패)')
         # align 단계(재이동)는 여전히 없음 -- approach 도착 orientation과
         # descend orientation을 어차피 동일하게 맞출 거라 별도 이동이
         # 불필요했고, 오히려 재시도로 인한 지연의 주범이었음.
@@ -1115,7 +1545,8 @@ class PlanningNode(Node):
                            # — 회전+하강 동시요구로 인한 덤블링/IK실패 방지.
                            # trade-off: 박스 각도 정렬 없이 항상 축정렬로 place됨
         else:
-            place_quat = quat
+            place_quat = entry_quat  # [2026-08-26 수정] quat(요청값) 아니라 후보탐색에서
+                                      # 실제로 성공한 entry_quat을 써야 함
         self.get_logger().info('3/4: 내려가기 (descend)')
         if not is_side:
             ok = self._move_descend_with_tilt_fallback(px, py, descend_z, place_quat)
@@ -1200,125 +1631,44 @@ class PlanningNode(Node):
                     '  [verify] 재확인 자세 이동 실패, 1차 검증 결과 그대로 유지')
         return verification
 
-    def _stack_sequence(self, target_label, box_refs, base_pos, box_height_m, grasp_dir,
-                         fallback_pool=None, allow_reorder=False):
-        """box_refs를 순서대로(맨 아래부터) base_pos 위치에 쌓는다.
-        box_refs의 각 원소는 self._scanned_boxes 안의 실제 dict 레퍼런스 --
-        stack_boxes 호출 시작 시점에 한 번만 인덱스를 해석해뒀으므로(box_index
-        혼동 방지 원칙과 동일한 이유), 이후로는 인덱스 재조회 없이 이 레퍼런스로
-        큐에서 제거한다.
-
-        [2026-08 재작성] 실제 tier 진행/후보 재선택 로직은 task_planner.
-        run_stack_plan()(ROS 비의존 순수 함수)으로 이관됨. 이 메서드는
-        _do_pick/_do_place/큐 제거를 콜백으로 주입하고, 반환된 결과를
-        로그로 남긴 뒤 그대로 퍼블리시하는 얇은 어댑터로만 남는다.
-        pick 실패 시 fallback_pool에서 대체 후보를 시도할 수 있지만
-        (allow_reorder=True일 때만), place 실패 또는 placement_verified
-        =False에서의 무조건 중단은 이관 전과 완전히 동일하다.
-        """
-        fallback_pool = fallback_pool or []
+    def _move_sequence(self, pos, quat, is_side=False):
         try:
-            def _remove_from_queue(box):
-                try:
-                    self._scanned_boxes.remove(box)
-                except ValueError:
-                    pass
-
-            result = run_stack_plan(
-                requested_boxes=box_refs,
-                fallback_pool=fallback_pool,
-                target_label=target_label,
-                grasp_dir=grasp_dir,
-                base_pos=base_pos,
-                box_height_m=box_height_m,
-                pick_fn=lambda pos, quat, is_side, label, skip_reacquire, angle_deg:
-                    self._do_pick(pos, quat, is_side, label, skip_reacquire, angle_deg),
-                place_fn=lambda pos, quat, is_side: self._do_place(pos, quat, is_side),
-                remove_fn=_remove_from_queue,
-                min_reach_r_m=MIN_REACH_R_M,
-                boundary_r_m=BOUNDARY_R_M,
-                allow_reorder=allow_reorder,
-            )
-
-            tier_results = result['tiers']
-            for tr in tier_results:
-                tag = f"tier {tr['tier']}/{len(box_refs)-1}"
-                if tr['stage'] == 'pick' and tr['status'] != 'success':
-                    log_fn = self.get_logger().warn if tr['status'] == 'rejected' else self.get_logger().error
-                    log_fn(f"[stack] {tag} pick {tr['status']}: {tr['reason']}")
-                elif tr['stage'] == 'place' and tr['status'] != 'success':
-                    log_fn = self.get_logger().warn if tr['status'] == 'rejected' else self.get_logger().error
-                    log_fn(f"[stack] {tag} place {tr['status']}: {tr['reason']}")
-                else:
-                    sub_note = ''
-                    if tr.get('substituted'):
-                        bu = tr.get('box_used') or {}
-                        sub_note = (f" (대체됨 -> "
-                                    f"({bu.get('x', 0):.3f},{bu.get('y', 0):.3f},{bu.get('z', 0):.3f}))")
-                    self.get_logger().info(f"[stack] {tag} place 성공{sub_note}")
-                    if tr.get('placement_verified') is False:
-                        self.get_logger().warn(
-                            f"[stack] {tag} placement_verified=False "
-                            f"({tr.get('verification_reason', '')}) -- "
-                            f"불안정할 수 있으나 중단하지 않고 다음 tier 계속 진행.")
-
-            for sc in result['skipped_candidates']:
-                b = sc.get('box') or {}
-                prefilter_note = ' [사전필터]' if sc.get('prefiltered') else ''
-                self.get_logger().info(
-                    f"[stack] tier {sc['tier']} 후보 제외{prefilter_note}: "
-                    f"({b.get('x', 0):.3f},{b.get('y', 0):.3f},{b.get('z', 0):.3f}) -- {sc['reason']}")
-
-            overall = result['status']
-            self.get_logger().info(
-                f'✅ STACK 종료 ({overall}, {len(tier_results)}/{len(box_refs)} tier, '
-                f'backtrack_attempts_used={result["backtrack_attempts_used"]})')
-            # busy 해제를 발행보다 먼저 (레이스 방지 -- _scan_box_sequence 참고)
-            with self.lock:
-                self.busy = False
-            self._publish_result(
-                overall, 'stack_complete' if overall == 'success' else 'stack_partial',
-                extra={'tiers': tier_results,
-                       'skipped_candidates': result['skipped_candidates'],
-                       'backtrack_attempts_used': result['backtrack_attempts_used'],
-                       'remaining_scanned_boxes': self._scanned_boxes})
-        finally:
-            with self.lock:
-                self.busy = False
-
-    def _move_sequence(self, pos, quat):
-        try:
-            target_bearing = math.atan2(pos['y'], pos['x']) - math.radians(BEARING_OFFSET_DEG)
-            target_bearing = math.atan2(math.sin(target_bearing), math.cos(target_bearing))
-            js = self.latest_joint_state_sim
-            if js is not None:
-                joint_names = ['joint1','joint2','joint3','joint4','joint5','joint6','joint7']
-                current = dict(zip(js.name, js.position))
-                pre_target = [current.get(jn, 0.0) for jn in joint_names]
-                pre_target[0] = target_bearing
-                if abs(pre_target[1]) < 0.15 and abs(pre_target[3]) < 0.15:
-                    pre_target[1] = 0.6
-                    pre_target[3] = 1.0
-                self.get_logger().info(
-                    f'[move pre-rotate] joint1 → {math.degrees(target_bearing):.1f}°')
-                if self.use_moveit2:
-                    self.moveit2.force_reset_executing_state()
-                    self.moveit2.max_velocity = 0.15
-                    self.moveit2.max_acceleration = 0.3
-                    self.moveit2.pipeline_id = ''
-                    self.moveit2.planner_id = ''
-                    self.moveit2.move_to_configuration(pre_target)
-                    time.sleep(0.5)
-                    deadline = time.time() + MOVE_TIMEOUT
-                    while time.time() < deadline:
-                        if (not self.moveit2._MoveIt2__is_motion_requested and
-                                not self.moveit2._MoveIt2__is_executing):
-                            break
-                        time.sleep(0.1)
-                else:
-                    self._move_joints_real_wait(pre_target)
+            # [2026-08-26 수정, 사용자 요청] side/pinch는 joint1 사전회전
+            # 완전 삭제 (_do_pick과 동일 이유 -- 위 주석 참고).
+            if is_side:
+                self.get_logger().info('[move pre-rotate] side/pinch 그립 -- 사전회전 스킵(설계상)')
             else:
-                self.get_logger().warn('[move pre-rotate] joint_state 없음, 사전 회전 스킵')
+                target_bearing = math.atan2(pos['y'], pos['x']) - math.radians(BEARING_OFFSET_DEG)
+                target_bearing = math.atan2(math.sin(target_bearing), math.cos(target_bearing))
+                js = self.latest_joint_state_sim
+                if js is not None:
+                    joint_names = ['joint1','joint2','joint3','joint4','joint5','joint6','joint7']
+                    current = dict(zip(js.name, js.position))
+                    pre_target = [current.get(jn, 0.0) for jn in joint_names]
+                    pre_target[0] = target_bearing
+                    if abs(pre_target[1]) < 0.15 and abs(pre_target[3]) < 0.15:
+                        pre_target[1] = 0.6
+                        pre_target[3] = 1.0
+                    self.get_logger().info(
+                        f'[move pre-rotate] joint1 → {math.degrees(target_bearing):.1f}°')
+                    if self.use_moveit2:
+                        self.moveit2.force_reset_executing_state()
+                        self.moveit2.max_velocity = 0.15
+                        self.moveit2.max_acceleration = 0.3
+                        self.moveit2.pipeline_id = ''
+                        self.moveit2.planner_id = ''
+                        self.moveit2.move_to_configuration(pre_target)
+                        time.sleep(0.5)
+                        deadline = time.time() + MOVE_TIMEOUT
+                        while time.time() < deadline:
+                            if (not self.moveit2._MoveIt2__is_motion_requested and
+                                    not self.moveit2._MoveIt2__is_executing):
+                                break
+                            time.sleep(0.1)
+                    else:
+                        self._move_joints_real_wait(pre_target)
+                else:
+                    self.get_logger().warn('[move pre-rotate] joint_state 없음, 사전 회전 스킵')
             self.get_logger().info(
                 f"1/1: 이동 → ({pos['x']:.3f}, {pos['y']:.3f}, {pos['z']:.3f})")
             ok = self._move(pos['x'], pos['y'], pos['z'], quat,
@@ -1428,8 +1778,12 @@ class PlanningNode(Node):
             while j1 <= JOINT1_UPPER + 1e-6:
                 target = [base_joints.get(jn, 0.0) for jn in joint_names]
                 target[0] = j1
+                # [2026-08-26 추가] 매 스텝마다 joint7을 살짝 틀어 더 먼
+                # 영역까지 스캔 (SCAN_JOINT7_TILT_DELTA 주석 참고, 부호 미검증)
+                target[6] += SCAN_JOINT7_TILT_DELTA
                 self.get_logger().info(
-                    f'[스캔] joint1={math.degrees(j1):.1f}\xb0 로 이동 중...')
+                    f'[스캔] joint1={math.degrees(j1):.1f}\xb0 '
+                    f'(joint7={math.degrees(target[6]):.1f}\xb0) 로 이동 중...')
                 if self.use_moveit2:
                     self.moveit2.force_reset_executing_state()
                     # [2026-08 수정] _home_sequence에서 이미 겪었던 것과 동일한
@@ -1468,14 +1822,25 @@ class PlanningNode(Node):
                 else:
                     self._move_joints_real_wait(target)
                 time.sleep(SCAN_STEP_SETTLE_SEC)
+                # [2026-08-26 수정, 사용자 요청] 이전엔 target_label(기본
+                # 'box')과 정확히 일치하는 물체만 기억하고 나머지는
+                # 스쳐지나가며 버렸다. YOLO dual 백엔드가 box 외에 COCO
+                # 클래스(cup, bottle 등)도 같이 인식하는데 스캔 중 놓치는
+                # 게 아까워서, 라벨 무관하게 이번 스윕에서 보인 물체를
+                # 전부 _scanned_boxes에 기억하도록 확장한다. target_label은
+                # 더 이상 필터링에 안 쓰이고 로그/응답 메시지용으로만 남음
+                # (하위호환 -- pick_object(from_scan=True)는 어차피 자기
+                # target_label로 다시 필터링해서 씀).
                 for obj in self.latest_objects:
-                    if obj.get('label') != label:
-                        continue
                     self._merge_scanned_box(obj)
                 n_steps += 1
                 j1 += step_rad
+            _label_counts = {}
+            for b in self._scanned_boxes:
+                _label_counts[b.get('label')] = _label_counts.get(b.get('label'), 0) + 1
             self.get_logger().info(
-                f'[스캔] 완료 ({n_steps}스텝), 누적 박스 {len(self._scanned_boxes)}개: '
+                f'[스캔] 완료 ({n_steps}스텝), 누적 물체 {len(self._scanned_boxes)}개 '
+                f'(라벨별: {_label_counts}): '
                 f'{[(round(b["x"],3), round(b["y"],3), round(b["z"],3)) for b in self._scanned_boxes]}')
             # [2026-08 수정] busy 해제를 결과 발행보다 먼저 한다. 발행이
             # 먼저 나가면, 그 결과를 받은 클라이언트가 곧바로 다음 명령

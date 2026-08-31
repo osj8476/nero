@@ -21,7 +21,10 @@ perception_node.py와 100% 동일하게 유지했다 (planning_node 변경 불�
 [환경변수]
   BOX_SERVER_URL  : 박스 서버 주소 (기본: http://127.0.0.1:8002/detect)
   BOX_HEALTH_URL  : 헬스체크 주소 (기본: http://127.0.0.1:8002/health)
-  TARGET_LABEL    : 탐지 대상 클래스 (기본: box)
+  TARGET_LABEL    : 탐지 대상 클래스 (기본: box + vlm_boxyolo.py의 ALLOWED_COCO 24종
+                    전부). 쉼표로 복수 지정 가능: "box,bottle" (지정 시 기본값 전체를
+                    덮어씀 — COCO 라벨은 서버(vlm_boxyolo.py)의 ALLOWED_COCO 집합과
+                    반드시 일치해야 함, 안 맞으면 서버가 조용히 필터링해서 버림)
   BASE_FRAME      : tf 변환 목표 프레임 (기본: base_link)
   CAMERA_OPTICAL_FRAME : 카메라 광학 프레임 (기본: camera_color_optical_frame)
   IMAGE_TOPIC     : RGB 이미지 토픽 (기본: /camera/color/image_raw)
@@ -31,6 +34,9 @@ perception_node.py와 100% 동일하게 유지했다 (planning_node 변경 불�
   DEDUP_XY_THRESH_M   : 3D dedup 시 x,y 임계값(미터) (기본: 0.03)
   DEDUP_Z_THRESH_M    : 3D dedup 시 z(depth) 임계값(미터) — 이보다 z가 가까우면 같은
                         박스로 보고 병합, 이보다 멀면 쌓인 별개 박스로 보고 유지 (기본: 0.03)
+  FACE_NORMAL_GRID_STEP/MIN_POINTS/MAX_POINTS/PLANARITY_MIN/VERTICALITY_MIN :
+                        [2026-08 추가, 프로토타입] face_normal_yaw_deg 계산 파라미터.
+                        perception_node.py 모듈 상단 주석 참고.
 """
 
 import os
@@ -60,7 +66,21 @@ from sj_pickplace.camera_calibration import (
 # ──────────────────────────────────────────────
 # 설정
 # ──────────────────────────────────────────────
-TARGET_LABEL     = os.environ.get("TARGET_LABEL", "box")
+# 기본 라벨 = "box" + vlm_boxyolo.py의 ALLOWED_COCO 24종 전부 (2026-08-25).
+# 서버가 다른 파일이라 상수 공유 불가 — 서버 쪽 ALLOWED_COCO를 바꾸면 여기도
+# 같이 맞춰야 함 (yolo/vlm_boxyolo.py 참고).
+_DEFAULT_TARGET_LABELS = (
+    "box,"
+    "person,umbrella,tie,"
+    "bottle,wine glass,cup,fork,knife,spoon,bowl,"
+    "banana,apple,"
+    "book,clock,vase,scissors,toothbrush,"
+    "laptop,remote,keyboard,cell phone,"
+    "sports ball,baseball bat,baseball glove"
+)
+_raw_labels      = os.environ.get("TARGET_LABEL", _DEFAULT_TARGET_LABELS)
+TARGET_LABELS    = [l.strip() for l in _raw_labels.split(",") if l.strip()]
+TARGET_LABEL     = TARGET_LABELS[0]  # 단일 라벨 기대 코드와의 하위 호환용
 BOX_SERVER_URL   = os.environ.get("BOX_SERVER_URL", "http://127.0.0.1:8002/detect")
 BOX_HEALTH_URL   = os.environ.get("BOX_HEALTH_URL", "http://127.0.0.1:8002/health")
 REQUEST_TIMEOUT  = float(os.environ.get("REQUEST_TIMEOUT", "3.0"))
@@ -99,6 +119,7 @@ CAMERA_INFO_TOPIC  = os.environ.get("CAMERA_INFO_TOPIC", "/camera/camera_info")
 # 값은 그대로 이 파일에서 관리하고, 호출 시 인자로 넘긴다.
 from sj_pickplace.perception_node import (   # noqa: E402
     _compute_box_angle_base, _transform_with_fallback, _dedup_3d,
+    _compute_face_normal_yaw,
 )
 
 
@@ -153,7 +174,7 @@ class PerceptionNodeSim(Node):
         self.timer = self.create_timer(1.0 / DISPATCH_RATE_HZ, self._dispatch_inference)
 
         self.get_logger().info(
-            f'PerceptionNodeSim 시작 (Isaac Sim 카메라) | target={TARGET_LABEL} | '
+            f'PerceptionNodeSim 시작 (Isaac Sim 카메라) | target={TARGET_LABELS} | '
             f'image={IMAGE_TOPIC} depth={DEPTH_TOPIC} info={CAMERA_INFO_TOPIC} | '
             f'tf: {CAMERA_OPTICAL_FRAME} -> {BASE_FRAME} | '
             f'gripper_min_depth={GRIPPER_MIN_DEPTH_M}m | '
@@ -270,7 +291,7 @@ class PerceptionNodeSim(Node):
                 return
             img_b64 = base64.b64encode(buf.tobytes()).decode('ascii')
 
-            payload = {"image_b64": img_b64, "labels": [TARGET_LABEL]}
+            payload = {"image_b64": img_b64, "labels": TARGET_LABELS}
             r = requests.post(BOX_SERVER_URL, json=payload, timeout=REQUEST_TIMEOUT)
             if r.status_code != 200:
                 return
@@ -298,6 +319,12 @@ class PerceptionNodeSim(Node):
                 angle_deg, refined_center_px = _compute_box_angle_base(
                     color, d, self.tf_buffer,
                     CAMERA_OPTICAL_FRAME, BASE_FRAME, TF_TIMEOUT_SEC, depth=depth,
+                    stamp=_stamp, logger=self.get_logger())
+                # [2026-08 추가, 프로토타입 -- 실기 미검증] perception_node.py와
+                # 동일 패턴 재사용 (별개 필드로만 추가, 기존 소비 경로 무영향).
+                face_yaw_deg, face_conf, _face_n = _compute_face_normal_yaw(
+                    d, depth, self.tf_buffer,
+                    CAMERA_OPTICAL_FRAME, BASE_FRAME, TF_TIMEOUT_SEC,
                     stamp=_stamp, logger=self.get_logger())
                 if refined_center_px is not None:
                     _rx, _ry = refined_center_px
@@ -339,6 +366,8 @@ class PerceptionNodeSim(Node):
                     "depth_m": round(float(depth_m), 3) if depth_m else None,
                     "confidence": round(float(d.get("confidence", 0.0)), 3),
                     "angle_base_deg": angle_deg,
+                    "face_normal_yaw_deg": face_yaw_deg,
+                    "face_normal_confidence": face_conf,
                 })
 
             # ── 3D 위치 기준 최종 dedup ──────────────────────────────────

@@ -43,6 +43,19 @@ class GraspResponse(BaseModel):
     confidence: float
     reason: str
     inference_ms: float
+    # [2026-08 확장] semantic grasp intent 필드 -- 전부 기본값이 있어 구버전
+    # 클라이언트(mcp_robot_server.py 구버전)에게 필드가 늘어난 것 자체는
+    # 문제 없다(pydantic이 JSON 응답에 그대로 추가 필드를 실어보냄, 클라
+    # 이언트가 무시하면 그만). VLM이 이 필드들을 안 채우거나 무효한 값을
+    # 내면 _validate()가 안전값(target_part=None, grasp_relation="unknown",
+    # action="PICK", action_direction="unknown")으로 강등한다 -- 자유
+    # 텍스트를 그대로 downstream geometry에 흘리지 않는다는 원칙
+    # (sj_pickplace/grasp_types.py GraspIntent와 동일 enum 집합, 이 서버는
+    # 독립 배포 스크립트라 import 대신 로컬에 동일 정의를 둔다).
+    target_part: Optional[str] = None
+    grasp_relation: str = "unknown"
+    action: str = "PICK"
+    action_direction: str = "unknown"
 
 class SceneRequest(BaseModel):
     full_image_b64: str
@@ -51,7 +64,6 @@ class SceneRequest(BaseModel):
 
 class SceneResponse(BaseModel):
     objects: list = []            # [{"label":"cup","bbox":[x1,y1,x2,y2]}, ...]
-    placement_regions: list = []  # [{"bbox":[x1,y1,x2,y2],"confidence":0.8}, ...]
     inference_ms: float = 0.0
 
 class PlacementRequest(BaseModel):
@@ -81,23 +93,33 @@ class GroundResponse(BaseModel):
 ALLOWED_GRASP  = {"TOP", "SIDE", "PINCH"}
 ALLOWED_ORIENT = {"HORIZONTAL", "VERTICAL"}
 
+# [2026-08 추가] sj_pickplace/grasp_types.py의 GRASP_RELATIONS/ACTIONS/
+# ACTION_DIRECTIONS와 동일 집합 -- 이 파일은 독립 배포 스크립트(4090 랩탑,
+# ROS 워크스페이스 밖)라 import 대신 로컬에 중복 정의한다. 한쪽만 바꾸면
+# 어긋날 위험이 있으니, grasp_types.py를 고칠 땐 이쪽도 같이 확인할 것.
+ALLOWED_RELATION = {
+    "perpendicular_to_long_axis", "along_long_axis",
+    "perpendicular_to_surface", "along_surface_normal", "from_top", "unknown",
+}
+ALLOWED_ACTION = {"PICK", "PULL", "PUSH", "SLIDE"}
+ALLOWED_ACTION_DIRECTION = {
+    "along_long_axis", "perpendicular_to_long_axis",
+    "along_surface_normal", "opposite_approach", "unknown",
+}
+
 # ── 시스템 프롬프트 ──────────────────────────────────────────────────────────
 _SCENE_SYSTEM = """\
-Look at the camera image and return two things in one pass:
+Look at the camera image independently and detect every distinct physical object that is actually visible.
 
-1. OBJECTS: detect every distinct physical object that is actually visible.
-   - Detect based ONLY on what you see. Do NOT copy from this prompt.
-   - Include: cups, boxes, scissors, books, phones, speakers, bags, markers, pens, pencils, bottles, containers, wallets, cables, and any other physical item.
-   - Exclude: tables, floors, walls, robot arm.
+Rules:
+- Detect objects based ONLY on what you see in the image. Do NOT copy, reuse, or reference any object names or coordinates from this prompt.
+- Include manipulable objects: cups, boxes, scissors, books, phones, speakers, bags, markers, pens, pencils, bottles, containers, wallets, cables, and any other physical item.
+- Exclude background surfaces: tables, floors, walls, the robot arm.
+- Do NOT rely on any prior detector results.
 
-2. PLACEMENT_REGIONS: find 1-3 empty flat areas where an object can safely be placed.
-   - Must NOT overlap any detected object.
-   - Must be on a flat accessible surface.
-   - If no empty area visible, use empty list.
-
-Return ONLY minified JSON — no markdown, no extra text:
-{"objects":[{"label":"cup","bbox":[x1,y1,x2,y2]}],"placement_regions":[{"bbox":[x1,y1,x2,y2],"confidence":0.8}]}
-bbox values are normalized 0.0-1.0. No descriptions, no confidence scores for objects."""
+Return ONLY minified JSON with this schema — no markdown, no extra text:
+{"objects":[{"label":"<actual object name from image>","bbox":[x_min,y_min,x_max,y_max]},{"label":"<another object>","bbox":[x_min,y_min,x_max,y_max]}]}
+bbox values are normalized 0.0-1.0. List ALL objects you actually see. No descriptions, no confidence scores."""
 
 _PLACEMENT_SYSTEM = """\
 Find 1-3 empty flat regions where an object can be placed on the surface.
@@ -110,9 +132,11 @@ No labels. No reasons. Do NOT overlap any existing object."""
 _GROUNDING_SYSTEM = """\
 You are a visual scene grounding module for a robot.
 
-Step 1 — Scan the ENTIRE image and mentally list EVERY distinct physical object you can see (cups, boxes, bottles, cables, pens, pencils, markers, tools, containers, electronics, and any other physical item). Do NOT skip small or thin objects.
+Analyze the camera image carefully.
 
-Step 2 — From that complete list, find the object that best matches the TARGET OBJECT specified above.
+YOLO detections are provided as context, but they are NOT a complete list.
+Your task is to visually locate the REQUESTED TARGET OBJECT in the image,
+even if YOLO did not detect it.
 
 Return ONLY valid JSON — no markdown, no extra text:
 {
@@ -126,8 +150,7 @@ Return ONLY valid JSON — no markdown, no extra text:
 
 Rules:
 - bbox_norm and center_norm use normalized coordinates: 0.0 = left/top, 1.0 = right/bottom
-- center_norm MUST be the geometric center of bbox_norm: [(x_min+x_max)/2, (y_min+y_max)/2]
-- If the target is NOT visible after scanning the full scene, return:
+- If the requested object is NOT visible in the image, return:
   {"found": false, "label": "", "confidence": 0.0, "description": "not found"}
 - Do NOT invent objects that are not clearly visible
 - Do NOT estimate metric 3D coordinates
@@ -141,17 +164,60 @@ Analyze the target object using:
   Image 1: full scene (environment context, obstacles, accessibility)
   Image 2: cropped target object (shape, orientation, graspable surfaces)
 
+IMPORTANT: Base your decision on the ACTUAL visible shape and aspect ratio
+in Image 2, not on assumptions from the object's name/category. The same
+object type can appear in different orientations (e.g. a book can be lying
+flat OR standing upright on its spine) — look at the crop before deciding.
+
 Determine the most suitable grasp configuration for a parallel-jaw gripper.
 
-Available grasp types:
-  TOP   — gripper descends from above; best for flat/wide objects, lids, flat books
-  SIDE  — horizontal approach from the side; best for tall cylinders (cup, bottle, vase)
-  PINCH — gripper rotated ~90° vertical; best for thin/flat/elongated items (pen, knife,
-           fork, spoon, scissors, toothbrush, remote, phone, credit card)
+Available grasp types (typical cases, not fixed rules — verify against
+the actual image):
+  TOP   — gripper descends from above; typical for objects lying flat/wide
+          when viewed from the camera (e.g. a book lying on a table)
+  SIDE  — horizontal approach from the side; typical for tall/upright
+          objects (a standing book, cup, bottle, vase)
+  PINCH — gripper rotated ~90° vertical; typical for thin/elongated items
+          held between fingertips (pen, knife, fork, spoon, scissors,
+          toothbrush, remote, phone, credit card) regardless of orientation
+
+You do NOT compute metric angles, coordinates, or quaternions — a separate
+geometry module measures the object's actual 3D shape. Your job is only to
+describe the grasp SEMANTICALLY, relative to the object's own shape/surface.
+
+grasp_relation (how the gripper relates to the object's geometry — pick one):
+  perpendicular_to_long_axis — object is elongated (handle, bottle, pen); grip
+                                across its short dimension, not along its length
+  along_long_axis             — grip along the object's long dimension (rare —
+                                only when the long axis itself is graspable)
+  perpendicular_to_surface    — approach straight into a flat face
+  along_surface_normal        — same idea as perpendicular_to_surface, for TOP grasps
+  from_top                    — no strong shape cue, just come from above
+  unknown                     — none of the above clearly applies
+
+action (what happens after the grasp — pick one):
+  PICK — lift the object up and away
+  PULL — grasp then pull (e.g. a drawer/door handle)
+  PUSH — grasp then push
+  SLIDE — grasp then slide sideways without lifting
+
+action_direction (only meaningful when action != PICK — pick one):
+  along_long_axis             — move along the object's long axis
+  perpendicular_to_long_axis  — move perpendicular to the object's long axis
+  along_surface_normal        — move along the surface normal (e.g. straight out)
+  opposite_approach           — retreat back the way the gripper came in
+  unknown                     — action is PICK, or direction is unclear
+
+target_part: if the grasp target is a specific part of a larger object (e.g.
+  "handle" of a drawer), name it. Otherwise null.
 
 Rules:
 - Do NOT generate joint angles, trajectories, or motor commands
+- Do NOT estimate metric 3D coordinates or quaternions
 - Do NOT move the robot
+- If you are not confident about grasp_relation/action/action_direction, use
+  "unknown" rather than guessing — a wrong confident answer is worse than
+  "unknown" because downstream code trusts these values directly.
 - Return ONLY valid JSON — no markdown, no extra text
 
 Required JSON format:
@@ -159,8 +225,12 @@ Required JSON format:
   "object": "<label>",
   "grasp_type": "<TOP|SIDE|PINCH>",
   "orientation": "<HORIZONTAL|VERTICAL>",
-  "confidence": <0.0–1.0>,
-  "reason": "<one concise sentence>"
+  "confidence": <0.0-1.0>,
+  "reason": "<one concise sentence>",
+  "target_part": "<part name or null>",
+  "grasp_relation": "<perpendicular_to_long_axis|along_long_axis|perpendicular_to_surface|along_surface_normal|from_top|unknown>",
+  "action": "<PICK|PULL|PUSH|SLIDE>",
+  "action_direction": "<along_long_axis|perpendicular_to_long_axis|along_surface_normal|opposite_approach|unknown>"
 }"""
 
 
@@ -205,6 +275,27 @@ def _validate(data: dict, label: str, elapsed: float) -> GraspResponse:
     if not 0.0 <= conf <= 1.0:
         raise ValueError(f"confidence 범위 오류: {conf}")
 
+    # [2026-08 추가] semantic intent 필드 -- 자유 텍스트를 그대로 믿지
+    # 않는다. 허용 집합 밖이면 "unknown"으로 강등(모델 자체 실패로 보고
+    # 전체를 fallback시키지 않는다 -- grasp_type/orientation만 있어도
+    # 기존 downstream은 정상 동작하므로, 이 필드들은 "있으면 좋고 없어도
+    # 무방한" 확장이어야 한다).
+    target_part = data.get("target_part")
+    if target_part is not None:
+        target_part = str(target_part).strip() or None
+
+    relation = str(data.get("grasp_relation", "unknown")).strip()
+    if relation not in ALLOWED_RELATION:
+        relation = "unknown"
+
+    action = str(data.get("action", "PICK")).upper()
+    if action not in ALLOWED_ACTION:
+        action = "PICK"
+
+    action_direction = str(data.get("action_direction", "unknown")).strip()
+    if action_direction not in ALLOWED_ACTION_DIRECTION:
+        action_direction = "unknown"
+
     return GraspResponse(
         object=str(data.get("object", label)),
         grasp_type=grasp,
@@ -212,6 +303,10 @@ def _validate(data: dict, label: str, elapsed: float) -> GraspResponse:
         confidence=round(conf, 3),
         reason=str(data.get("reason", "")),
         inference_ms=round(elapsed * 1000, 1),
+        target_part=target_part,
+        grasp_relation=relation,
+        action=action,
+        action_direction=action_direction,
     )
 
 
@@ -221,52 +316,37 @@ _VLM_IMG_H = 360.0
 
 # ── scene / placement 검증 ────────────────────────────────────────────────────
 def _validate_scene(data, elapsed: float) -> SceneResponse:
-    """dict({"objects":[...],"placement_regions":[...]}) 또는 list([...]) 모두 허용.
+    """dict({"objects":[...]}) 또는 list([{"label":..,"bbox"/"bbox_2d":..}]) 모두 허용.
     bbox가 픽셀 좌표(>1.0)이면 _VLM_IMG_W/_VLM_IMG_H 기준으로 정규화."""
     if isinstance(data, list):
         raw_objects = data
-        raw_placements = []
     else:
         raw_objects = data.get("objects", [])
         if not isinstance(raw_objects, list):
             raw_objects = []
-        raw_placements = data.get("placement_regions", [])
-        if not isinstance(raw_placements, list):
-            raw_placements = []
 
-    def _norm_bbox(bbox):
-        bbox = [float(v) for v in bbox]
-        if any(v > 1.0 for v in bbox):
-            bbox = [
-                bbox[0] / _VLM_IMG_W, bbox[1] / _VLM_IMG_H,
-                bbox[2] / _VLM_IMG_W, bbox[3] / _VLM_IMG_H,
-            ]
-        return [round(max(0.0, min(1.0, v)), 4) for v in bbox]
-
-    valid_objects = []
+    valid = []
     for o in raw_objects:
         if not isinstance(o, dict):
             continue
         label = str(o.get("label", "")).strip()
         if not label:
             continue
+        # bbox / bbox_2d 둘 다 허용
         bbox = o.get("bbox") or o.get("bbox_2d", [])
         if not isinstance(bbox, list) or len(bbox) != 4:
             continue
-        valid_objects.append({"label": label, "bbox": _norm_bbox(bbox)})
+        bbox = [float(v) for v in bbox]
+        # 픽셀 좌표 → 정규화 변환 (값이 1.0 초과이면 픽셀로 판단)
+        if any(v > 1.0 for v in bbox):
+            bbox = [
+                bbox[0] / _VLM_IMG_W, bbox[1] / _VLM_IMG_H,
+                bbox[2] / _VLM_IMG_W, bbox[3] / _VLM_IMG_H,
+            ]
+        bbox = [round(max(0.0, min(1.0, v)), 4) for v in bbox]
+        valid.append({"label": label, "bbox": bbox})
 
-    valid_placements = []
-    for r in raw_placements:
-        if not isinstance(r, dict):
-            continue
-        bbox = r.get("bbox") or r.get("bbox_2d", [])
-        if not isinstance(bbox, list) or len(bbox) != 4:
-            continue
-        conf = round(float(r.get("confidence", 0.8)), 3)
-        valid_placements.append({"bbox": _norm_bbox(bbox), "confidence": conf})
-
-    return SceneResponse(objects=valid_objects, placement_regions=valid_placements,
-                         inference_ms=round(elapsed * 1000, 1))
+    return SceneResponse(objects=valid, inference_ms=round(elapsed * 1000, 1))
 
 
 def _validate_placement(data, elapsed: float) -> PlacementResponse:
@@ -406,9 +486,11 @@ def build_app(port: int, model_name: str, debug: bool, debug_dir: str) -> FastAP
         print(f"[vlm :{port}] loading {model_name} on {device} …")
         t0 = time.time()
 
+        # [2026-08 랩탑 실측] float16으로 로드하면 퇴화 생성("!!!!" 등) 발생 --
+        # bfloat16으로 고쳐서 해결됨. GPU가 bfloat16을 지원해야 함(Ampere+).
         model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
             model_name,
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+            torch_dtype=torch.bfloat16 if device == "cuda" else torch.float32,
             device_map=device,
         )
         model.eval()
@@ -535,7 +617,7 @@ def build_app(port: int, model_name: str, debug: bool, debug_dir: str) -> FastAP
 
     def _infer_scene(full_img: Image.Image, detections: list) -> str:
         """object label+bbox만 반환. YOLO context 없이 VLM 독립 탐지. 호출 전 _lock 획득 필요."""
-        return _run_vlm(full_img, _SCENE_SYSTEM, "[]", max_new_tokens=640, tag="analyze_scene", include_yolo=False)
+        return _run_vlm(full_img, _SCENE_SYSTEM, "[]", max_new_tokens=512, tag="analyze_scene", include_yolo=False)
 
     def _infer_placement(full_img: Image.Image, detections: list) -> str:
         """빈 배치 영역만 반환. 호출 전 _lock 획득 필요."""
@@ -666,7 +748,7 @@ def build_app(port: int, model_name: str, debug: bool, debug_dir: str) -> FastAP
                     detail=f"vlm_inference_failed|{type(e).__name__}:{e}|elapsed={elapsed_ms}ms",
                 )
 
-        print(f"[vlm :{port}] analyze_scene — {result.inference_ms:.0f}ms objects={len(result.objects)} placements={len(result.placement_regions)}")
+        print(f"[vlm :{port}] analyze_scene — {result.inference_ms:.0f}ms objects={len(result.objects)}")
         return result
 
     @app.post("/find_placement", response_model=PlacementResponse)
@@ -736,6 +818,7 @@ def build_app(port: int, model_name: str, debug: bool, debug_dir: str) -> FastAP
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
+    ap.add_argument("--host",      type=str, default="127.0.0.1")
     ap.add_argument("--port",      type=int, default=8003)
     ap.add_argument("--model",     default="Qwen/Qwen2.5-VL-3B-Instruct")
     ap.add_argument("--debug",     action="store_true")
@@ -743,4 +826,4 @@ if __name__ == "__main__":
     args = ap.parse_args()
 
     application = build_app(args.port, args.model, args.debug, args.debug_dir)
-    uvicorn.run(application, host="127.0.0.1", port=args.port, log_level="info")
+    uvicorn.run(application, host=args.host, port=args.port, log_level="info")

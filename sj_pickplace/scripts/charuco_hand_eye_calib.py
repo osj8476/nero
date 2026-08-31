@@ -153,10 +153,10 @@ SOLVER_METHODS = {
 @dataclass
 class BoardConfig:
     """ChArUco board 파라미터 — 실제 출력 물리 크기와 반드시 일치해야 한다."""
-    squares_x:     int   = 10       # 가로 칸 수
-    squares_y:     int   = 7        # 세로 칸 수
-    square_length: float = 0.040    # 체스보드 칸 크기 (m) - 실측값으로 수정
-    marker_length: float = 0.028    # ArUco marker 크기 (m) - 실측값으로 수정
+    squares_x:     int   = 11       # 가로 칸 수
+    squares_y:     int   = 8        # 세로 칸 수
+    square_length: float = 0.020    # 체스보드 칸 크기 (m) - 실측 20mm
+    marker_length: float = 0.015    # ArUco marker 크기 (m) - 실측 15mm
     dictionary:    str   = "DICT_4X4_50"  # ArUco dictionary 이름
 
     def to_cv2_dict(self) -> cv2.aruco.Dictionary:
@@ -1725,12 +1725,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Board 설정
     board = p.add_argument_group('ChArUco Board 파라미터')
-    board.add_argument('--squares-x', type=int, default=10, help='가로 칸 수 (기본: 10)')
-    board.add_argument('--squares-y', type=int, default=7,  help='세로 칸 수 (기본: 7)')
-    board.add_argument('--square-length', type=float, default=0.040,
-                       help='칸 크기 m (기본: 0.040=40mm, 실측값으로 반드시 수정)')
-    board.add_argument('--marker-length', type=float, default=0.028,
-                       help='ArUco marker 크기 m (기본: 0.028=28mm)')
+    board.add_argument('--squares-x', type=int, default=11, help='가로 칸 수 (기본: 11)')
+    board.add_argument('--squares-y', type=int, default=8,  help='세로 칸 수 (기본: 8)')
+    board.add_argument('--square-length', type=float, default=0.020,
+                       help='칸 크기 m (기본: 0.020=20mm, 실측값)')
+    board.add_argument('--marker-length', type=float, default=0.015,
+                       help='ArUco marker 크기 m (기본: 0.015=15mm, 실측값)')
     board.add_argument('--dictionary', default='DICT_4X4_50',
                        choices=[k for k in dir(cv2.aruco) if k.startswith('DICT_')],
                        help='ArUco dictionary (기본: DICT_4X4_50)')
