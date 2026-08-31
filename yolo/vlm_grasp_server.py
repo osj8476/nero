@@ -164,13 +164,22 @@ Analyze the target object using:
   Image 1: full scene (environment context, obstacles, accessibility)
   Image 2: cropped target object (shape, orientation, graspable surfaces)
 
+IMPORTANT: Base your decision on the ACTUAL visible shape and aspect ratio
+in Image 2, not on assumptions from the object's name/category. The same
+object type can appear in different orientations (e.g. a book can be lying
+flat OR standing upright on its spine) — look at the crop before deciding.
+
 Determine the most suitable grasp configuration for a parallel-jaw gripper.
 
-Available grasp types:
-  TOP   — gripper descends from above; best for flat/wide objects, lids, flat books
-  SIDE  — horizontal approach from the side; best for tall cylinders (cup, bottle, vase)
-  PINCH — gripper rotated ~90° vertical; best for thin/flat/elongated items (pen, knife,
-           fork, spoon, scissors, toothbrush, remote, phone, credit card)
+Available grasp types (typical cases, not fixed rules — verify against
+the actual image):
+  TOP   — gripper descends from above; typical for objects lying flat/wide
+          when viewed from the camera (e.g. a book lying on a table)
+  SIDE  — horizontal approach from the side; typical for tall/upright
+          objects (a standing book, cup, bottle, vase)
+  PINCH — gripper rotated ~90° vertical; typical for thin/elongated items
+          held between fingertips (pen, knife, fork, spoon, scissors,
+          toothbrush, remote, phone, credit card) regardless of orientation
 
 You do NOT compute metric angles, coordinates, or quaternions — a separate
 geometry module measures the object's actual 3D shape. Your job is only to
@@ -477,9 +486,11 @@ def build_app(port: int, model_name: str, debug: bool, debug_dir: str) -> FastAP
         print(f"[vlm :{port}] loading {model_name} on {device} …")
         t0 = time.time()
 
+        # [2026-08 랩탑 실측] float16으로 로드하면 퇴화 생성("!!!!" 등) 발생 --
+        # bfloat16으로 고쳐서 해결됨. GPU가 bfloat16을 지원해야 함(Ampere+).
         model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
             model_name,
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+            torch_dtype=torch.bfloat16 if device == "cuda" else torch.float32,
             device_map=device,
         )
         model.eval()
@@ -807,6 +818,7 @@ def build_app(port: int, model_name: str, debug: bool, debug_dir: str) -> FastAP
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
+    ap.add_argument("--host",      type=str, default="127.0.0.1")
     ap.add_argument("--port",      type=int, default=8003)
     ap.add_argument("--model",     default="Qwen/Qwen2.5-VL-3B-Instruct")
     ap.add_argument("--debug",     action="store_true")
@@ -814,4 +826,4 @@ if __name__ == "__main__":
     args = ap.parse_args()
 
     application = build_app(args.port, args.model, args.debug, args.debug_dir)
-    uvicorn.run(application, host="127.0.0.1", port=args.port, log_level="info")
+    uvicorn.run(application, host=args.host, port=args.port, log_level="info")
