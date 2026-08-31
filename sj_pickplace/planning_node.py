@@ -124,6 +124,17 @@ SIDE_APPROACH_STANDOFF_M = 0.10
 # [2026-08-26 추가] slide 액션(문고리/서랍 손잡이) 기본 후퇴 거리(미터) --
 # 손잡이를 쥔 채로 접근각 반대방향으로 이만큼 직선 이동한 뒤 놓는다.
 DEFAULT_SLIDE_DISTANCE_M = 0.08
+# [2026-08-31 추가] side/pinch 접근 스윕이 목표 물체 주변의 다른 감지된
+# 물체를 치는 현상이 실측 확인됨(면-정렬/블라인드 스윕 후보 각도가 넓게
+# 도는데, MoveIt2 planning scene엔 테이블/바닥 정도만 등록돼 있고 YOLO가
+# 인식한 물체들은 충돌 회피 대상이 아니었음). _sync_scene_collision_objects
+# 가 /detected_objects의 각 물체를 이 크기의 정육면체 keep-out 존으로
+# planning scene에 등록해 OMPL이 우회 경로를 찾게 한다. 물체의 실제 크기를
+# 정확히 모르니(estimate_object_geometry는 신뢰 불가 판정,
+# docs/wiki/grasp_geometry_pipeline.md 참고) 보수적으로 넉넉한 고정
+# 크기를 쓴다 -- 너무 작으면 여전히 칠 수 있고, 너무 크면 근접한 다른
+# 물체를 못 집는 트레이드오프라 실기 튜닝 대상.
+COLLISION_OBJECT_SIZE_M = (0.10, 0.10, 0.10)
 # [이관] SIDE_MIN_DIST, SIDE_PITCH_DEG, TOP_ANGLE_PITCH_DEG -> grasp_kinematics.py (import 참고)
 # [이관] top_down_angle_quat, sim_top_down_angle_quat ->
 # grasp_kinematics.top_down_angle_quat / sim_top_down_angle_quat
@@ -381,6 +392,10 @@ class PlanningNode(Node):
                 self.get_logger().warn(f"'{label}' 못 찾음.")
                 with self.lock:
                     self.busy = False
+                # [2026-08-31 수정] 여기서 결과를 발행 안 하면 MCP 클라이언트가
+                # 75초 타임아웃까지 그냥 대기하게 되는 버그가 실측 확인됨
+                # (낮은 confidence로 필터링돼 candidates가 비는 경우 반복 재현).
+                self._publish_result('rejected', f"'{label}' 인식 안 됨(신뢰도 부족 또는 미검출)")
                 return
             grasp_dir = cmd.get('grasp_dir', None)
             # [2026-08-26 수정] side_approach_deg의 기준을 world 절대각에서
@@ -468,6 +483,7 @@ class PlanningNode(Node):
                 self.get_logger().warn(f"[slide] '{label}' 못 찾음.")
                 with self.lock:
                     self.busy = False
+                self._publish_result('rejected', f"'{label}' 인식 안 됨(신뢰도 부족 또는 미검출)")
                 return
             grasp_dir = cmd.get('grasp_dir', None)
             if grasp_dir not in ('side', 'pinch'):
@@ -537,10 +553,15 @@ class PlanningNode(Node):
             self.get_logger().info(
                 f'PLACE 시작 @ {pos} | 자세: {"side" if is_side else "top"} '
                 f'{[round(v,3) for v in quat]}')
+            # [2026-08-31 추가] side/pinch place 직후 후퇴 방식 -- 'slide'(수평,
+            # xy만 변화) | 'lift'(수직, z만 변화, 기본값). top-down은 원래부터
+            # lift뿐이라 이 값 무관.
+            _place_retreat_mode = cmd.get('retreat_mode') or 'lift'
             threading.Thread(
                 target=self._place_sequence, args=(pos, quat, is_side),
                 kwargs={'side_approach_offset_deg': _place_side_approach_offset_deg,
-                        'is_pinch': grasp_dir == 'pinch'},
+                        'is_pinch': grasp_dir == 'pinch',
+                        'retreat_mode': _place_retreat_mode},
                 daemon=True).start()
         elif action == 'move':
             pos = cmd.get('target_pos')
@@ -696,6 +717,72 @@ class PlanningNode(Node):
             return math.hypot(c.get('x', 0.0), c.get('y', 0.0))
         best = min(candidates, key=_dist)
         return best.get('center_3d'), best.get('angle_base_deg', None)
+
+    # ── 충돌 회피(감지 물체 keep-out zone) ──────────────────────────────────
+    def _sync_scene_collision_objects(self, exclude_pos=None, exclude_radius_m=0.08):
+        """[2026-08-31 추가] /detected_objects의 각 물체를 MoveIt2 planning
+        scene에 박스형 충돌 오브젝트로 등록한다 -- side/pinch 접근 스윕이
+        목표 물체 주변의 다른 물체를 치는 사고(실측 확인) 방지.
+
+        exclude_pos가 주어지면 그 좌표에서 exclude_radius_m 이내의 물체는
+        등록하지 않는다 -- 지금 집으려는/막 내려놓은 목표 물체 자신을
+        장애물로 등록하면 접근 자체가 막히기 때문. 매 호출마다 기존
+        등록을 전부 지우고 최신 /detected_objects로 다시 채운다(물체가
+        옮겨졌을 수 있어 상태를 따로 추적하지 않고 매번 새로 씀 -- 단순함
+        우선). 이 프로토타입은 예상 위치를 정확한 크기로 감싸는 게
+        아니라 고정 크기(COLLISION_OBJECT_SIZE_M)의 보수적 keep-out
+        존이다 -- estimate_object_geometry가 신뢰 불가 판정을 받아
+        (docs/wiki/grasp_geometry_pipeline.md) 정확한 물체 크기를 쓸
+        방법이 아직 없다.
+
+        use_moveit2=False(실물 로봇 경로)면 self.moveit2가 None이라
+        아무것도 안 함 -- 이 기능은 현재 sim(MoveIt2 OMPL 플래닝) 경로
+        전용이다.
+        """
+        if self.moveit2 is None:
+            return
+        try:
+            self.moveit2.clear_all_collision_objects()
+        except Exception as e:
+            self.get_logger().warn(f'[충돌회피] 오브젝트 초기화 실패: {e}')
+            return
+        n_added = 0
+        for i, obj in enumerate(self.latest_objects):
+            c = obj.get('center_3d')
+            if not c:
+                continue
+            if exclude_pos is not None:
+                dx = c.get('x', 0.0) - exclude_pos.get('x', 0.0)
+                dy = c.get('y', 0.0) - exclude_pos.get('y', 0.0)
+                if math.hypot(dx, dy) < exclude_radius_m:
+                    continue
+            try:
+                self.moveit2.add_collision_box(
+                    id=f'nero_obs_{i}',
+                    size=COLLISION_OBJECT_SIZE_M,
+                    position=(c.get('x', 0.0), c.get('y', 0.0), c.get('z', 0.0)),
+                    quat_xyzw=(0.0, 0.0, 0.0, 1.0),
+                    frame_id='base_link',
+                )
+                n_added += 1
+            except Exception as e:
+                self.get_logger().warn(f'[충돌회피] 오브젝트 추가 실패(label={obj.get("label")}): {e}')
+        if n_added:
+            self.get_logger().info(f'[충돌회피] 감지 물체 {n_added}개를 충돌 오브젝트로 등록')
+
+    def _clear_scene_collision_objects(self):
+        """[2026-08-31 추가] _sync_scene_collision_objects로 등록한 충돌
+        오브젝트를 전부 제거한다. pick/slide/place 시퀀스 종료 직후
+        (finally 블록)에서 호출해, 이 시퀀스 전용으로 등록한 keep-out
+        존이 이후의 무관한 이동(go_home, move_joints 등)까지 막지 않게
+        한다."""
+        if self.moveit2 is None:
+            return
+        try:
+            self.moveit2.clear_all_collision_objects()
+        except Exception as e:
+            self.get_logger().warn(f'[충돌회피] 오브젝트 정리 실패: {e}')
+
     # ── top-down 쿼터니언 백엔드 분기 ────────────────────────────────────────
     def _top_down_quat_for(self, pos, angle_deg):
         """
@@ -756,6 +843,10 @@ class PlanningNode(Node):
         # 후보 전부 실패해서 각도 무관 블라인드 스윕으로 폴백, 그립 불안정
         # 가능성 있음) 중 하나로 채워진다.
         side_grasp_alignment = None
+        # [2026-08-31 추가] 목표 물체 자신은 제외하고, 주변 다른 감지 물체를
+        # 충돌 오브젝트로 등록 -- side/pinch 접근 스윕이 옆 물체를 치는
+        # 사고 방지(실측 확인, _sync_scene_collision_objects docstring 참고).
+        self._sync_scene_collision_objects(exclude_pos=pos)
         if is_side:
             ok, reason = side_reachability_check(pos)
             if not ok:
@@ -1205,6 +1296,9 @@ class PlanningNode(Node):
         finally:
             with self.lock:
                 self.busy = False
+            # [2026-08-31 추가] 이 시퀀스 전용 keep-out zone이 이후 무관한
+            # 이동(go_home 등)까지 막지 않도록 정리.
+            self._clear_scene_collision_objects()
 
     def _slide_sequence(self, pos, quat, label='', side_approach_offset_deg=0.0,
                          is_pinch=False, slide_distance_m=DEFAULT_SLIDE_DISTANCE_M,
@@ -1229,6 +1323,7 @@ class PlanningNode(Node):
         finally:
             with self.lock:
                 self.busy = False
+            self._clear_scene_collision_objects()
 
     def _do_slide(self, pos, quat, label='', side_approach_offset_deg=0.0,
                   is_pinch=False, slide_distance_m=DEFAULT_SLIDE_DISTANCE_M,
@@ -1238,6 +1333,9 @@ class PlanningNode(Node):
         approach 루프(TCP오프셋/standoff/각도후보탐색)를 그대로 재사용하고
         마지막 단계만 lift 대신 slide+release로 바꾼다.
         """
+        # [2026-08-31 추가] _do_pick과 동일한 이유로 주변 물체를 충돌
+        # 오브젝트로 등록 (_sync_scene_collision_objects docstring 참고).
+        self._sync_scene_collision_objects(exclude_pos=pos)
         ok, reason = side_reachability_check(pos)
         if not ok:
             self.get_logger().warn(f'SLIDE 거부: {reason}')
@@ -1333,7 +1431,7 @@ class PlanningNode(Node):
         time.sleep(GRIPPER_DELAY)
 
     def _do_place(self, pos, quat, is_side=False, side_approach_offset_deg=0.0,
-                  is_pinch=False) -> dict:
+                  is_pinch=False, retreat_mode='lift') -> dict:
         """[2026-08 재설계] 실패 시 좌표를 자동으로 시프트해가며 재시도한다.
         근거: nero_robot_place_reachability memory (2026-07-30~08-03 실측).
           - approach/descend 실패는 특정 (x,y) 국소 도달불가 영역(singularity)일
@@ -1353,6 +1451,11 @@ class PlanningNode(Node):
         # 참고). approach/descend 재시도 중에는 장면이 안 바뀌므로
         # 후보 좌표를 여러 번 시도해도 이 스냅샷 하나를 계속 재사용한다.
         before_objects = list(self.latest_objects)
+        # [2026-08-31 추가] _do_pick과 동일한 이유로 주변 물체를 충돌
+        # 오브젝트로 등록(_sync_scene_collision_objects docstring 참고).
+        # place는 목표 좌표에 아직 물체가 없는 게 보통이지만, 쌓기처럼
+        # 근처에 이미 다른 물체가 있는 경우까지 대비해 동일하게 적용.
+        self._sync_scene_collision_objects(exclude_pos=pos)
         if is_side:
             # side는 좌표 시프트 재시도 대상이 아님(원본과 동일) --
             # 도달불가 판정은 여기서 즉시 'rejected'로 보고하고 종료.
@@ -1376,7 +1479,7 @@ class PlanningNode(Node):
                 verification = self._try_place_at(
                     cand, quat, is_side, before_objects,
                     side_approach_offset_deg=side_approach_offset_deg,
-                    is_pinch=is_pinch)
+                    is_pinch=is_pinch, retreat_mode=retreat_mode)
                 if i > 0:
                     self.get_logger().warn(
                         f'  PLACE: 원래 목표 {pos} 실패 -> 대체 좌표 {cand}로 성공')
@@ -1401,11 +1504,11 @@ class PlanningNode(Node):
         raise RuntimeError(f'모든 대체 좌표 실패: {last_err}')
 
     def _place_sequence(self, pos, quat, is_side=False, side_approach_offset_deg=0.0,
-                         is_pinch=False):
+                         is_pinch=False, retreat_mode='lift'):
         try:
             result_extra = self._do_place(pos, quat, is_side,
                                           side_approach_offset_deg=side_approach_offset_deg,
-                                          is_pinch=is_pinch)
+                                          is_pinch=is_pinch, retreat_mode=retreat_mode)
             # busy 해제를 발행보다 먼저 (레이스 방지 -- _scan_box_sequence 참고)
             with self.lock:
                 self.busy = False
@@ -1421,6 +1524,7 @@ class PlanningNode(Node):
         finally:
             with self.lock:
                 self.busy = False
+            self._clear_scene_collision_objects()
 
     def _move_to_joint_config(self, target_positions, label=''):
         """[신설] joint-space 목표로 이동하고 완료까지 대기, 성공 시 True.
@@ -1452,7 +1556,7 @@ class PlanningNode(Node):
         return ok
 
     def _try_place_at(self, pos, quat, is_side=False, before_objects=None,
-                      side_approach_offset_deg=0.0, is_pinch=False):
+                      side_approach_offset_deg=0.0, is_pinch=False, retreat_mode='lift'):
         """실제 approach->descend->open->lift 시퀀스 1회 시도.
         기존 _place_sequence 본문과 100% 동일 (분리만 함). 실패 시
         self._publish_result를 직접 부르지 않고 RuntimeError만 던진다 --
@@ -1494,7 +1598,15 @@ class PlanningNode(Node):
             else:
                 _quat_fn = sim_side_quat_for if self.use_moveit2 else side_quat_for
                 _grip_name = 'side'
-            approach_z = pos['z']
+            # [2026-08-31 추가] retreat_mode='lift'면 approach도 top-down처럼
+            # 최종 xy 그대로 z만 올린 지점으로 간 뒤 LIN으로 수직 하강해야
+            # 한다 -- retreat_mode='slide'(기존 동작)처럼 standoff에서
+            # 수평으로 밀고 들어가면, 바구니/박스 벽처럼 옆으로 막힌 물체
+            # 안에 놓을 때 접근 중에 그 벽을 치는 문제가 실측 확인됨.
+            # descend_z는 그대로 두고(px,py도 아래에서 standoff 대신 최종
+            # 지점 그대로 씀) approach_z만 올려서, "내려가기" 단계가 자동으로
+            # 순수 수직 LIN이 되게 한다.
+            approach_z = pos['z'] + (APPROACH_Z if retreat_mode == 'lift' else 0.0)
             descend_z = pos['z']
             lift_z = pos['z'] + LIFT_Z
         # [2026-07 삭제] place pre-rotate 제거. approach가 이미
@@ -1512,22 +1624,30 @@ class PlanningNode(Node):
         else:
             ok = False
             entry_quat = quat
+            ux = uy = None  # [2026-08-31 추가] 후퇴(slide-out) 방향 계산용, _do_slide와 동일 패턴
             for _i, _cand_offset in enumerate(_offset_candidates):
                 _cand_yaw = position_yaw + math.radians(_cand_offset)
                 _cux, _cuy = math.cos(_cand_yaw), math.sin(_cand_yaw)
                 _cand_px = dx - _cux * SIDE_TCP_OFFSET
                 _cand_py = dy - _cuy * SIDE_TCP_OFFSET
-                _cand_standoff_px = _cand_px - _cux * SIDE_APPROACH_STANDOFF_M
-                _cand_standoff_py = _cand_py - _cuy * SIDE_APPROACH_STANDOFF_M
+                if retreat_mode == 'lift':
+                    # 최종 xy 그대로, z만 위(approach_z)에서 접근 -- standoff
+                    # (수평 오프셋) 없음. descend가 그대로 수직 LIN이 됨.
+                    _cand_wp_px, _cand_wp_py = _cand_px, _cand_py
+                else:
+                    _cand_wp_px = _cand_px - _cux * SIDE_APPROACH_STANDOFF_M
+                    _cand_wp_py = _cand_py - _cuy * SIDE_APPROACH_STANDOFF_M
                 _cand_quat = _quat_fn(pos, approach_offset_deg=_cand_offset)
                 self.get_logger().info(
                     f'  [place {_grip_name} approach 후보 {_i+1}/{len(_offset_candidates)}] '
-                    f'접근각={math.degrees(_cand_yaw):.1f}° (offset={_cand_offset:+.1f}°) 시도...')
-                ok = self._move(_cand_standoff_px, _cand_standoff_py, approach_z, _cand_quat,
+                    f'접근각={math.degrees(_cand_yaw):.1f}° (offset={_cand_offset:+.1f}°, '
+                    f'retreat_mode={retreat_mode}) 시도...')
+                ok = self._move(_cand_wp_px, _cand_wp_py, approach_z, _cand_quat,
                                 tol_ori=TOL_ORI_LOOSE, planner_chain=['PTP', 'LIN'])
                 if ok:
                     entry_quat = _cand_quat
                     px, py = _cand_px, _cand_py
+                    ux, uy = _cux, _cuy
                     if _cand_offset != side_approach_offset_deg:
                         self.get_logger().warn(
                             f'  [place {_grip_name} approach] 요청 접근각(offset='
@@ -1557,21 +1677,42 @@ class PlanningNode(Node):
         self.get_logger().info('4/4: 그리퍼 열기')
         self._gripper(SIM_GRIPPER_OPEN, GRIPPER_OPEN)
         time.sleep(GRIPPER_DELAY)
-        self.get_logger().info('  들어올리기 (lift) — 다음 동작 여유 확보')
-        lift_candidates = [lift_z, pos['z'] + 0.06 + (0 if is_side else TOP_TCP_OFFSET),
-                           pos['z'] + 0.03 + (0 if is_side else TOP_TCP_OFFSET)]
-        ok = False
-        achieved_lift_z = lift_z
-        for i, lz in enumerate(lift_candidates):
-            if i > 0:
-                self.get_logger().warn(
-                    f'  place lift 높이 낮춰서 재시도: {lz:.3f}m (원래 목표 {lift_z:.3f}m)')
-            ok = self._move(px, py, lz, place_quat, tol_ori=TOL_ORI_TIGHT, planner_chain=['LIN'])
-            if ok:
-                achieved_lift_z = lz
-                break
-        if not ok:
-            self.get_logger().warn('  place 후 lift 모든 높이 재시도 실패 (place 자체는 성공, 무시하고 진행)')
+        # [2026-08-31 추가] side/pinch는 place 직후 후퇴 방식을 두 가지로
+        # 고를 수 있다 -- 하나로 무조건 고정하면 안 됨(실측 지적):
+        #   'slide' — standoff에서 접근방향 직선(slide-in)으로 들어왔던 것과
+        #             대칭으로, 접근방향(ux,uy) 반대로 xy만 바뀌고 z는 고정한
+        #             채 수평 후퇴(_do_slide 후퇴 로직과 동일 원리). 위쪽에
+        #             장애물이 있어 수직으로 못 빠질 때 적합.
+        #   'lift'   — xy는 고정하고 z만 올리는, top-down의 lift와 동일 원리
+        #             (기본값). 위쪽이 트인 경우 자연스러움.
+        # top-down(not is_side)은 원래부터 lift 개념밖에 없어 이 선택지가
+        # 없다 -- retreat_mode는 is_side일 때만 의미가 있다.
+        if is_side and retreat_mode == 'slide':
+            self.get_logger().info(
+                f'  후퇴 (slide-out) — 접근방향({math.degrees(math.atan2(uy, ux)):.1f}°) '
+                f'반대로 {SIDE_APPROACH_STANDOFF_M}m 직선 후퇴')
+            retreat_px = px - ux * SIDE_APPROACH_STANDOFF_M
+            retreat_py = py - uy * SIDE_APPROACH_STANDOFF_M
+            ok = self._move(retreat_px, retreat_py, descend_z, place_quat,
+                            tol_ori=TOL_ORI_LOOSE, planner_chain=['LIN'])
+            if not ok:
+                self.get_logger().warn('  place 후 slide-out 후퇴 실패 (place 자체는 성공, 무시하고 진행)')
+        else:
+            self.get_logger().info('  들어올리기 (lift) — 다음 동작 여유 확보')
+            lift_candidates = [lift_z, pos['z'] + 0.06 + (0 if is_side else TOP_TCP_OFFSET),
+                               pos['z'] + 0.03 + (0 if is_side else TOP_TCP_OFFSET)]
+            ok = False
+            achieved_lift_z = lift_z
+            for i, lz in enumerate(lift_candidates):
+                if i > 0:
+                    self.get_logger().warn(
+                        f'  place lift 높이 낮춰서 재시도: {lz:.3f}m (원래 목표 {lift_z:.3f}m)')
+                ok = self._move(px, py, lz, place_quat, tol_ori=TOL_ORI_TIGHT, planner_chain=['LIN'])
+                if ok:
+                    achieved_lift_z = lz
+                    break
+            if not ok:
+                self.get_logger().warn('  place 후 lift 모든 높이 재시도 실패 (place 자체는 성공, 무시하고 진행)')
 
         # [신설] 폐루프 검증 -- 그리퍼가 물러났으니 이제 카메라 시야가
         # 안 가려진 상태. perception이 새로 관측할 시간을 잠깐 준 뒤,

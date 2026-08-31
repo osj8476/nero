@@ -1364,7 +1364,7 @@ def slide_object(target_label: str, grasp_dir: str, x: float = None, y: float = 
 
 @mcp.tool()
 def place_object(x: float, y: float, z: float, grasp_dir: str = 'auto',
-                  side_approach_deg: float = None) -> str:
+                  side_approach_deg: float = None, retreat_mode: str = 'lift') -> str:
     """집은 물체를 지정한 좌표(base_link 기준, 미터)에 내려놓는다. place 완료까지 블로킹.
 
     Args:
@@ -1374,6 +1374,14 @@ def place_object(x: float, y: float, z: float, grasp_dir: str = 'auto',
             접근각 -- 물체 방위각(atan2(y,x)) 기준 상대각(도). 생략(또는 0)
             이면 정면 접근. pick_object와 동일한 접근각 후보 자동 탐색이
             place에도 적용된다.
+        retreat_mode: [2026-08-31 추가] grasp_dir이 side/pinch일 때, 그리퍼를
+            연 뒤 물러나는 방식. top-down은 이 값과 무관하게 항상 수직으로
+            물러난다.
+              'lift'  (기본값) — xy 고정, z만 올림 (top-down 방식과 동일 원리).
+                        놓은 지점 위쪽이 트여있을 때 적합.
+              'slide' — z 고정, 접근했던 방향의 반대로 수평 후퇴(들어왔던
+                        길 그대로 되돌아감). 위쪽에 다른 물체/장애물이 있어
+                        수직으로 못 빠질 때 적합.
 
     ⚠ 요청한 좌표가 로봇의 국소 도달불가 지점(singularity)이거나 비정상적
     으로 높은 z일 경우, 서버가 자동으로 근처 좌표(±0.05m y시프트 또는
@@ -1411,6 +1419,8 @@ def place_object(x: float, y: float, z: float, grasp_dir: str = 'auto',
         payload['grasp_dir'] = grasp_dir
         if side_approach_deg is not None:
             payload['side_approach_deg'] = side_approach_deg
+        if retreat_mode and retreat_mode != 'lift':
+            payload['retreat_mode'] = retreat_mode
     _ros_node.publish_command(payload)
     result = _ros_node.wait_for_result(timeout=TIMEOUT_PLACE)
     # [신규] planning_node가 도달 불가 지점을 감지해 좌표를 자동으로
