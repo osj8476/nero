@@ -132,6 +132,15 @@ v5/v6 등 다른 가중치를 비교하려고 `perception_node_sim`을 커스텀
 충분하다. 상세: `docs/wiki/perception_dev_tools.md`의 "운영 중 모델
 서버 포트 전환 시 주의사항" 참고.
 
+## estimate_object_geometry의 major_axis_yaw_deg — 신뢰 불가 (2026-08-31 확인)
+`estimate_object_geometry` 툴이 반환하는 `major_axis_yaw_deg`(PCA 장축
+방위각)는 **접근각 결정에 쓰지 마라.** box를 여러 각도로 재배치하며
+실측한 결과, 실제 회전과 무관하게 매번 82~89도 근처로 편향 수렴하는
+현상이 확인됐다(NoOp segmentation이 bbox를 그대로 마스크로 써서 배경이
+섞여 들어가는 게 유력한 원인으로 추정 — 상세: `docs/wiki/grasp_geometry_pipeline.md`).
+기존 `angle_base_deg`(Hough)가 상대적으로 더 낫지만 이것도 완전히
+믿을 건 아니다. 접근각도는 당분간 사용자가 직접 지정한 값을 쓴다.
+
 ## 참고 문서
 - 그립 각도 선택 알고리즘의 설계 이력/폐기된 접근/한계:
   `.claude/skills/grasp-kinematics-design/SKILL.md` 참고
