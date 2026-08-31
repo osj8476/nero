@@ -51,6 +51,7 @@ class SceneRequest(BaseModel):
 
 class SceneResponse(BaseModel):
     objects: list = []            # [{"label":"cup","bbox":[x1,y1,x2,y2]}, ...]
+    placement_regions: list = []  # [{"bbox":[x1,y1,x2,y2],"confidence":0.8}, ...]
     inference_ms: float = 0.0
 
 class PlacementRequest(BaseModel):
@@ -82,17 +83,21 @@ ALLOWED_ORIENT = {"HORIZONTAL", "VERTICAL"}
 
 # ── 시스템 프롬프트 ──────────────────────────────────────────────────────────
 _SCENE_SYSTEM = """\
-Look at the camera image independently and detect every distinct physical object that is actually visible.
+Look at the camera image and return two things in one pass:
 
-Rules:
-- Detect objects based ONLY on what you see in the image. Do NOT copy, reuse, or reference any object names or coordinates from this prompt.
-- Include manipulable objects: cups, boxes, scissors, books, phones, speakers, bags, markers, pens, pencils, bottles, containers, wallets, cables, and any other physical item.
-- Exclude background surfaces: tables, floors, walls, the robot arm.
-- Do NOT rely on any prior detector results.
+1. OBJECTS: detect every distinct physical object that is actually visible.
+   - Detect based ONLY on what you see. Do NOT copy from this prompt.
+   - Include: cups, boxes, scissors, books, phones, speakers, bags, markers, pens, pencils, bottles, containers, wallets, cables, and any other physical item.
+   - Exclude: tables, floors, walls, robot arm.
 
-Return ONLY minified JSON with this schema — no markdown, no extra text:
-{"objects":[{"label":"<actual object name from image>","bbox":[x_min,y_min,x_max,y_max]},{"label":"<another object>","bbox":[x_min,y_min,x_max,y_max]}]}
-bbox values are normalized 0.0-1.0. List ALL objects you actually see. No descriptions, no confidence scores."""
+2. PLACEMENT_REGIONS: find 1-3 empty flat areas where an object can safely be placed.
+   - Must NOT overlap any detected object.
+   - Must be on a flat accessible surface.
+   - If no empty area visible, use empty list.
+
+Return ONLY minified JSON — no markdown, no extra text:
+{"objects":[{"label":"cup","bbox":[x1,y1,x2,y2]}],"placement_regions":[{"bbox":[x1,y1,x2,y2],"confidence":0.8}]}
+bbox values are normalized 0.0-1.0. No descriptions, no confidence scores for objects."""
 
 _PLACEMENT_SYSTEM = """\
 Find 1-3 empty flat regions where an object can be placed on the surface.
@@ -105,11 +110,9 @@ No labels. No reasons. Do NOT overlap any existing object."""
 _GROUNDING_SYSTEM = """\
 You are a visual scene grounding module for a robot.
 
-Analyze the camera image carefully.
+Step 1 — Scan the ENTIRE image and mentally list EVERY distinct physical object you can see (cups, boxes, bottles, cables, pens, pencils, markers, tools, containers, electronics, and any other physical item). Do NOT skip small or thin objects.
 
-YOLO detections are provided as context, but they are NOT a complete list.
-Your task is to visually locate the REQUESTED TARGET OBJECT in the image,
-even if YOLO did not detect it.
+Step 2 — From that complete list, find the object that best matches the TARGET OBJECT specified above.
 
 Return ONLY valid JSON — no markdown, no extra text:
 {
@@ -123,7 +126,8 @@ Return ONLY valid JSON — no markdown, no extra text:
 
 Rules:
 - bbox_norm and center_norm use normalized coordinates: 0.0 = left/top, 1.0 = right/bottom
-- If the requested object is NOT visible in the image, return:
+- center_norm MUST be the geometric center of bbox_norm: [(x_min+x_max)/2, (y_min+y_max)/2]
+- If the target is NOT visible after scanning the full scene, return:
   {"found": false, "label": "", "confidence": 0.0, "description": "not found"}
 - Do NOT invent objects that are not clearly visible
 - Do NOT estimate metric 3D coordinates
@@ -217,37 +221,52 @@ _VLM_IMG_H = 360.0
 
 # ── scene / placement 검증 ────────────────────────────────────────────────────
 def _validate_scene(data, elapsed: float) -> SceneResponse:
-    """dict({"objects":[...]}) 또는 list([{"label":..,"bbox"/"bbox_2d":..}]) 모두 허용.
+    """dict({"objects":[...],"placement_regions":[...]}) 또는 list([...]) 모두 허용.
     bbox가 픽셀 좌표(>1.0)이면 _VLM_IMG_W/_VLM_IMG_H 기준으로 정규화."""
     if isinstance(data, list):
         raw_objects = data
+        raw_placements = []
     else:
         raw_objects = data.get("objects", [])
         if not isinstance(raw_objects, list):
             raw_objects = []
+        raw_placements = data.get("placement_regions", [])
+        if not isinstance(raw_placements, list):
+            raw_placements = []
 
-    valid = []
+    def _norm_bbox(bbox):
+        bbox = [float(v) for v in bbox]
+        if any(v > 1.0 for v in bbox):
+            bbox = [
+                bbox[0] / _VLM_IMG_W, bbox[1] / _VLM_IMG_H,
+                bbox[2] / _VLM_IMG_W, bbox[3] / _VLM_IMG_H,
+            ]
+        return [round(max(0.0, min(1.0, v)), 4) for v in bbox]
+
+    valid_objects = []
     for o in raw_objects:
         if not isinstance(o, dict):
             continue
         label = str(o.get("label", "")).strip()
         if not label:
             continue
-        # bbox / bbox_2d 둘 다 허용
         bbox = o.get("bbox") or o.get("bbox_2d", [])
         if not isinstance(bbox, list) or len(bbox) != 4:
             continue
-        bbox = [float(v) for v in bbox]
-        # 픽셀 좌표 → 정규화 변환 (값이 1.0 초과이면 픽셀로 판단)
-        if any(v > 1.0 for v in bbox):
-            bbox = [
-                bbox[0] / _VLM_IMG_W, bbox[1] / _VLM_IMG_H,
-                bbox[2] / _VLM_IMG_W, bbox[3] / _VLM_IMG_H,
-            ]
-        bbox = [round(max(0.0, min(1.0, v)), 4) for v in bbox]
-        valid.append({"label": label, "bbox": bbox})
+        valid_objects.append({"label": label, "bbox": _norm_bbox(bbox)})
 
-    return SceneResponse(objects=valid, inference_ms=round(elapsed * 1000, 1))
+    valid_placements = []
+    for r in raw_placements:
+        if not isinstance(r, dict):
+            continue
+        bbox = r.get("bbox") or r.get("bbox_2d", [])
+        if not isinstance(bbox, list) or len(bbox) != 4:
+            continue
+        conf = round(float(r.get("confidence", 0.8)), 3)
+        valid_placements.append({"bbox": _norm_bbox(bbox), "confidence": conf})
+
+    return SceneResponse(objects=valid_objects, placement_regions=valid_placements,
+                         inference_ms=round(elapsed * 1000, 1))
 
 
 def _validate_placement(data, elapsed: float) -> PlacementResponse:
@@ -516,7 +535,7 @@ def build_app(port: int, model_name: str, debug: bool, debug_dir: str) -> FastAP
 
     def _infer_scene(full_img: Image.Image, detections: list) -> str:
         """object label+bbox만 반환. YOLO context 없이 VLM 독립 탐지. 호출 전 _lock 획득 필요."""
-        return _run_vlm(full_img, _SCENE_SYSTEM, "[]", max_new_tokens=512, tag="analyze_scene", include_yolo=False)
+        return _run_vlm(full_img, _SCENE_SYSTEM, "[]", max_new_tokens=640, tag="analyze_scene", include_yolo=False)
 
     def _infer_placement(full_img: Image.Image, detections: list) -> str:
         """빈 배치 영역만 반환. 호출 전 _lock 획득 필요."""
@@ -647,7 +666,7 @@ def build_app(port: int, model_name: str, debug: bool, debug_dir: str) -> FastAP
                     detail=f"vlm_inference_failed|{type(e).__name__}:{e}|elapsed={elapsed_ms}ms",
                 )
 
-        print(f"[vlm :{port}] analyze_scene — {result.inference_ms:.0f}ms objects={len(result.objects)}")
+        print(f"[vlm :{port}] analyze_scene — {result.inference_ms:.0f}ms objects={len(result.objects)} placements={len(result.placement_regions)}")
         return result
 
     @app.post("/find_placement", response_model=PlacementResponse)

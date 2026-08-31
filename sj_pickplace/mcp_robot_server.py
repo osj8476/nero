@@ -859,9 +859,8 @@ def list_detected_objects() -> str:
     ─── 라우팅 규칙 ──────────────────────────────────────────────────────────
     ① 알려진 물체 위치 확인         → 이 도구 (YOLO, 빠름)
     ② YOLO 목록에 없는 특정 물체    → ground_object(label)
-    ③ 화면 전체 장면 파악           → analyze_scene()
+    ③ 화면 전체 장면 파악 + 배치 공간 → analyze_scene()
     ④ 파지 방법 판단                → infer_grasp(label)
-    ⑤ 배치 가능 공간 탐색           → find_placement()
 
     YOLO 결과에 target object가 있으면 ground_object()를 호출하지 마라.
     YOLO 결과만으로 해결 가능한 작업에 VLM을 호출하지 마라.
@@ -1569,6 +1568,7 @@ def analyze_scene() -> str:
 
     ─── 라우팅 규칙 ──────────────────────────────────────────────────────────
     ○ 사용: "화면에 뭐가 있어?" / "YOLO가 못 찾은 것도 알려줘" / 전체 장면 파악
+           "어디 놓을 수 있어?" / "빈 공간 찾아줘" / placement 영역 탐색
     ✗ 금지: 단일 물체 위치 확인   → list_detected_objects() 또는 ground_object()
     ✗ 금지: YOLO에 이미 있는 물체를 다시 찾기 위한 호출
     ✗ 금지: VLM 실패 시 robot movement 명령
@@ -1590,6 +1590,7 @@ def analyze_scene() -> str:
                "objects":[{"label":"cup","bbox":[x1,y1,x2,y2],"source":"both"},
                           {"label":"pen","bbox":[...],"source":"vlm"},
                           {"label":"box","bbox":[...],"source":"yolo"},...],
+               "placement_regions":[{"bbox":[x1,y1,x2,y2],"confidence":0.8},...],
                "inference_ms":8000.0,"image_age_sec":0.1}
         실패: {"status":"error","reason":"..."}
     """
@@ -1669,92 +1670,9 @@ def analyze_scene() -> str:
         _last_scene_stamp   = time.time()
 
     return json.dumps({
-        'status':        'success',
-        'yolo_detected': [o.get('label', '?') for o in yolo_objects],
-        'objects':       objects_merged,
-        'inference_ms':  data.get('inference_ms', 0.0),
-        'image_age_sec': img_age,
-    }, ensure_ascii=False)
-
-
-@mcp.tool()
-def find_placement() -> str:
-    """카메라 화면에서 물체를 놓을 수 있는 빈 공간을 추론한다.
-
-    ─── 라우팅 규칙 ──────────────────────────────────────────────────────────
-    ○ 사용: "빈 공간에 놓아" / "정리해" / "어디 두면 좋을지 봐줘" / "선반에 놓아"
-    ✗ 금지: "컵 옆에 놓아" → YOLO 3D 좌표 상대 계산으로 해결 (VLM 불필요)
-    ✗ 금지: target placement가 명확한 좌표로 이미 알려진 경우
-
-    VLM은 normalized bbox로 배치 가능 영역만 반환한다.
-    실제 robot 좌표는 반환된 bbox → depth → camera coords → TF → base_link 순으로 변환한다.
-    VLM placement는 approximate임을 반드시 명시한다.
-
-    ─── VLM 실패 시 절대 금지 ──────────────────────────────────────────────────
-    status가 "error"이면:
-    - YOLO 좌표로 placement 위치 추측 금지
-    - robot movement 명령 금지
-    반드시: "시각적 scene reasoning을 수행할 수 없습니다. (이유: {reason})"
-
-    Returns:
-        성공: {"status":"success",
-               "placement_regions":[{"bbox":[x1,y1,x2,y2],"confidence":0.8},...],
-               "inference_ms":8000.0,"image_age_sec":0.1}
-        실패: {"status":"error","reason":"..."}
-    """
-    _ensure_ros()
-
-    PLACEMENT_URL = "http://127.0.0.1:8003/find_placement"
-    VLM_TIMEOUT = 45.0
-
-    img_bgr, img_stamp = _ros_node.get_image()
-    if img_bgr is None:
-        return json.dumps({'status': 'error',
-                           'reason': 'image_unavailable — /camera/color/image_raw 수신 없음'})
-    img_age = round(time.time() - img_stamp, 3)
-    if img_age > 3.0:
-        return json.dumps({'status': 'error',
-                           'reason': f'image_stale — {img_age:.1f}s 경과 (>3s)'})
-
-    yolo_objects, _ = _ros_node.get_objects()
-    detections = [{'label': o.get('label', '?'), 'bbox': o.get('bbox', [])} for o in yolo_objects]
-
-    def _encode_b64(bgr: np.ndarray) -> str:
-        ok, buf = cv2.imencode('.jpg', bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        if not ok:
-            raise RuntimeError('JPEG 인코딩 실패')
-        return base64.b64encode(buf.tobytes()).decode()
-
-    try:
-        full_b64 = _encode_b64(img_bgr)
-    except Exception as e:
-        return json.dumps({'status': 'error', 'reason': f'encode_failed — {e}'})
-
-    try:
-        resp = _requests.post(PLACEMENT_URL,
-                              json={'full_image_b64': full_b64, 'detections': detections,
-                                    'timestamp': time.time()},
-                              timeout=VLM_TIMEOUT)
-    except _requests.exceptions.ConnectionError:
-        return json.dumps({'status': 'error',
-                           'reason': 'vlm_server_unavailable — http://127.0.0.1:8003 연결 거부'})
-    except _requests.exceptions.Timeout:
-        return json.dumps({'status': 'error',
-                           'reason': f'vlm_timeout — {VLM_TIMEOUT}s 초과'})
-    except Exception as e:
-        return json.dumps({'status': 'error', 'reason': f'vlm_request_failed — {e}'})
-
-    if resp.status_code != 200:
-        return json.dumps({'status': 'error',
-                           'reason': f'vlm_http_error — status {resp.status_code}: {resp.text[:200]}'})
-
-    try:
-        data = resp.json()
-    except Exception:
-        return json.dumps({'status': 'error', 'reason': f'vlm_invalid_json — {resp.text[:200]}'})
-
-    return json.dumps({
         'status':            'success',
+        'yolo_detected':     [o.get('label', '?') for o in yolo_objects],
+        'objects':           objects_merged,
         'placement_regions': data.get('placement_regions', []),
         'inference_ms':      data.get('inference_ms', 0.0),
         'image_age_sec':     img_age,
@@ -1942,12 +1860,13 @@ def ground_object(target_label: str, parent_label: str = None) -> str:
     else:
         bbox_px = None
 
-    if len(center_norm) == 2:
-        u = center_norm[0] * w
-        v = center_norm[1] * h
-    elif bbox_px is not None:
+    # bbox_norm에서 직접 계산 (VLM center_norm은 부정확할 수 있어 사용 안 함)
+    if bbox_px is not None:
         u = (bbox_px[0] + bbox_px[2]) / 2.0
         v = (bbox_px[1] + bbox_px[3]) / 2.0
+    elif len(center_norm) == 2:
+        u = center_norm[0] * w
+        v = center_norm[1] * h
     else:
         return json.dumps({'success': False, 'reason': 'no_valid_bbox_from_vlm'})
 
