@@ -196,17 +196,25 @@ echo "7) 시각화 (visualize_3d_bpdl)"
 run_bg "8_visualize" "${SRC_CMD} && python3 ~/nero/visualize_3d_bpdl.py"
 sleep 2
 
-# ── 선택 사항: perception/planning/박스서버까지 여기서 같이 켜고 싶으면 주석 해제 ──
+# ── 선택 사항: perception/planning까지 여기서 같이 켜고 싶으면 주석 해제 ──
+# [2026-08-31] 박스 YOLO 서버(vlm_boxyolo.py)는 이제 이 데스크탑이 아니라
+# 같은 연구실 Jetson Thor(163.239.19.67:8002)에서 띄운다 -- 로컬에서 또
+# 띄우면 perception_node_sim이 BOX_SERVER_URL 미지정 시 기본값
+# 127.0.0.1:8002(로컬)를 보게 돼 Thor 배포와 따로 노는 상황이 생겨서,
+# 로컬 기동 자체를 제거하고 아래 9단계에서 Thor 주소를 명시적으로
+# export한다. VLM grasp 서버(8003)도 Thor에서 띄움
+# (run_mcp_robot_server.sh의 VLM_SERVER_URL 참고, mcp_robot_server는
+# 이 스크립트가 안 켬 -- Claude Code가 별도로 기동).
 # [2026-08-19] vlm_boxyolo.py가 듀얼 모델 서버(box 커스텀 + COCO 25종)로
-# 바뀌면서 인자명이 --conf → --conf-box/--conf-coco로 변경됨. 옛 --conf 인자
-# 그대로 두면 argparse가 즉시 에러내며 죽는다(실측 확인, 스크래치 포트 8011
-# 검증 결과 box 검출 정확도는 기존과 100% 동일 — conf_box=0.75 유지로 회귀 없음).
-echo "8) 박스 서버 (듀얼: box 커스텀 + COCO 25종)"
-run_bg "8_box_server" "python3 ~/nero/yolo/vlm_boxyolo.py --port 8002 --model ~/nero/yolo/best.pt --model-coco yolov8n.pt --conf-box 0.75 --conf-coco 0.25"
-sleep 3
+# 바뀌면서 인자명이 --conf → --conf-box/--conf-coco로 변경됨(Thor에서
+# 띄울 때도 이 인자명 그대로 씀. 참고용으로 커맨드 남겨둠, 로컬 기동
+# 안 함):
+#   python3 ~/nero/yolo/vlm_boxyolo.py --host 0.0.0.0 --port 8002 \
+#       --model ~/nero/yolo/best.pt --model-coco yolov8n.pt \
+#       --conf-box 0.75 --conf-coco 0.25
 
-echo "9) perception_node_sim"
-run_bg "9_perception" "${SRC_CMD} && ros2 run sj_pickplace perception_node_sim"
+echo "9) perception_node_sim (박스 서버: Jetson Thor 163.239.19.67:8002)"
+run_bg "9_perception" "export BOX_SERVER_URL=http://163.239.19.67:8002/detect BOX_HEALTH_URL=http://163.239.19.67:8002/health && ${SRC_CMD} && ros2 run sj_pickplace perception_node_sim"
 sleep 3
 
 #echo "10) planning_node"
