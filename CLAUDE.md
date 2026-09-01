@@ -80,6 +80,17 @@ grasp_dir이 `side`/`pinch`면, `infer_grasp` 응답의 `suggested_side_approach
 확인됐다(2026-07-22). 매 `pick_object` 응답의 `remaining_scanned_boxes`
 에서 원하는 항목의 인덱스를 확인하고 다음 호출에 그대로 넘겨라.
 
+## 놓을 곳은 반드시 pick 전에 미리 스캔/좌표 확보 (2026-08-31 추가)
+**물체를 집은 뒤에 놓을 곳(바구니/박스/서랍 등)을 찾으려 하지 마라.**
+그리퍼로 물체를 쥐면 카메라 시야가 그 물체나 그리퍼 자체에 가려져서
+`ground_object`/`analyze_scene`/`list_detected_objects`가 잘 안 잡히거나
+전혀 못 잡는 경우가 실측 반복 확인됐다. **순서를 반드시 지켜라: (1)
+놓을 목표(바구니 등)의 좌표를 먼저 `ground_object`나
+`list_detected_objects`로 확보 → (2) 그 다음에 집을 물체를 `pick_object`
+→ (3) 미리 확보해둔 좌표로 `place_object`.** pick 이후에 놓을 곳을
+재탐색해야 하는 상황이 오면(좌표를 못 구했거나 씬이 바뀐 경우), 물체를
+쥔 채로 팔을 크게 움직이는 재탐색은 충돌 위험이 있으니 신중히 판단할 것.
+
 ## place_object 좌표 자동 보정
 `place_object`가 성공했을 때 응답의 `place_pos`가 요청한 좌표와 다를
 수 있다 (서버가 도달불가 지점을 감지해 자동으로 ±0.05m 시프트하거나
@@ -131,6 +142,15 @@ v5/v6 등 다른 가중치를 비교하려고 `perception_node_sim`을 커스텀
 프레임을 직접 캡처해서 여러 포트에 동시 POST하는 1회성 스크립트로
 충분하다. 상세: `docs/wiki/perception_dev_tools.md`의 "운영 중 모델
 서버 포트 전환 시 주의사항" 참고.
+
+## estimate_object_geometry의 major_axis_yaw_deg — 신뢰 불가 (2026-08-31 확인)
+`estimate_object_geometry` 툴이 반환하는 `major_axis_yaw_deg`(PCA 장축
+방위각)는 **접근각 결정에 쓰지 마라.** box를 여러 각도로 재배치하며
+실측한 결과, 실제 회전과 무관하게 매번 82~89도 근처로 편향 수렴하는
+현상이 확인됐다(NoOp segmentation이 bbox를 그대로 마스크로 써서 배경이
+섞여 들어가는 게 유력한 원인으로 추정 — 상세: `docs/wiki/grasp_geometry_pipeline.md`).
+기존 `angle_base_deg`(Hough)가 상대적으로 더 낫지만 이것도 완전히
+믿을 건 아니다. 접근각도는 당분간 사용자가 직접 지정한 값을 쓴다.
 
 ## 참고 문서
 - 그립 각도 선택 알고리즘의 설계 이력/폐기된 접근/한계:

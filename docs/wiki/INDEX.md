@@ -13,3 +13,4 @@
 - [인지 파이프라인 & 카메라 캘리브레이션](perception_calibration.md) — perception_node(실물/시뮬), hand-eye 캘리브레이션, YOLO 각도보정, 알려진 사각지대(쌓인 박스가 raw 모델에서 병합되는 이슈 포함), 실물 3D dedup 포팅 이력, d435_camera_joint 수정 위치/calib_visual.py 버그/재캘리브 자세 가이드(2026-08-14)
 - [그립 각도 선택 & IK 도달범위 스캔 도구](grasp_kinematics_ik.md) — grasp_kinematics.py 구조, TCP offset 상수 위치 정정, ik_side_reachable_map.txt는 미연결 오프라인 산출물, sim x>0 팔 꼬임 근본원인(pitch=180 axis-flip, +180도 보정) + YawCandidateSelector 4후보 확장 + align/descend/place position_yaw 오염 버그(sim_box_aligned_quat 신설, 2026-08-15)
 - [인지 모델 개발 도구](perception_dev_tools.md) — 데이터셋 캡처/SAM 라벨링/YOLO 서빙(vlm_boxyolo.py, best.pt) 워크플로우와 운영 배포 컨벤션, box_yolo_v6 배포 완료(2026-08-12, 부분개선/v5 백업 있음), 모델 서버 포트 전환 시 주의사항
+- [Grasp Geometry 파이프라인(RANSAC+PCA) 신뢰 불가 판정](grasp_geometry_pipeline.md) — estimate_object_geometry의 major_axis_yaw_deg가 실제 회전과 무관하게 편향 수렴하는 현상 실측 확인(2026-08-31), NoOp segmentation 배경누출 의심, 코드는 유지하되 사용 보류
