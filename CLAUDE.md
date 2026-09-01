@@ -80,6 +80,17 @@ grasp_dir이 `side`/`pinch`면, `infer_grasp` 응답의 `suggested_side_approach
 확인됐다(2026-07-22). 매 `pick_object` 응답의 `remaining_scanned_boxes`
 에서 원하는 항목의 인덱스를 확인하고 다음 호출에 그대로 넘겨라.
 
+## 놓을 곳은 반드시 pick 전에 미리 스캔/좌표 확보 (2026-08-31 추가)
+**물체를 집은 뒤에 놓을 곳(바구니/박스/서랍 등)을 찾으려 하지 마라.**
+그리퍼로 물체를 쥐면 카메라 시야가 그 물체나 그리퍼 자체에 가려져서
+`ground_object`/`analyze_scene`/`list_detected_objects`가 잘 안 잡히거나
+전혀 못 잡는 경우가 실측 반복 확인됐다. **순서를 반드시 지켜라: (1)
+놓을 목표(바구니 등)의 좌표를 먼저 `ground_object`나
+`list_detected_objects`로 확보 → (2) 그 다음에 집을 물체를 `pick_object`
+→ (3) 미리 확보해둔 좌표로 `place_object`.** pick 이후에 놓을 곳을
+재탐색해야 하는 상황이 오면(좌표를 못 구했거나 씬이 바뀐 경우), 물체를
+쥔 채로 팔을 크게 움직이는 재탐색은 충돌 위험이 있으니 신중히 판단할 것.
+
 ## place_object 좌표 자동 보정
 `place_object`가 성공했을 때 응답의 `place_pos`가 요청한 좌표와 다를
 수 있다 (서버가 도달불가 지점을 감지해 자동으로 ±0.05m 시프트하거나
