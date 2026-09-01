@@ -1216,6 +1216,126 @@ def get_scanned_boxes() -> str:
     return json.dumps({'boxes': _last_scanned_boxes, 'age_sec': age}, ensure_ascii=False)
 
 
+# [2026-08-31 추가] pick 폐루프 검증 2차 확인(VLM) -- bbox 가로세로비가
+# 이 배수 이상 벌어지면 "형태가 뒤집혔다"(세운 물체가 누움/누운 물체가
+# 섬 등)로 본다. 1.2는 설계 시점 추정값 -- 실측 튜닝 대상.
+_BBOX_FLIP_RATIO = 1.2
+
+
+def _bbox_hw_ratio(bbox):
+    """bbox=[x1,y1,x2,y2] (정규화 좌표) -> 세로/가로 비율. 형식이 이상하면 None."""
+    try:
+        x1, y1, x2, y2 = bbox
+        w = max(1e-6, x2 - x1)
+        h = max(1e-6, y2 - y1)
+        return h / w
+    except Exception:
+        return None
+
+
+def _check_pick_fallen_over(target_label: str, before_bbox) -> tuple:
+    """[2026-08-31 추가] planning_node의 verify_pick(1차, 카메라/토픽 기반)이
+    '원래 자리에 물체가 여전히 있음'(pick_verified=False)으로 보고했을 때만
+    호출되는 2차 확인. 매 pick마다 부르면 VLM 추론(수 초) 때문에 느려지므로
+    -- 1차 신호가 애매/실패로 나온 드문 경우에만 이 함수가 실행된다
+    (속도 요구사항: "너무 느려지면 안 됨"에 대한 설계 대응).
+
+    _analyze_scene_core()(VLM analyze_scene 로직 재사용, 사용자 지시)로
+    현재 장면을 다시 보고, pick 시도 전 bbox와 세로/가로 비율을 비교해서
+    "쓰러졌다"(형태가 뒤집혔다)와 "그냥 못 집었다"(형태 그대로)를 구분한다.
+
+    Returns: (fell_over: bool, reason: str)
+    """
+    if not before_bbox or len(before_bbox) != 4:
+        return False, 'before_bbox 없음(YOLO 미검출 상태에서 시도했을 수 있음) -- 쓰러짐 판정 불가'
+    scene = _analyze_scene_core()
+    if scene.get('status') != 'success':
+        return False, f'VLM 재확인 실패 — {scene.get("reason")}'
+    after_bbox = None
+    for o in scene.get('objects', []):
+        if str(o.get('label', '')).lower() == target_label:
+            after_bbox = o.get('bbox')
+            break
+    if not after_bbox:
+        return False, f"VLM 재확인에서도 '{target_label}' 못 찾음 -- 쓰러짐 판정 불가"
+    r0, r1 = _bbox_hw_ratio(before_bbox), _bbox_hw_ratio(after_bbox)
+    if r0 is None or r1 is None:
+        return False, 'bbox 형식 이상 -- 쓰러짐 판정 불가'
+    was_tall, now_wide = r0 > _BBOX_FLIP_RATIO, r1 < 1.0 / _BBOX_FLIP_RATIO
+    was_wide, now_tall = r0 < 1.0 / _BBOX_FLIP_RATIO, r1 > _BBOX_FLIP_RATIO
+    if (was_tall and now_wide) or (was_wide and now_tall):
+        return True, (f'bbox 가로세로비 반전 감지(전 {r0:.2f} -> 후 {r1:.2f}) '
+                      f'-- 쓰러졌을 가능성 높음')
+    return False, (f'bbox 형태 변화 없음(전 {r0:.2f} -> 후 {r1:.2f}) '
+                   f'-- 쓰러진 게 아니라 그냥 못 집었을 가능성')
+
+
+def _pick_object_impl(target_label: str, grasp_dir: str = 'auto',
+                       from_scan: bool = False, box_index: int = None,
+                       x: float = None, y: float = None, z: float = None,
+                       angle_deg: float = None,
+                       side_approach_deg: float = None,
+                       retry_count: int = 0) -> dict:
+    """[2026-08-31 추가] pick_object() MCP 툴의 실제 로직 + 폐루프 검증
+    2차확인/재시도. retry_count는 내부 재귀 전용 파라미터라 MCP 툴
+    시그니처(pick_object)에는 노출하지 않는다 -- Claude가 이 값을 직접
+    지정할 이유가 없고, 노출하면 툴 스키마만 지저분해진다."""
+    _ensure_ros()
+    target_label = target_label.strip().lower()
+
+    _before_bbox = None
+    if not from_scan:
+        objects, _ = _ros_node.get_objects()
+        available = {o.get('label', '').lower() for o in objects}
+        if available and target_label not in available:
+            return {
+                'status': 'rejected',
+                'reason': f"'{target_label}' 은(는) 현재 장면에 없습니다. "
+                          f"인식된 물체: {sorted(available)}. "
+                          f"카메라 시야 밖에 있을 수 있으니 scan_for_boxes를 먼저 시도해보라.",
+            }
+        for o in objects:
+            if o.get('label', '').lower() == target_label:
+                _before_bbox = o.get('bbox')
+                break
+
+    payload = {'action': 'pick', 'target_label': target_label}
+    if grasp_dir and grasp_dir != 'auto':
+        payload['grasp_dir'] = grasp_dir
+    if side_approach_deg is not None:
+        payload['side_approach_deg'] = side_approach_deg
+    if x is not None and y is not None and z is not None:
+        payload['override_pos'] = {'x': x, 'y': y, 'z': z}
+        if angle_deg is not None:
+            payload['override_angle_deg'] = angle_deg
+    elif from_scan:
+        payload['from_scan'] = True
+        if box_index is not None:
+            payload['box_index'] = box_index
+    _ros_node.publish_command(payload)
+    result = _ros_node.wait_for_result(timeout=TIMEOUT_PICK)
+    result['target_label'] = target_label
+
+    # [2026-08-31 추가] pick 폐루프 검증 -- planning_node의 1차 신호
+    # (pick_verified)가 False(원래 자리에 물체가 여전히 감지됨)일 때만
+    # VLM 2차 확인을 하고, 쓰러진 걸로 판정되면 1회 재시도한다. 1차
+    # 신호가 True/None이거나 이미 재시도한 상태면 여기서 끝 -- 무한
+    # 재시도 방지 + 평소(1차 신호가 True인 정상 케이스) 지연시간 보존.
+    if (result.get('status') == 'success'
+            and result.get('pick_verified') is False
+            and retry_count == 0):
+        fell_over, vlm_reason = _check_pick_fallen_over(target_label, _before_bbox)
+        result['pick_verification_vlm'] = vlm_reason
+        if fell_over:
+            result['pick_retry'] = 'fell_over_detected_retrying_once'
+            return _pick_object_impl(
+                target_label, grasp_dir='auto', from_scan=from_scan, box_index=box_index,
+                x=x, y=y, z=z, angle_deg=angle_deg, side_approach_deg=side_approach_deg,
+                retry_count=1)
+        result['pick_retry'] = None
+    return result
+
+
 @mcp.tool()
 def pick_object(target_label: str, grasp_dir: str = 'auto',
                  from_scan: bool = False, box_index: int = None,
@@ -1270,43 +1390,44 @@ def pick_object(target_label: str, grasp_dir: str = 'auto',
                "target_label": "...",
                "remaining_scanned_boxes": [{"x":..,"y":..,"z":..,
                    "confidence":..,"angle_base_deg":..,"label":".."}, ...],
-               "align_angle_deg": 37.2}
+               "align_angle_deg": 37.2,
+               "pick_verified": true|false|null,
+               "pick_verification_reason": "...",
+               "pick_verification_vlm": "..." (pick_verified=false였을 때만),
+               "pick_retry": "fell_over_detected_retrying_once"|null (있었을 때만)}
                (remaining_scanned_boxes는 from_scan=True였을 때만 채워짐.
                align_angle_deg는 top 그립일 때 approach 후 align 단계에서
                재측정한 각도[도, 0~90]. side 그립이면 null.)
+
+        ⚠ [2026-08-31 추가, 폐루프 pick 검증] status="success"라고 해서
+        물체가 실제로 집혔다는 보장은 아니다 -- 그리퍼가 허공에 닫혀서
+        원래 자리에 물체가 그대로 남아있는 경우가 실측 반복 확인됐다.
+        서버가 lift 직후 원래 위치를 재확인한 결과가 pick_verified 필드에
+        담긴다:
+          - true  : 원래 자리에서 물체가 사라짐. 집혔을 가능성 높음 --
+                    안심하고 다음 작업(place 등) 진행 가능.
+          - false : 원래 자리에 물체가 여전히 감지됨. 이 시점에 서버가
+                    VLM으로 자동 2차 확인을 했고(pick_verification_vlm에
+                    사유), 물체가 "쓰러진" 걸로 판단되면 자동으로 1회
+                    재시도까지 마친 뒤의 최종 결과다(pick_retry 필드로
+                    확인 가능). 그래도 pick_verified=false로 끝났다면
+                    실제로 못 집었을 가능성이 높으니, 이 물체를 기준으로
+                    후속 작업을 계속하지 말고 list_detected_objects로
+                    재확인하거나 사용자에게 알려라.
+          - null(필드 없거나 None) : perception 데이터가 오래됐거나 인식
+                    사각지대라 판정 불가. false와 다르게 취급할 것 --
+                    확실하지 않으니 필요하면 list_detected_objects로
+                    직접 재확인하라.
+        1차 신호(pick_verified)가 true/null이면 VLM을 안 부르므로 평소
+        지연시간에는 영향이 없다 -- VLM 2차 확인+재시도는 1차 신호가
+        false인 드문 경우에만 발생한다.
         실패: {"status": "failed"|"rejected"|"timeout", "reason": "..."}
     """
-    _ensure_ros()
-    target_label = target_label.strip().lower()
-
-    if not from_scan:
-        objects, _ = _ros_node.get_objects()
-        available = {o.get('label', '').lower() for o in objects}
-        if available and target_label not in available:
-            return json.dumps({
-                'status': 'rejected',
-                'reason': f"'{target_label}' 은(는) 현재 장면에 없습니다. "
-                          f"인식된 물체: {sorted(available)}. "
-                          f"카메라 시야 밖에 있을 수 있으니 scan_for_boxes를 먼저 시도해보라.",
-            }, ensure_ascii=False)
-
-    payload = {'action': 'pick', 'target_label': target_label}
-    if grasp_dir and grasp_dir != 'auto':
-        payload['grasp_dir'] = grasp_dir
-    if side_approach_deg is not None:
-        payload['side_approach_deg'] = side_approach_deg
-    if x is not None and y is not None and z is not None:
-        payload['override_pos'] = {'x': x, 'y': y, 'z': z}
-        if angle_deg is not None:
-            payload['override_angle_deg'] = angle_deg
-    elif from_scan:
-        payload['from_scan'] = True
-        if box_index is not None:
-            payload['box_index'] = box_index
-    _ros_node.publish_command(payload)
-    result = _ros_node.wait_for_result(timeout=TIMEOUT_PICK)
-    result['target_label'] = target_label
-    return json.dumps(result, ensure_ascii=False)
+    return json.dumps(
+        _pick_object_impl(target_label, grasp_dir=grasp_dir, from_scan=from_scan,
+                          box_index=box_index, x=x, y=y, z=z, angle_deg=angle_deg,
+                          side_approach_deg=side_approach_deg),
+        ensure_ascii=False)
 
 
 @mcp.tool()
@@ -1849,6 +1970,94 @@ def infer_grasp(target_label: str) -> str:
     }, ensure_ascii=False)
 
 
+def _analyze_scene_core() -> dict:
+    """[2026-08-31 추가] analyze_scene() 본체를 dict 반환 형태로 뽑아낸
+    내부 헬퍼 -- analyze_scene() MCP 툴과, pick 폐루프 검증(2차 확인)이
+    둘 다 이 로직을 그대로 재사용한다(중복 유지 대신 공유). MCP 툴
+    함수를 다른 코드에서 직접 호출하는 대신, 로직을 여기로 뽑고 툴
+    함수는 얇은 wrapper(json.dumps)만 남기는 패턴 -- infer_grasp/
+    ground_object의 VLM 폴백 경로가 이미 "서로 다른 툴이지만 내부
+    로직만 공유"하는 것과 동일한 원칙."""
+    _ensure_ros()
+
+    ANALYZE_URL = f"{VLM_SERVER_URL}/analyze_scene"
+    VLM_TIMEOUT = 45.0
+
+    img_bgr, img_stamp = _ros_node.get_image()
+    if img_bgr is None:
+        return {'status': 'error',
+                'reason': 'image_unavailable — /camera/color/image_raw 수신 없음'}
+    img_age = round(time.time() - img_stamp, 3)
+    if img_age > 3.0:
+        return {'status': 'error', 'reason': f'image_stale — {img_age:.1f}s 경과 (>3s)'}
+
+    yolo_objects, _ = _ros_node.get_objects()
+    detections = [{'label': o.get('label', '?'), 'bbox': o.get('bbox', [])} for o in yolo_objects]
+
+    def _encode_b64(bgr: np.ndarray) -> str:
+        ok, buf = cv2.imencode('.jpg', bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if not ok:
+            raise RuntimeError('JPEG 인코딩 실패')
+        return base64.b64encode(buf.tobytes()).decode()
+
+    try:
+        full_b64 = _encode_b64(img_bgr)
+    except Exception as e:
+        return {'status': 'error', 'reason': f'encode_failed — {e}'}
+
+    try:
+        resp = _requests.post(ANALYZE_URL,
+                              json={'full_image_b64': full_b64, 'detections': detections,
+                                    'timestamp': time.time()},
+                              timeout=VLM_TIMEOUT)
+    except _requests.exceptions.ConnectionError:
+        return {'status': 'error',
+                'reason': f'vlm_server_unavailable — {VLM_SERVER_URL} 연결 거부'}
+    except _requests.exceptions.Timeout:
+        return {'status': 'error', 'reason': f'vlm_timeout — {VLM_TIMEOUT}s 초과'}
+    except Exception as e:
+        return {'status': 'error', 'reason': f'vlm_request_failed — {e}'}
+
+    if resp.status_code != 200:
+        return {'status': 'error',
+                'reason': f'vlm_http_error — status {resp.status_code}: {resp.text[:200]}'}
+
+    try:
+        data = resp.json()
+    except Exception:
+        return {'status': 'error', 'reason': f'vlm_invalid_json — {resp.text[:200]}'}
+
+    yolo_label_set = {str(o.get('label', '')).lower() for o in yolo_objects}
+    vlm_objects    = data.get('objects', [])
+    vlm_label_set  = {str(o.get('label', '')).lower() for o in vlm_objects}
+
+    objects_merged = [
+        {**o, 'source': 'both' if str(o.get('label', '')).lower() in yolo_label_set else 'vlm'}
+        for o in vlm_objects
+    ]
+    for yo in yolo_objects:
+        if str(yo.get('label', '')).lower() not in vlm_label_set:
+            objects_merged.append({
+                'label':  yo.get('label', '?'),
+                'bbox':   yo.get('bbox', []),
+                'source': 'yolo',
+            })
+
+    global _last_scene_objects, _last_scene_stamp
+    with _scene_cache_lock:
+        _last_scene_objects = [o.copy() for o in objects_merged]
+        _last_scene_stamp   = time.time()
+
+    return {
+        'status':            'success',
+        'yolo_detected':     [o.get('label', '?') for o in yolo_objects],
+        'objects':           objects_merged,
+        'placement_regions': data.get('placement_regions', []),
+        'inference_ms':      data.get('inference_ms', 0.0),
+        'image_age_sec':     img_age,
+    }
+
+
 @mcp.tool()
 def analyze_scene() -> str:
     """현재 카메라 화면에 보이는 모든 물체를 label + bbox로 반환한다.
@@ -1884,89 +2093,7 @@ def analyze_scene() -> str:
                "inference_ms":8000.0,"image_age_sec":0.1}
         실패: {"status":"error","reason":"..."}
     """
-    _ensure_ros()
-
-    ANALYZE_URL = f"{VLM_SERVER_URL}/analyze_scene"
-    VLM_TIMEOUT = 45.0
-
-    img_bgr, img_stamp = _ros_node.get_image()
-    if img_bgr is None:
-        return json.dumps({'status': 'error',
-                           'reason': 'image_unavailable — /camera/color/image_raw 수신 없음'})
-    img_age = round(time.time() - img_stamp, 3)
-    if img_age > 3.0:
-        return json.dumps({'status': 'error',
-                           'reason': f'image_stale — {img_age:.1f}s 경과 (>3s)'})
-
-    yolo_objects, _ = _ros_node.get_objects()
-    detections = [{'label': o.get('label', '?'), 'bbox': o.get('bbox', [])} for o in yolo_objects]
-
-    def _encode_b64(bgr: np.ndarray) -> str:
-        ok, buf = cv2.imencode('.jpg', bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        if not ok:
-            raise RuntimeError('JPEG 인코딩 실패')
-        return base64.b64encode(buf.tobytes()).decode()
-
-    try:
-        full_b64 = _encode_b64(img_bgr)
-    except Exception as e:
-        return json.dumps({'status': 'error', 'reason': f'encode_failed — {e}'})
-
-    try:
-        resp = _requests.post(ANALYZE_URL,
-                              json={'full_image_b64': full_b64, 'detections': detections,
-                                    'timestamp': time.time()},
-                              timeout=VLM_TIMEOUT)
-    except _requests.exceptions.ConnectionError:
-        return json.dumps({'status': 'error',
-                           'reason': f'vlm_server_unavailable — {VLM_SERVER_URL} 연결 거부'})
-    except _requests.exceptions.Timeout:
-        return json.dumps({'status': 'error',
-                           'reason': f'vlm_timeout — {VLM_TIMEOUT}s 초과'})
-    except Exception as e:
-        return json.dumps({'status': 'error', 'reason': f'vlm_request_failed — {e}'})
-
-    if resp.status_code != 200:
-        return json.dumps({'status': 'error',
-                           'reason': f'vlm_http_error — status {resp.status_code}: {resp.text[:200]}'})
-
-    try:
-        data = resp.json()
-    except Exception:
-        return json.dumps({'status': 'error', 'reason': f'vlm_invalid_json — {resp.text[:200]}'})
-
-    yolo_label_set = {str(o.get('label', '')).lower() for o in yolo_objects}
-    vlm_objects    = data.get('objects', [])
-    vlm_label_set  = {str(o.get('label', '')).lower() for o in vlm_objects}
-
-    # VLM 탐지 물체: source="both"(YOLO도 탐지) 또는 source="vlm"(VLM만 탐지)
-    objects_merged = [
-        {**o, 'source': 'both' if str(o.get('label', '')).lower() in yolo_label_set else 'vlm'}
-        for o in vlm_objects
-    ]
-    # YOLO-only 물체(VLM이 못 찾은 것): source="yolo"로 추가
-    for yo in yolo_objects:
-        if str(yo.get('label', '')).lower() not in vlm_label_set:
-            objects_merged.append({
-                'label':  yo.get('label', '?'),
-                'bbox':   yo.get('bbox', []),
-                'source': 'yolo',
-            })
-
-    # analyze_scene 결과를 캐시에 저장 — hierarchical grounding의 parent bbox 재사용용
-    global _last_scene_objects, _last_scene_stamp
-    with _scene_cache_lock:
-        _last_scene_objects = [o.copy() for o in objects_merged]
-        _last_scene_stamp   = time.time()
-
-    return json.dumps({
-        'status':            'success',
-        'yolo_detected':     [o.get('label', '?') for o in yolo_objects],
-        'objects':           objects_merged,
-        'placement_regions': data.get('placement_regions', []),
-        'inference_ms':      data.get('inference_ms', 0.0),
-        'image_age_sec':     img_age,
-    }, ensure_ascii=False)
+    return json.dumps(_analyze_scene_core(), ensure_ascii=False)
 
 
 @mcp.tool()

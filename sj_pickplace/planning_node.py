@@ -89,6 +89,7 @@ from .grasp_kinematics import (
 # 목표 위치에 물체가 안착했는지 perception으로 재확인한다.
 # 상세: placement_verification.py 모듈 docstring 참고.
 from .placement_verification import verify_placement
+from .pick_verification import verify_pick
 # arm_status/motion_status 값 -> 사람이 읽을 이름 (로그용)
 ARM_STATUS_NAMES = {
     0: "NORMAL", 1: "EMERGENCY_STOP", 2: "NO_SOLUTION",
@@ -121,6 +122,12 @@ LIFT_Z     = 0.10
 # 이제 approach는 이 standoff만큼 물러난 지점으로 가고, descend에서
 # 접근방향을 따라 LIN(직선)으로 최종 지점까지 들어간다.
 SIDE_APPROACH_STANDOFF_M = 0.10
+# [2026-08-31 추가] place retreat_mode='lift'일 때 side/pinch approach가
+# 올라가는 z 오프셋. top-down용 APPROACH_Z(0.10m)와 공유하지 않고 별도
+# 상수로 분리 -- side/pinch는 물체 옆을 감싸쥔 채로 위에서 내려오다보니
+# top-down보다 더 여유 있게 올라가야 주변(예: 바구니 벽)을 안 치는 걸로
+# 실측 확인됨(사용자 지시로 0.10 -> 0.30 상향).
+SIDE_LIFT_APPROACH_Z = 0.25
 # [2026-08-26 추가] slide 액션(문고리/서랍 손잡이) 기본 후퇴 거리(미터) --
 # 손잡이를 쥔 채로 접근각 반대방향으로 이만큼 직선 이동한 뒤 놓는다.
 DEFAULT_SLIDE_DISTANCE_M = 0.08
@@ -1269,6 +1276,22 @@ class PlanningNode(Node):
                 side_approach_offset_deg=side_approach_offset_deg,
                 is_pinch=is_pinch)
             self.get_logger().info('✅ PICK 완료')
+            # [2026-08-31 추가] 폐루프 pick 검증 -- lift까지 마친 그리퍼가
+            # 실제로 물체를 물었는지, 원래 자리에서 물체가 사라졌는지로
+            # 1차 확인한다(place의 verify_placement와 반대 방향 검사).
+            # "success"인데 그리퍼가 허공에 닫혀서 물체가 원래 자리에
+            # 그대로 남아있던 사례가 실측 반복 확인돼 추가됨. 여기서는
+            # 싸구려(카메라/토픽 기반) 1차 신호만 내고, 애매하거나
+            # "여전히 있음"으로 나온 경우의 VLM 2차 확인/재시도 판단은
+            # mcp_robot_server.py(pick_object)가 담당 -- 매 pick마다
+            # VLM을 부르면 느려지므로, 여기 1차 신호가 명확히 True일
+            # 때는 그걸로 끝내 지연시간을 늘리지 않는다.
+            time.sleep(VERIFY_SETTLE_SEC)
+            _pick_verify_age = (time.time() - self._latest_objects_stamp
+                                if self._latest_objects_stamp > 0 else None)
+            pick_verification = verify_pick(pos, self.latest_objects, label=label,
+                                            obj_age_sec=_pick_verify_age)
+            self.get_logger().info(f'  [pick verify] {pick_verification["reason"]}')
             # busy 해제를 발행보다 먼저 (레이스 방지 -- _scan_box_sequence 참고)
             with self.lock:
                 self.busy = False
@@ -1283,7 +1306,13 @@ class PlanningNode(Node):
                        #                        폴백 -- 각진 물체면 불안정한 그립일 수 있음
                        #   'unknown'         -- perception이 물체 각도를 못 줌(원형
                        #                        물체이거나 인식 실패) -- 기존 동작과 동일
-                       'side_grasp_alignment': side_grasp_alignment})
+                       'side_grasp_alignment': side_grasp_alignment,
+                       # [2026-08-31 추가] pick 폐루프 검증 1차 신호.
+                       #   true  -- 원래 자리에서 물체가 사라짐(집혔을 가능성 높음)
+                       #   false -- 원래 자리에 여전히 감지됨(허공을 물었을 가능성)
+                       #   null  -- 판정 불가(인식 사각지대/데이터 오래됨)
+                       'pick_verified': pick_verification['verified'],
+                       'pick_verification_reason': pick_verification['reason']})
         except SequenceRejected as e:
             with self.lock:
                 self.busy = False
@@ -1606,7 +1635,7 @@ class PlanningNode(Node):
             # descend_z는 그대로 두고(px,py도 아래에서 standoff 대신 최종
             # 지점 그대로 씀) approach_z만 올려서, "내려가기" 단계가 자동으로
             # 순수 수직 LIN이 되게 한다.
-            approach_z = pos['z'] + (APPROACH_Z if retreat_mode == 'lift' else 0.0)
+            approach_z = pos['z'] + (SIDE_LIFT_APPROACH_Z if retreat_mode == 'lift' else 0.0)
             descend_z = pos['z']
             lift_z = pos['z'] + LIFT_Z
         # [2026-07 삭제] place pre-rotate 제거. approach가 이미
