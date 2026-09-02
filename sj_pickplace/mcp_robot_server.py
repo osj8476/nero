@@ -47,7 +47,7 @@ from mcp.server.fastmcp import FastMCP
 # 안의 순수 함수 import라 문제 없음 (perception_node_sim.py가 이미
 # _compute_box_angle_base/_dedup_3d를 같은 방식으로 재사용 중).
 from .perception_node import _fit_plane_normal
-from .segmentation_backend import NoOpSegmentationBackend
+from .segmentation_backend import NoOpSegmentationBackend, get_default_backend
 from .point_cloud import Intrinsics as _PCIntrinsics, mask_depth_to_pointcloud
 from . import geometry_3d as _geometry_3d
 from .grasp_types import GeometryResult as _GeometryResult
@@ -1695,14 +1695,72 @@ def go_home() -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
+def _openvocab_bbox(target_label: str, img_bgr: np.ndarray,
+                     conf: float = 0.25):
+    """[2026-09-02 추가] YOLO-World open-vocab 검출 티어.
+
+    VLM_SERVER_URL/detect_open_vocab (YOLO-World, ~20~60ms) 로 target_label
+    의 정밀 bbox 를 top-1 로 얻는다. 8B VLM /ground_object(2~4초, chat형
+    좌표 부정확)보다 먼저 시도하는 fast-path.
+
+    Returns:
+        (bbox_norm: list[4] 또는 None, confidence: float, err: str 또는 None)
+    err='openvocab_unavailable' 이면 서버에 YOLO-World 가 없다는 뜻 --
+    호출부는 조용히 VLM /ground_object 로 폴백하면 된다.
+    """
+    OV_URL = f"{VLM_SERVER_URL}/detect_open_vocab"
+    try:
+        ok, buf = cv2.imencode('.jpg', img_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if not ok:
+            return None, 0.0, 'encode_failed'
+        b64 = base64.b64encode(buf.tobytes()).decode()
+    except Exception as e:
+        return None, 0.0, f'encode_failed — {e}'
+    try:
+        r = _requests.post(OV_URL, json={'full_image_b64': b64,
+                                         'labels': [target_label],
+                                         'conf': conf,
+                                         'timestamp': time.time()},
+                           timeout=10.0)
+    except _requests.exceptions.ConnectionError:
+        return None, 0.0, 'vlm_server_unavailable'
+    except Exception as e:
+        return None, 0.0, f'openvocab_request_failed — {e}'
+    if r.status_code == 503:
+        return None, 0.0, 'openvocab_unavailable'
+    if r.status_code != 200:
+        return None, 0.0, f'openvocab_http_error — {r.status_code}'
+    try:
+        dets = r.json().get('detections', [])
+    except Exception:
+        return None, 0.0, 'openvocab_invalid_json'
+    if not dets:
+        return None, 0.0, 'target_not_found'
+    best = max(dets, key=lambda d: d.get('confidence', 0.0))
+    bbox = best.get('bbox')
+    if not bbox or len(bbox) != 4:
+        return None, 0.0, 'no_valid_bbox'
+    return [float(v) for v in bbox], float(best.get('confidence', 0.0)), None
+
+
 def _vlm_ground_bbox_for_grasp(target_label: str, img_bgr: np.ndarray, objects: list):
-    """[2026-08-26 추가] infer_grasp 전용 -- YOLO에 없는 물체를 VLM
-    /ground_object로 찾아 bbox_norm만 얻는다 (ground_object() MCP 도구와
-    동일 엔드포인트/페이로드 재사용, 3D 좌표 계산은 생략하고 bbox만 필요).
+    """[2026-08-26 추가] infer_grasp 전용 -- YOLO에 없는 물체의 bbox_norm 확보.
+
+    [2026-09-02] 순서: (1) YOLO-World open-vocab(~수십 ms, 정밀 bbox) →
+    (2) 8B VLM /ground_object(느림, 근사 bbox). (1) 이 서버에 없거나
+    (openvocab_unavailable) 못 찾으면 (2) 로 폴백.
 
     Returns:
         (bbox_norm: list[4] 또는 None, confidence: float, error_reason: str 또는 None)
     """
+    # ── (1) YOLO-World open-vocab fast-path ──────────────────────────────────
+    ov_bbox, ov_conf, ov_err = _openvocab_bbox(target_label, img_bgr)
+    if ov_bbox is not None:
+        _logger.info(f'[infer_grasp/ground] open-vocab hit {target_label!r} '
+                     f'conf={ov_conf:.2f} bbox={[round(v,3) for v in ov_bbox]}')
+        return ov_bbox, ov_conf, None
+    _logger.info(f'[infer_grasp/ground] open-vocab miss ({ov_err}) — VLM ground_object 폴백')
+
     GROUND_URL  = f"{VLM_SERVER_URL}/ground_object"
     VLM_TIMEOUT = 45.0
 
@@ -2048,11 +2106,26 @@ def _analyze_scene_core() -> dict:
         _last_scene_objects = [o.copy() for o in objects_merged]
         _last_scene_stamp   = time.time()
 
+    # [2026-09-02] 놓을 곳 후보: VLM 이 리셉터클(container_type != "none")로
+    # 태그한 물체. is_open=True 를 먼저(개구부가 카메라 쪽을 향해 드롭 가능).
+    # 좌표는 여기서 계산하지 않는다 -- 호출부가 ground_object(label) 로 3D 를
+    # 확보하는 게 CLAUDE.md "놓을 곳은 pick 전에 미리 좌표 확보" 규칙과 맞음.
+    placement_targets = [
+        {'label': o.get('label', '?'), 'bbox': o.get('bbox', []),
+         'container_type': o.get('container_type', 'none'),
+         'is_open': bool(o.get('is_open', False)),
+         'source': o.get('source', 'vlm')}
+        for o in objects_merged
+        if str(o.get('container_type', 'none')) != 'none'
+    ]
+    placement_targets.sort(key=lambda c: (not c['is_open'], c['label']))
+
     return {
         'status':            'success',
         'yolo_detected':     [o.get('label', '?') for o in yolo_objects],
         'objects':           objects_merged,
         'placement_regions': data.get('placement_regions', []),
+        'placement_targets': placement_targets,
         'inference_ms':      data.get('inference_ms', 0.0),
         'image_age_sec':     img_age,
     }
@@ -2086,12 +2159,19 @@ def analyze_scene() -> str:
     Returns:
         성공: {"status":"success",
                "yolo_detected":["cup","box"],
-               "objects":[{"label":"cup","bbox":[x1,y1,x2,y2],"source":"both"},
-                          {"label":"pen","bbox":[...],"source":"vlm"},
-                          {"label":"box","bbox":[...],"source":"yolo"},...],
+               "objects":[{"label":"cup","bbox":[x1,y1,x2,y2],"source":"both",
+                           "container_type":"none","is_open":false},
+                          {"label":"basket","bbox":[...],"source":"vlm",
+                           "container_type":"basket","is_open":true},...],
                "placement_regions":[{"bbox":[x1,y1,x2,y2],"confidence":0.8},...],
+               "placement_targets":[{"label":"basket","container_type":"basket",
+                           "is_open":true,"bbox":[...]}, ...],  # 리셉터클만, is_open 우선
                "inference_ms":8000.0,"image_age_sec":0.1}
         실패: {"status":"error","reason":"..."}
+
+    "바구니/선반/서랍에 놓아" 류 요청: placement_targets 에서 원하는
+    container_type 을 고른 뒤 ground_object(그 label) 로 3D 좌표를 확보하고
+    (pick 전에!) place_object 에 넘긴다.
     """
     return json.dumps(_analyze_scene_core(), ensure_ascii=False)
 
@@ -2223,43 +2303,66 @@ def ground_object(target_label: str, parent_label: str = None) -> str:
             raise RuntimeError('JPEG 인코딩 실패')
         return base64.b64encode(buf.tobytes()).decode()
 
-    try:
-        full_b64 = _encode(img_bgr)
-    except Exception as e:
-        return json.dumps({'success': False, 'reason': f'encode_failed — {e}'})
+    # ── 2a. YOLO-World open-vocab fast-path ─────────────────────────────────
+    # [2026-09-02] 8B VLM /ground_object(느림, 근사 bbox) 전에 open-vocab
+    # 검출(~수십 ms, 정밀 bbox)을 먼저 시도. 서버에 YOLO-World 가 없거나
+    # (openvocab_unavailable) 못 찾으면 아래 VLM 경로로 폴백.
+    gdata = None
+    ov_bbox, ov_conf, ov_err = _openvocab_bbox(target_label, img_bgr, conf=MIN_CONF)
+    if ov_bbox is not None:
+        _logger.info(f'[ground_object] open-vocab hit {target_label!r} conf={ov_conf:.2f}')
+        gdata = {
+            'found': True,
+            'label': target_label,
+            'bbox_norm': ov_bbox,
+            'center_norm': [round((ov_bbox[0] + ov_bbox[2]) / 2, 4),
+                            round((ov_bbox[1] + ov_bbox[3]) / 2, 4)],
+            'confidence': ov_conf,
+            'description': 'open-vocab detection (YOLO-World)',
+            'inference_ms': 0.0,
+            '_grounding': 'open_vocab',
+        }
+    else:
+        _logger.info(f'[ground_object] open-vocab miss ({ov_err}) — VLM ground_object 폴백')
 
-    yolo_detections = [
-        {'label': o.get('label', '?'),
-         'bbox':  o.get('bbox', []),
-         'confidence': round(float(o.get('confidence', 0.0)), 3)}
-        for o in objects
-    ]
+    if gdata is None:
+        try:
+            full_b64 = _encode(img_bgr)
+        except Exception as e:
+            return json.dumps({'success': False, 'reason': f'encode_failed — {e}'})
 
-    payload = {
-        'full_image_b64': full_b64,
-        'target_label':   target_label,
-        'detections':     yolo_detections,
-        'timestamp':      time.time(),
-    }
-    try:
-        resp = _requests.post(GROUND_URL, json=payload, timeout=VLM_TIMEOUT)
-    except _requests.exceptions.ConnectionError:
-        return json.dumps({'success': False,
-                           'reason': 'vlm_server_unavailable'})
-    except _requests.exceptions.Timeout:
-        return json.dumps({'success': False,
-                           'reason': f'vlm_timeout — {VLM_TIMEOUT}s 초과'})
-    except Exception as e:
-        return json.dumps({'success': False, 'reason': f'vlm_request_failed — {e}'})
+        yolo_detections = [
+            {'label': o.get('label', '?'),
+             'bbox':  o.get('bbox', []),
+             'confidence': round(float(o.get('confidence', 0.0)), 3)}
+            for o in objects
+        ]
 
-    if resp.status_code != 200:
-        return json.dumps({'success': False,
-                           'reason': f'vlm_http_error — {resp.status_code}'})
+        payload = {
+            'full_image_b64': full_b64,
+            'target_label':   target_label,
+            'detections':     yolo_detections,
+            'timestamp':      time.time(),
+        }
+        try:
+            resp = _requests.post(GROUND_URL, json=payload, timeout=VLM_TIMEOUT)
+        except _requests.exceptions.ConnectionError:
+            return json.dumps({'success': False,
+                               'reason': 'vlm_server_unavailable'})
+        except _requests.exceptions.Timeout:
+            return json.dumps({'success': False,
+                               'reason': f'vlm_timeout — {VLM_TIMEOUT}s 초과'})
+        except Exception as e:
+            return json.dumps({'success': False, 'reason': f'vlm_request_failed — {e}'})
 
-    try:
-        gdata = resp.json()
-    except Exception:
-        return json.dumps({'success': False, 'reason': 'vlm_invalid_json'})
+        if resp.status_code != 200:
+            return json.dumps({'success': False,
+                               'reason': f'vlm_http_error — {resp.status_code}'})
+
+        try:
+            gdata = resp.json()
+        except Exception:
+            return json.dumps({'success': False, 'reason': 'vlm_invalid_json'})
 
     if not gdata.get('found', False):
         return json.dumps({'success': False, 'reason': 'target_not_found'})
@@ -2303,7 +2406,7 @@ def ground_object(target_label: str, parent_label: str = None) -> str:
         # depth 없음 → 3D 좌표 없이 시각적 결과만 반환
         return json.dumps({
             'label':              gdata.get('label', target_label),
-            'source':             'vlm',
+            'source':             gdata.get('_grounding', 'vlm'),
             'grounding':          'visual_only',
             'center_px':          center_px,
             'bbox_approx':        bbox_px,
@@ -2346,16 +2449,17 @@ def ground_object(target_label: str, parent_label: str = None) -> str:
         if bbox_px is not None else (None, 0.0, 0)
     )
 
+    _ov = gdata.get('_grounding') == 'open_vocab'
     return json.dumps({
         'label':              gdata.get('label', target_label),
-        'source':             'vlm',
-        'grounding':          'approximate',
+        'source':             'open_vocab' if _ov else 'vlm',
+        'grounding':          'precise_bbox' if _ov else 'approximate',
         'center_px':          center_px,
         'bbox_approx':        bbox_px,
         'camera_point':       cam_xyz,
         'base_link_point':    base_xyz,
         'confidence':         round(conf, 3),
-        'position_confidence': 'approximate',
+        'position_confidence': 'precise_bbox' if _ov else 'approximate',
         'description':        gdata.get('description', ''),
         'inference_ms':       gdata.get('inference_ms', 0.0),
         'depth_m':            round(depth_m, 3),
@@ -2367,15 +2471,21 @@ def ground_object(target_label: str, parent_label: str = None) -> str:
 
 
 @mcp.tool()
-def estimate_object_geometry(target_label: str) -> str:
+def estimate_object_geometry(target_label: str, parent_label: str = None) -> str:
     """[2026-08 추가, 프로토타입 -- 실기 미검증] 물체의 3D 형상(RANSAC 평면 +
     PCA 주축)을 실측 depth로 계산한다. pick_object의 자세 결정에는 아직
     자동 연결되지 않았다 -- 이 값을 보고 판단에 참고하거나, pick_object가
     받는 grasp_candidate 필드를 직접 구성할 때 쓰기 위한 읽기 전용 도구다.
 
-    파이프라인: YOLO bbox(현재 segmentation은 NoOp -- bbox를 그대로 사각형
-    마스크로 씀) → depth 역투영 → point cloud → RANSAC(우세 평면) + PCA
-    (주축) → base_link 좌표계로 변환.
+    파이프라인: bbox → (SEG_BACKEND: NoOp 사각마스크 / depth_plane / SAM)
+    → depth 역투영 → point cloud → RANSAC(우세 평면) + PCA(주축)
+    → base_link 좌표계로 변환.
+
+    [2026-09-02] parent_label 을 주면 YOLO 검출 없이도 동작한다:
+    ground_object(target_label, parent_label) 로 파트 bbox 를 먼저 확보한 뒤
+    (예: parent_label="drawer" 로 손잡이 축 방향 계산) 그 영역에 geometry 를
+    돌린다. SEG_BACKEND=sam 이면 파트 bbox 중심을 SAM point prompt 로 같이
+    넘겨 마스크 정밀도를 높인다.
 
     ─── 라우팅 규칙 ──────────────────────────────────────────────────────────
     ○ 사용: side/pinch 그립 전 물체의 실제 긴 축 방향을 확인하고 싶을 때,
@@ -2406,15 +2516,6 @@ def estimate_object_geometry(target_label: str) -> str:
     _ensure_ros()
     target_label = target_label.strip().lower()
 
-    objects, _ = _ros_node.get_objects()
-    matched = [o for o in objects if str(o.get('label', '')).lower() == target_label]
-    if not matched:
-        return json.dumps({'status': 'error',
-                           'reason': f"'{target_label}' 이(가) /detected_objects에 없습니다 "
-                                     f"(YOLO 검출 필요 -- VLM-only 물체는 아직 미지원)."})
-    obj = matched[0]
-    bbox_norm = obj.get('bbox')
-
     img_bgr, img_stamp = _ros_node.get_image()
     if img_bgr is None:
         return json.dumps({'status': 'error', 'reason': 'image_unavailable'})
@@ -2428,12 +2529,42 @@ def estimate_object_geometry(target_label: str) -> str:
         return json.dumps({'status': 'error', 'reason': 'depth_or_intrinsics_unavailable'})
 
     h, w = img_bgr.shape[:2]
-    if not bbox_norm or len(bbox_norm) != 4:
-        return json.dumps({'status': 'error', 'reason': 'invalid_bbox'})
-    bbox_px = [int(bbox_norm[0] * w), int(bbox_norm[1] * h),
-               int(bbox_norm[2] * w), int(bbox_norm[3] * h)]
+    point_hint_px = None
+    seg_part_hint = None
 
-    seg = NoOpSegmentationBackend().segment(img_bgr, bbox_px)
+    if parent_label is not None:
+        # [2026-09-02] 파트 경로: ground_object(part, parent) 로 bbox 확보.
+        try:
+            gj = json.loads(ground_object(target_label, parent_label))
+        except Exception as e:
+            return json.dumps({'status': 'error', 'reason': f'part_grounding_failed — {e}'})
+        bbox_px = gj.get('bbox_approx')
+        if not bbox_px or len(bbox_px) != 4:
+            return json.dumps({'status': 'error',
+                               'reason': f"part '{target_label}' bbox 확보 실패 "
+                                         f"(ground_object: {gj.get('reason', gj.get('grounding'))})"})
+        cp = gj.get('center_px')
+        point_hint_px = cp if (isinstance(cp, list) and len(cp) == 2) else None
+        seg_part_hint = target_label
+    else:
+        objects, _ = _ros_node.get_objects()
+        matched = [o for o in objects if str(o.get('label', '')).lower() == target_label]
+        if not matched:
+            return json.dumps({'status': 'error',
+                               'reason': f"'{target_label}' 이(가) /detected_objects에 없습니다 "
+                                         f"(YOLO 검출 필요, 또는 parent_label 지정)."})
+        bbox_norm = matched[0].get('bbox')
+        if not bbox_norm or len(bbox_norm) != 4:
+            return json.dumps({'status': 'error', 'reason': 'invalid_bbox'})
+        bbox_px = [int(bbox_norm[0] * w), int(bbox_norm[1] * h),
+                   int(bbox_norm[2] * w), int(bbox_norm[3] * h)]
+
+    # [2026-09-02] NoOp(bbox 사각 마스크) 대신 SEG_BACKEND 환경변수로 고르는
+    # 기본 backend 사용(depth_plane / sam). depth 를 넘겨서 배경 테이블면을
+    # 마스크에서 빼면 CLAUDE.md "major_axis_yaw_deg 신뢰 불가"의 근본 원인
+    # (bbox-as-mask 배경 오염)이 완화된다. depth_plane 은 모델 0개.
+    seg = get_default_backend().segment(img_bgr, bbox_px, target_part=seg_part_hint,
+                                        depth_image=depth_arr, point_hint_px=point_hint_px)
     if seg is None:
         return json.dumps({'status': 'error', 'reason': 'segmentation_failed'})
 
@@ -2455,6 +2586,8 @@ def estimate_object_geometry(target_label: str) -> str:
     return json.dumps({
         'status': 'success',
         'label': target_label,
+        'parent_label': parent_label,
+        'seg_source': seg.source,       # bbox | depth_plane | sam | ...
         'geometry_confidence': geo.geometry_confidence,
         'major_axis_yaw_deg': geo.major_axis_yaw_deg,
         'normal_yaw_deg': geo.normal_yaw_deg,

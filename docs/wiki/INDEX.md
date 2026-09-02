@@ -14,3 +14,4 @@
 - [그립 각도 선택 & IK 도달범위 스캔 도구](grasp_kinematics_ik.md) — grasp_kinematics.py 구조, TCP offset 상수 위치 정정, ik_side_reachable_map.txt는 미연결 오프라인 산출물, sim x>0 팔 꼬임 근본원인(pitch=180 axis-flip, +180도 보정) + YawCandidateSelector 4후보 확장 + align/descend/place position_yaw 오염 버그(sim_box_aligned_quat 신설, 2026-08-15)
 - [인지 모델 개발 도구](perception_dev_tools.md) — 데이터셋 캡처/SAM 라벨링/YOLO 서빙(vlm_boxyolo.py, best.pt) 워크플로우와 운영 배포 컨벤션, box_yolo_v6 배포 완료(2026-08-12, 부분개선/v5 백업 있음), 모델 서버 포트 전환 시 주의사항
 - [Grasp Geometry 파이프라인(RANSAC+PCA) 신뢰 불가 판정](grasp_geometry_pipeline.md) — estimate_object_geometry의 major_axis_yaw_deg가 실제 회전과 무관하게 편향 수렴하는 현상 실측 확인(2026-08-31), NoOp segmentation 배경누출 의심, 코드는 유지하되 사용 보류
+- [VLM 능력 확장 — open-vocab/segmentation/grasp정책/배치](vlm_capability_tiers.md) — 2026-09-02: YOLO-World /detect_open_vocab 티어, SamSegmentation/DepthPlane backend + SEG_BACKEND, resolve_grasp_dir(변환표 코드화), analyze_scene container_type/placement_targets. 전부 Thor 컴퓨트, 배선/synthetic 검증 완료·실기 미검증

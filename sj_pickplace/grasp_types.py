@@ -124,6 +124,97 @@ class GraspIntent:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# VLM grasp_type/orientation → planning_node grasp_dir 변환 (정책)
+# ═══════════════════════════════════════════════════════════════════════
+#
+# [2026-09-02 추가] CLAUDE.md "그립 형태가 애매할 때" 절의 변환표를 코드로
+# 옮긴 것. 지금까지는 Claude가 매 호출마다 그 표를 손으로 적용했는데,
+# 이건 규칙(정책)이지 매번 사람이 판단할 일이 아니다 -- 룰베이스 제어와
+# 같은 레이어(코드)에 정책을 둔다.
+#
+# ⚠️ VLM 응답의 grasp_type 을 grasp_dir 에 그대로 문자열 매칭하면 안 된다
+#    (개념 불일치): VLM의 PINCH 는 "손끝으로 얇은 단면" 이라는 분류학 용어,
+#    이 프로젝트의 grasp_dir='pinch' 는 특정 실측 각도(가로로 놓인 얇은
+#    물체용). 병처럼 세로로 긴 물체를 VLM이 PINCH로 분류해도 side 로 보내야
+#    기하학적으로 맞는다.
+
+# z(base_link, 미터) 대역: 로봇 "허리 높이" 근처면 top-down 접근이 IK
+# 실패하기 쉬워 side 로 강등한다. 이 경계는 2026-08~09 세션에서 반복
+# 관찰된 경험적 범위이지 체계적 실측값이 아니다 -- 확정값 아님, 실기
+# 검증 후 조정.
+WAIST_Z_MIN_M = 0.30
+WAIST_Z_MAX_M = 0.50
+
+# VLM approach_direction(FRONT/LEFT/RIGHT/BACK, 카메라 시점) → side_approach_deg
+# (position_yaw 기준 상대각). mcp_robot_server.infer_grasp 의 _APPROACH_DEG_MAP
+# 과 동일 -- 한쪽만 바꾸면 어긋나니 같이 확인할 것.
+_APPROACH_DIRECTION_DEG = {"FRONT": 0.0, "LEFT": 90.0, "RIGHT": -90.0, "BACK": 180.0}
+
+
+@dataclass
+class ResolvedGrasp:
+    grasp_dir: str                      # top | side | pinch  (planning_node 인자)
+    side_approach_deg: float = 0.0       # grasp_dir in (side,pinch)일 때만 의미
+    top_downgraded_to_side: bool = False # z 대역 때문에 top→side 로 바꿨나
+    reason: str = ""
+
+
+def resolve_grasp_dir(vlm_response: dict,
+                       object_z: Optional[float] = None) -> ResolvedGrasp:
+    """VLM /infer_grasp 응답(dict 또는 mcp_robot_server.infer_grasp 반환 dict)과
+    물체 z좌표로부터 planning_node 의 grasp_dir / side_approach_deg 를 결정한다.
+
+    변환표(CLAUDE.md):
+      grasp_type=TOP                              → top
+      grasp_type=SIDE                             → side
+      grasp_type=PINCH, orientation=HORIZONTAL    → pinch
+      grasp_type=PINCH, orientation=VERTICAL      → side
+    추가 보정:
+      grasp_type=TOP 인데 object_z 가 WAIST 대역(0.30~0.50m)이면 → side
+      (top-down IK 실패가 잦은 구간, top_downgraded_to_side=True 로 표시).
+      호출부는 이 경우 top 을 먼저 시도하고 실패 시 즉시 side 로 전환해도 됨.
+
+    side_approach_deg 는 응답의 suggested_side_approach_deg 를 그대로,
+    없으면 approach_direction 을 매핑해서 채운다(둘 다 없으면 0.0=FRONT).
+    정밀값이 아니라 planning_node 접근각 스윕의 1순위 추측일 뿐.
+    """
+    grasp_type = str(vlm_response.get("grasp_type", "")).upper()
+    orientation = str(vlm_response.get("orientation", "")).upper()
+
+    if "suggested_side_approach_deg" in vlm_response:
+        try:
+            approach_deg = float(vlm_response["suggested_side_approach_deg"])
+        except (TypeError, ValueError):
+            approach_deg = 0.0
+    else:
+        ad = str(vlm_response.get("approach_direction", "FRONT")).upper()
+        approach_deg = _APPROACH_DIRECTION_DEG.get(ad, 0.0)
+
+    if grasp_type == "PINCH":
+        if orientation == "VERTICAL":
+            return ResolvedGrasp("side", approach_deg, False,
+                                 "VLM PINCH+VERTICAL → side (세로 원통 감싸쥐기)")
+        return ResolvedGrasp("pinch", approach_deg, False,
+                             "VLM PINCH+HORIZONTAL → pinch")
+
+    if grasp_type == "SIDE":
+        return ResolvedGrasp("side", approach_deg, False, "VLM SIDE → side")
+
+    if grasp_type == "TOP":
+        if object_z is not None and WAIST_Z_MIN_M <= object_z <= WAIST_Z_MAX_M:
+            return ResolvedGrasp(
+                "side", approach_deg, True,
+                f"VLM TOP 이지만 z={object_z:.3f}m 가 허리 대역"
+                f"({WAIST_Z_MIN_M}~{WAIST_Z_MAX_M}) → side 로 시도 "
+                f"(top-down IK 실패 잦음, 미검증 경계)")
+        return ResolvedGrasp("top", 0.0, False, "VLM TOP → top")
+
+    # grasp_type 이 비었거나 이상값 -- 안전하게 top 으로(호출부가 별도 처리)
+    return ResolvedGrasp("top", 0.0, False,
+                         f"grasp_type={grasp_type!r} 불명 → top 기본값")
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # 3D Geometry Result (RANSAC + PCA/OBB) — geometry_3d.py가 채움
 # ═══════════════════════════════════════════════════════════════════════
 

@@ -36,9 +36,16 @@ HTTP로 호출하는 얇은 어댑터다.
 
 레버 1 (출력 토큰 감축, 2026-09-01):
 - /infer_grasp 는 vLLM guided JSON(`response_format=json_schema`)으로
-  구조화 필드만 생성 → 자유문장 `reason` 생성을 없앴다. `reason` 필드는
-  구조화 필드에서 서버가 짧게 합성한다(클라이언트 하위호환 유지).
-- grasp 응답 `max_tokens` 를 256 → 128 로 낮췄다.
+  구조화 필드만 생성. `reason` 필드는 구조화 필드 + visual_analysis 에서
+  서버가 합성한다(클라이언트 하위호환 유지).
+
+grasp 정확도 개선 (2026-09-01, 3B bf16 회귀 후 grip 형태 오판 대응):
+- (a) crop 이미지를 `_fit`(강제 480x360, 종횡비 파괴) 대신 `_pad_square`로
+  종횡비 보존 + 정사각 패딩. orientation/grasp_type 판단의 핵심 신호 복원.
+- (b) `_GRASP_SCHEMA` 맨 앞에 `visual_analysis`(짧은 crop 묘사) 필드 추가
+  → CoT-lite. `GRASP_MAX_TOKENS` 128 → 224.
+- (c) 시스템 프롬프트에 텍스트 few-shot 5개(crop 실루엣 → enum).
+- (d) 스키마 필드 순서 재배열(핵심 3필드를 앞, confidence/target_part 뒤).
 
 실행:
     # 먼저 vLLM 서버를 띄운다 (별도 tmux):
@@ -52,7 +59,7 @@ HTTP로 호출하는 얇은 어댑터다.
     VLLM_BASE_URL   기본 http://127.0.0.1:8005/v1
     VLLM_MODEL      기본 qwen3-vl  (serve_qwen3vl.sh 의 --served-model-name)
     VLLM_TIMEOUT    기본 60 (초)
-    GRASP_MAX_TOKENS 기본 128
+    GRASP_MAX_TOKENS 기본 224
 """
 
 import argparse
@@ -75,7 +82,7 @@ from pydantic import BaseModel
 VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "http://127.0.0.1:8005/v1").rstrip("/")
 VLLM_MODEL    = os.environ.get("VLLM_MODEL", "qwen3-vl")
 VLLM_TIMEOUT  = float(os.environ.get("VLLM_TIMEOUT", "60"))
-GRASP_MAX_TOKENS = int(os.environ.get("GRASP_MAX_TOKENS", "128"))
+GRASP_MAX_TOKENS = int(os.environ.get("GRASP_MAX_TOKENS", "224"))
 
 _session = requests.Session()
 
@@ -116,7 +123,8 @@ class SceneRequest(BaseModel):
     timestamp: Optional[float] = None
 
 class SceneResponse(BaseModel):
-    objects: list = []            # [{"label":"cup","bbox":[x1,y1,x2,y2]}, ...]
+    objects: list = []            # [{"label":"cup","bbox":[x1,y1,x2,y2],
+                                  #   "container_type":"none","is_open":false}, ...]
     inference_ms: float = 0.0
 
 class PlacementRequest(BaseModel):
@@ -134,6 +142,20 @@ class GroundRequest(BaseModel):
     detections: list = []         # YOLO 감지 목록 (맥락 제공용)
     timestamp: Optional[float] = None
 
+class OpenVocabRequest(BaseModel):
+    full_image_b64: str
+    labels: list                  # 찾을 라벨 문자열 목록 (open-vocab 프롬프트)
+    conf: float = 0.25            # confidence threshold. YOLO-World 는 낮추면
+                                  # 오검출을 뿌린다(레포 vlm_grounding_dino.py
+                                  # 메모와 동일 성격) -- 호출부는 보통 top-1
+                                  # 만 쓰므로 0.25 정도가 무난. 필요 시 조정.
+    timestamp: Optional[float] = None
+
+class OpenVocabResponse(BaseModel):
+    detections: list = []         # [{"label":..,"bbox":[x1,y1,x2,y2],"confidence":..}]
+    backend: str = "yoloworld"
+    inference_ms: float = 0.0
+
 class GroundResponse(BaseModel):
     found: bool = False
     label: str = ""
@@ -146,6 +168,7 @@ class GroundResponse(BaseModel):
 ALLOWED_GRASP  = {"TOP", "SIDE", "PINCH"}
 ALLOWED_ORIENT = {"HORIZONTAL", "VERTICAL"}
 ALLOWED_APPROACH = {"FRONT", "LEFT", "RIGHT", "BACK"}
+ALLOWED_CONTAINER = {"basket", "bin", "tray", "box", "drawer", "shelf", "bowl", "none"}
 
 # [2026-08 추가] sj_pickplace/grasp_types.py의 GRASP_RELATIONS/ACTIONS/
 # ACTION_DIRECTIONS와 동일 집합 -- 이 파일은 독립 배포 스크립트(ROS
@@ -165,20 +188,25 @@ ALLOWED_ACTION_DIRECTION = {
 # grasp만 스키마를 강제한다 (레버 1: 구조화 필드만 생성, 자유문장 reason 제거).
 # scene/placement/ground 는 배열/픽셀좌표 처리가 까다로워 기존 자유생성 +
 # _extract_json 유지.
+# 필드 순서 = xgrammar 생성 순서. (b) 맨 앞 visual_analysis 로 CoT-lite 유도
+# (3B는 숙고 스텝 없이 enum부터 뱉으면 grasp_type/orientation 오판이 잦음),
+# (d) 핵심 3필드(grasp_type/orientation/approach)를 덜 중요한 필드보다 앞으로,
+# confidence/target_part는 뒤로.
 _GRASP_SCHEMA = {
     "type": "object",
     "properties": {
+        "visual_analysis":    {"type": "string"},
         "grasp_type":         {"type": "string", "enum": sorted(ALLOWED_GRASP)},
         "orientation":        {"type": "string", "enum": sorted(ALLOWED_ORIENT)},
         "approach_direction": {"type": "string", "enum": ["FRONT", "LEFT", "RIGHT", "BACK"]},
-        "confidence":         {"type": "number"},
         "grasp_relation":     {"type": "string", "enum": sorted(ALLOWED_RELATION)},
         "action":             {"type": "string", "enum": sorted(ALLOWED_ACTION)},
         "action_direction":   {"type": "string", "enum": sorted(ALLOWED_ACTION_DIRECTION)},
+        "confidence":         {"type": "number"},
         "target_part":        {"type": ["string", "null"]},
     },
-    "required": ["grasp_type", "orientation", "approach_direction", "confidence",
-                 "grasp_relation", "action", "action_direction"],
+    "required": ["visual_analysis", "grasp_type", "orientation", "approach_direction",
+                 "grasp_relation", "action", "action_direction", "confidence"],
     "additionalProperties": False,
 }
 
@@ -189,11 +217,17 @@ Look at the camera image independently and detect every distinct physical object
 Rules:
 - Detect objects based ONLY on what you see in the image. Do NOT copy, reuse, or reference any object names or coordinates from this prompt.
 - Include manipulable objects: cups, boxes, scissors, books, phones, speakers, bags, markers, pens, pencils, bottles, containers, wallets, cables, and any other physical item.
+- ALSO include placement receptacles that an object could be put into or onto: baskets, bins, trays, boxes, drawers, shelves, racks, bowls.
 - Exclude background surfaces: tables, floors, walls, the robot arm.
 - Do NOT rely on any prior detector results.
 
+For each object also report:
+- "container_type": one of "basket","bin","tray","box","drawer","shelf","bowl","none".
+  Use "none" for anything that is not a receptacle you could place an item into/onto.
+- "is_open": true if it is a receptacle with an accessible opening facing roughly toward the camera (so the robot could drop something in), false otherwise. Use false for "none".
+
 Return ONLY minified JSON with this schema — no markdown, no extra text:
-{"objects":[{"label":"<actual object name from image>","bbox":[x_min,y_min,x_max,y_max]},{"label":"<another object>","bbox":[x_min,y_min,x_max,y_max]}]}
+{"objects":[{"label":"<name>","bbox":[x_min,y_min,x_max,y_max],"container_type":"none","is_open":false}]}
 bbox values are normalized 0.0-1.0. List ALL objects you actually see. No descriptions, no confidence scores."""
 
 _PLACEMENT_SYSTEM = """\
@@ -244,20 +278,36 @@ in Image 2, not on assumptions from the object's name/category. The same
 object type can appear in different orientations (e.g. a book can be lying
 flat OR standing upright on its spine) — look at the crop before deciding.
 
+HARD RULE: if the target is a cup, mug, glass, tumbler, bowl, bottle, vase,
+jar or can, grasp_type is SIDE and orientation is VERTICAL — never TOP —
+unless it is visibly tipped over on its side. A top-down grasp on an open
+container closes on the rim or empty air.
+
 Determine the most suitable grasp for a parallel-jaw gripper. A JSON schema
-is enforced on your answer — emit the structured fields only, no prose.
+is enforced on your answer. The FIRST field, "visual_analysis", MUST be a
+brief (<= 15 words) factual phrase: the object's shape in Image 2 and which
+surface a gripper would close on (e.g. "thin elongated tool, closed on its
+narrow shaft"). The user message states the crop's measured aspect
+(wider-than-tall / taller-than-wide / near-square) — trust that measurement
+over your own eyeballing. Then fill every other field CONSISTENTLY with it.
 Output the JSON as a single line with no newlines and no indentation.
 
 grasp_type (typical cases, not fixed rules — verify against the image):
-  TOP   — gripper descends from above; objects lying flat/wide
-  SIDE  — horizontal approach from the side; tall/upright objects
-          (standing book, cup, bottle, vase)
+  TOP   — gripper descends from above; solid objects lying flat/wide with a
+          usable flat top face (box, book lying flat, phone flat on a table)
+  SIDE  — horizontal approach onto a side wall; tall/upright objects
+          (standing book, bottle, vase) AND any open-top container
+          (cup, mug, glass, bowl, can) even when its crop looks near-square —
+          a TOP grasp there just closes on the rim or empty air.
   PINCH — gripper rotated ~90° vertical; thin/elongated items held
           between fingertips (pen, knife, fork, spoon, scissors,
-          toothbrush, remote, phone, credit card) regardless of orientation
+          toothbrush, remote, phone standing on edge, credit card)
 
-orientation: HORIZONTAL if the object's long axis is roughly horizontal in
-  the crop, VERTICAL if roughly vertical.
+orientation: follow the crop's measured aspect — WIDER-than-tall crop →
+  HORIZONTAL, TALLER-than-wide crop → VERTICAL. Only pick the opposite if the
+  object is plainly rotated diagonally inside the crop. For a near-square crop,
+  use the object's own long axis (a mug/can standing up = VERTICAL).
+  NOTE: PINCH does NOT force VERTICAL — a pen lying flat is PINCH + HORIZONTAL.
 
 approach_direction — from which side the gripper should come in, in the
   CAMERA's view of Image 1:
@@ -291,6 +341,20 @@ action_direction (only meaningful when action != PICK):
 target_part: if the grasp target is a specific part of a larger object
   (e.g. "handle" of a drawer), name it. Otherwise null.
 
+Worked examples (shape + measured crop aspect → fields):
+  bottle, cylindrical side wall, crop taller-than-wide
+     → grasp_type=SIDE, orientation=VERTICAL, grasp_relation=perpendicular_to_long_axis
+  book lying flat, flat rectangular top face, crop wider-than-tall
+     → grasp_type=TOP, orientation=HORIZONTAL, grasp_relation=from_top
+  scissors / pen / knife / spoon, thin elongated tool, crop wider-than-tall
+     → grasp_type=PINCH, orientation=HORIZONTAL, grasp_relation=perpendicular_to_long_axis
+  scissors / pen standing up, thin elongated tool, crop taller-than-wide
+     → grasp_type=PINCH, orientation=VERTICAL, grasp_relation=perpendicular_to_long_axis
+  mug/can standing upright, curved side wall + opening on top, crop near-square
+     → grasp_type=SIDE, orientation=VERTICAL, grasp_relation=perpendicular_to_long_axis
+  cube / small box, flat top face, crop near-square
+     → grasp_type=TOP, orientation=HORIZONTAL, grasp_relation=from_top
+
 If you are not confident about grasp_relation / action / action_direction,
 use "unknown" / "PICK" rather than guessing — downstream code trusts these
 values directly, so a wrong confident answer is worse than "unknown"."""
@@ -310,6 +374,23 @@ def _fit(img: Image.Image) -> Image.Image:
     if img.width > _MAX_W or img.height > _MAX_H:
         img = img.resize((_MAX_W, _MAX_H), Image.LANCZOS)
     return img
+
+
+def _pad_square(img: Image.Image, size: int = 448) -> Image.Image:
+    """(a) infer_grasp crop 전용. `_fit`(강제 480x360, 종횡비 파괴)은 쓰지
+    않는다 — grasp_type/orientation 판단은 crop 속 물체의 종횡비(세로로 긴가
+    가로로 긴가)가 핵심이라, 눌러서 왜곡하면 세로 병이 정사각처럼 보여 SIDE↔TOP
+    을 계속 틀린다. 종횡비를 보존한 채 긴 변을 size에 맞추고(작은 crop은 업스케일
+    해 3B가 디테일을 보게 함) 정사각으로 회색 레터박스 패딩한다. 이 엔드포인트는
+    픽셀 좌표를 반환하지 않으므로 _validate_scene류의 480x360 정규화 제약과 무관.
+    size=448 은 Qwen2.5-VL 패치 격자(28px)의 배수."""
+    w, h = img.size
+    scale = size / max(w, h)
+    nw, nh = max(1, round(w * scale)), max(1, round(h * scale))
+    img = img.resize((nw, nh), Image.LANCZOS)
+    canvas = Image.new("RGB", (size, size), (127, 127, 127))
+    canvas.paste(img, ((size - nw) // 2, (size - nh) // 2))
+    return canvas
 
 
 def _img_to_uri(img: Image.Image) -> str:
@@ -348,6 +429,93 @@ def _vllm_alive() -> bool:
         return r.status_code == 200
     except Exception:
         return False
+
+
+# ── YOLO-World (open-vocab 검출) ─────────────────────────────────────────────
+# [2026-09-02 추가] YOLO가 못 잡는 라벨을 8B VLM /ground_object(2~4초, chat형
+# 이라 좌표 정밀도 낮음) 대신 open-vocab 검출기로 빠르게(~30~50ms) 잡는다.
+# 이 서버는 원래 "로컬 웨이트 안 올리는 얇은 어댑터"지만, 사용자 판단으로
+# 경량 perception 모델은 Thor 에 co-locate 하기로 함(2026-09-02). ultralytics
+# 미설치/로드 실패해도 서버는 정상 기동하고 이 엔드포인트만 503 을 준다.
+_YW_MODEL_PATH = os.environ.get("YOLOWORLD_MODEL", "yolov8l-worldv2.pt")
+_yw_model = None
+_yw_lock = threading.Lock()
+_yw_failed = False
+_yw_last_classes: list = []
+
+
+def _yoloworld():
+    global _yw_model, _yw_failed
+    if _yw_model is not None or _yw_failed:
+        return _yw_model
+    with _yw_lock:
+        if _yw_model is not None or _yw_failed:
+            return _yw_model
+        try:
+            import numpy as _np
+            import torch as _torch
+            from ultralytics import YOLOWorld
+            mdl = YOLOWorld(_YW_MODEL_PATH)
+            # YOLOWorld 는 CPU 로 로드되고 predict 때 GPU 로 옮겨진다. 그
+            # 순서면 첫 set_classes 가 CLIP 을 CPU 에 캐시해서 이후 class
+            # 스위칭이 device mismatch 로 죽는다. 로드 직후 GPU 로 강제
+            # 이동해서, 이후 모든 set_classes(get_text_pe)가 CLIP 을 GPU 에
+            # 빌드/캐시하도록 한다.
+            _dev = "cuda" if _torch.cuda.is_available() else "cpu"
+            try:
+                mdl.model.to(_dev)
+            except Exception:
+                pass
+            mdl.set_classes(["object"])                       # CLIP 캐시를 _dev 에
+            mdl.predict(_np.zeros((64, 64, 3), _np.uint8), verbose=False)  # backend 워밍업
+            _yw_model = mdl
+            print(f"[yoloworld] loaded + warmed on {_dev}: {_YW_MODEL_PATH}", flush=True)
+        except Exception as e:
+            _yw_failed = True
+            print(f"[yoloworld] load 실패: {type(e).__name__}: {e}", flush=True)
+        return _yw_model
+
+
+def _yoloworld_detect(img: Image.Image, labels: list, conf: float) -> list:
+    """(label, [x1,y1,x2,y2] 정규화, confidence) 목록. 실패 시 예외."""
+    global _yw_last_classes
+    model = _yoloworld()
+    if model is None:
+        raise RuntimeError("yoloworld_unavailable")
+    import numpy as np
+    arr = np.array(img)[:, :, ::-1]  # RGB->BGR
+    h, w = arr.shape[:2]
+    classes = [str(x).strip() for x in labels if str(x).strip()]
+    if not classes:
+        raise ValueError("empty_labels")
+    if classes != _yw_last_classes:
+        # ultralytics YOLO-World 8.4 device 이슈 대응(로더에서 모델을 미리
+        # GPU 로 올려 CLIP 캐시가 GPU 에 잡히게 한 것과 한 세트):
+        #   - set_classes 후 txt_feats 를 모델 device 로 이동
+        #   - predictor 폐기 → 새 클래스로 AutoBackend 재초기화
+        # (안 하면 self.model 과 persistent predictor.model 사이 클래스/
+        #  device 불일치로 predict 가 죽는다.)
+        wm = model.model
+        model.set_classes(classes)
+        try:
+            dev = next(wm.parameters()).device
+            if getattr(wm, "txt_feats", None) is not None:
+                wm.txt_feats = wm.txt_feats.to(dev)
+        except Exception:
+            pass
+        model.predictor = None
+        _yw_last_classes = classes
+    res = model.predict(arr, conf=conf, verbose=False)[0]
+    out = []
+    for b in res.boxes:
+        xa, ya, xb, yb = [float(v) for v in b.xyxy[0].tolist()]
+        out.append({
+            "label": classes[int(b.cls[0])],
+            "bbox": [round(xa / w, 4), round(ya / h, 4),
+                     round(xb / w, 4), round(yb / h, 4)],
+            "confidence": round(float(b.conf[0]), 3),
+        })
+    return out
 
 
 # ── JSON 파싱 / 검증 ─────────────────────────────────────────────────────────
@@ -429,13 +597,18 @@ def _validate(data: dict, label: str, elapsed: float) -> GraspResponse:
     if action_direction not in ALLOWED_ACTION_DIRECTION:
         action_direction = "unknown"
 
+    # (b) CoT-lite: 모델이 crop을 실제로 묘사한 문장. 로그/표시용으로만 쓰이므로
+    # (downstream geometry는 enum만 신뢰) 그대로 reason 에 덧붙인다.
+    visual = str(data.get("visual_analysis", "")).strip().replace("\n", " ")[:200]
+
     return GraspResponse(
         object=label,
         grasp_type=grasp,
         orientation=orient,
         approach_direction=approach,
         confidence=round(conf, 3),
-        reason=_synth_reason(grasp, orient, relation, action),
+        reason=(_synth_reason(grasp, orient, relation, action)
+                + (f" — {visual}" if visual else "")),
         inference_ms=round(elapsed * 1000, 1),
         target_part=target_part,
         grasp_relation=relation,
@@ -474,7 +647,15 @@ def _validate_scene(data, elapsed: float) -> SceneResponse:
                 bbox[2] / _VLM_IMG_W, bbox[3] / _VLM_IMG_H,
             ]
         bbox = [round(max(0.0, min(1.0, v)), 4) for v in bbox]
-        valid.append({"label": label, "bbox": bbox})
+
+        # [2026-09-02] 배치 리셉터클 태그 -- 허용집합 밖/누락이면 안전값.
+        ctype = str(o.get("container_type", "none")).strip().lower()
+        if ctype not in ALLOWED_CONTAINER:
+            ctype = "none"
+        is_open = bool(o.get("is_open", False)) if ctype != "none" else False
+
+        valid.append({"label": label, "bbox": bbox,
+                      "container_type": ctype, "is_open": is_open})
 
     return SceneResponse(objects=valid, inference_ms=round(elapsed * 1000, 1))
 
@@ -611,17 +792,26 @@ def build_app(port: int, debug: bool, debug_dir: str) -> FastAPI:
               f"/infer_grasp 는 fallback 반환, scene/placement/ground 는 503")
 
     def _infer_grasp_vlm(full_img: Image.Image, crop_img: Image.Image, label: str) -> str:
-        """grasp 추론 — guided JSON. 레버 1: max_tokens 캡 + 자유문장 reason 없음."""
+        """grasp 추론 — guided JSON. crop은 종횡비 보존(_pad_square) + 측정된
+        crop aspect를 텍스트로 같이 전달, 맨 앞 visual_analysis 로 CoT-lite."""
+        cw, ch = crop_img.size
+        ar = cw / ch if ch else 1.0
+        if   ar >= 1.18: aspect = f"WIDER-than-tall ({cw}x{ch}px, {ar:.2f}:1)"
+        elif ar <= 0.85: aspect = f"TALLER-than-wide ({cw}x{ch}px, 1:{1/ar:.2f})"
+        else:            aspect = f"NEAR-SQUARE ({cw}x{ch}px, {ar:.2f}:1)"
+
         full_img = _fit(full_img)
-        crop_img = _fit(crop_img)
+        crop_img = _pad_square(crop_img, 448)   # (a) 종횡비 보존
         messages = [
             {"role": "system", "content": _SYSTEM},
             {"role": "user", "content": [
-                {"type": "text",      "text": "Image 1 — full scene:"},
+                {"type": "text",      "text": "Image 1 — full scene (context, obstacles, approach direction):"},
                 {"type": "image_url", "image_url": {"url": _img_to_uri(full_img)}},
-                {"type": "text",      "text": f"Image 2 — cropped target object '{label}':"},
+                {"type": "text",      "text": f"Image 2 — cropped target object '{label}'. "
+                                              "Grey borders are square padding, ignore them. "
+                                              f"Measured crop aspect: {aspect}."},
                 {"type": "image_url", "image_url": {"url": _img_to_uri(crop_img)}},
-                {"type": "text",      "text": f'Target label: "{label}"'},
+                {"type": "text",      "text": f'Target label: "{label}". Measured crop aspect: {aspect}.'},
             ]},
         ]
         out, usage = _chat(messages, max_tokens=GRASP_MAX_TOKENS,
@@ -688,7 +878,28 @@ def build_app(port: int, debug: bool, debug_dir: str) -> FastAPI:
             "model": VLLM_MODEL,
             "vllm_url": VLLM_BASE_URL,
             "model_loaded": _vllm_alive(),
+            "yoloworld_loaded": _yw_model is not None,
         }
+
+    @app.post("/detect_open_vocab", response_model=OpenVocabResponse)
+    def detect_open_vocab(req: OpenVocabRequest):
+        """open-vocab 검출 (YOLO-World). YOLO가 못 잡는 라벨의 정밀 bbox 를
+        8B VLM 대신 ~30~50ms 로 얻기 위한 티어. ultralytics 미설치/로드 실패
+        시 503 -- 호출부는 그때만 VLM /ground_object 로 폴백하면 된다."""
+        t0 = time.time()
+        try:
+            img = Image.open(io.BytesIO(base64.b64decode(req.full_image_b64))).convert("RGB")
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"이미지 디코드 실패: {e}")
+        try:
+            dets = _yoloworld_detect(img, req.labels, req.conf)
+        except RuntimeError as e:
+            raise HTTPException(status_code=503, detail=f"open_vocab_unavailable|{e}")
+        except Exception as e:
+            raise HTTPException(status_code=503, detail=f"open_vocab_failed|{type(e).__name__}:{e}")
+        elapsed = round((time.time() - t0) * 1000, 1)
+        print(f"[vlm :{port}] detect_open_vocab labels={req.labels} → {len(dets)} dets {elapsed:.0f}ms")
+        return OpenVocabResponse(detections=dets, backend="yoloworld", inference_ms=elapsed)
 
     @app.post("/infer_grasp", response_model=GraspResponse)
     def infer_grasp(req: GraspRequest):

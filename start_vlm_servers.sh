@@ -15,6 +15,14 @@
 #   ./start_vlm_servers.sh stop     # 두 서버 종료
 #   ./start_vlm_servers.sh status   # 실행 상태 확인
 #
+# [2026-09-02] vlm_grasp_server(8003)에 open-vocab 검출 엔드포인트
+# /detect_open_vocab (YOLO-World) 추가. 가중치는 YOLOWORLD_MODEL 환경변수
+# (기본 yolov8l-worldv2.pt, 레포 루트에 있음). ultralytics 없으면 그
+# 엔드포인트만 503, 나머지는 정상.
+#   segmentation backend(estimate_object_geometry): 클라이언트(mcp_robot_
+#   server) 쪽 SEG_BACKEND 환경변수 -- noop(기본)|depth_plane|sam. 이 스크립트
+#   가 아니라 mcp_robot_server 를 띄우는 쪽에서 export.
+#
 # 로그: /tmp/nero_servers/*.log
 # PID:  /tmp/nero_servers/*.pid
 
