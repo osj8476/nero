@@ -60,6 +60,16 @@
   등)과 대조. box를 5회 재측정한 결과 `major_axis_yaw_deg`가 82~89°에
   거의 고정 수렴하는 편향 확인 → 사용자 판단으로 이 신호 사용 보류
   결정. 코드는 유지, 문서만 "신뢰 불가"로 표시.
+- 2026-09-03: point cloud sanity spike(`tools/PC_SPIKE_RESULT.md`) 로
+  실물 RealSense D435i depth 를 grasp net 입력 관점에서 2 라운드 검증.
+  848×480 + High Accuracy preset + spatial/temporal 필터로 hole_ratio 는
+  중앙ROI median ~20% → ~9% 로 개선됐으나, ROI depth bimodality 단봉
+  프레임 다수 = **물체/작업면이 depth 만으로 분리 안 됨** → SAM mask crop
+  전제. 여기서 관측된 배경 누출 + 얕은 관측각이 위 "extents 0.27~0.44m /
+  마스크가 배경 포함" 증상과 같은 원인임을 실물 depth 쪽에서 재확인.
+  결정: `SAM crop → Contact-GraspNet` 1순위, SAM segmentation 실기 검증이
+  grasp net 구현보다 선행. 검은 무광 작업면·투명/고반사 물체는 depth
+  경로 밖.
 
 ## 폐기된 접근 / 하지 말 것
 - **`major_axis_yaw_deg`를 side/pinch 접근각 결정에 그대로 사용하지

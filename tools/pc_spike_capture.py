@@ -11,6 +11,10 @@ point cloud 품질 평가에 못 쓴다 — 이 스크립트는 depth 를 같이
     "depth intrinsics 쓰지 말고 color stream profile 에서 뽑아라" 원칙).
   - depth 는 device depth_scale 로 곱해 **미터**로 저장 (NERO 전체 관례,
     point_cloud.py DEFAULT_DEPTH_* 와 동일 단위).
+  - 기본 848x480(D4xx 네이티브) + 'High Accuracy' preset + 후처리 필터
+    (disparity→spatial→temporal). 1차 spike(1280x720/필터 없음)에서
+    hole 9~36%, extent 과대로 게이트 탈락 → 조건 보정 후 재촬영용.
+    raw 비교가 필요하면 --no-filters --preset none --cam-w 1280 --cam-h 720.
 
 실행 (카메라 물려 있는 머신에서):
     pip install pyrealsense2 opencv-python numpy
@@ -51,12 +55,20 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="~/pc_spike", help="저장 폴더")
     ap.add_argument("--prefix", default="scene")
-    ap.add_argument("--cam-w", type=int, default=1280)
-    ap.add_argument("--cam-h", type=int, default=720)
+    ap.add_argument("--cam-w", type=int, default=848, help="D4xx 네이티브 depth 해상도 = 848x480")
+    ap.add_argument("--cam-h", type=int, default=480)
     ap.add_argument("--cam-fps", type=int, default=30)
     ap.add_argument("--interval", type=float, default=1.0, help="자동 캡처 간격(초)")
     ap.add_argument("--no-preview", action="store_true", help="창 없이 자동 캡처만")
     ap.add_argument("--auto-n", type=int, default=0, help=">0 이면 그만큼 자동 저장 후 종료")
+    ap.add_argument("--preset", default="High Accuracy",
+                    help="RealSense visual preset 이름 (예: 'High Accuracy', 'Default'). "
+                         "'none' 이면 안 건드림")
+    ap.add_argument("--no-filters", action="store_true",
+                    help="후처리 필터(spatial/temporal) 끄고 raw aligned depth 저장")
+    ap.add_argument("--hole-fill", action="store_true",
+                    help="hole_filling 필터 추가. 구멍을 메우지만 없는 형상을 지어내므로 "
+                         "hole_ratio 판정이 왜곡됨 — 기본 off, 육안/모델실험용으로만")
     args = ap.parse_args()
 
     out_dir = Path(args.out).expanduser()
@@ -72,9 +84,49 @@ def main():
     depth_scale = depth_sensor.get_depth_scale()  # z16 unit → meters
     align = rs.align(rs.stream.color)
 
+    # visual preset — 'High Accuracy' 는 신뢰도 낮은 픽셀을 버려서 hole 은 늘지만
+    # 남는 depth 의 정확도가 올라간다. grasp net 입력 평가엔 이쪽이 맞다.
+    preset_applied = "none"
+    if args.preset.lower() != "none" and depth_sensor.supports(rs.option.visual_preset):
+        n = int(depth_sensor.get_option_range(rs.option.visual_preset).max) + 1
+        for i in range(n):
+            desc = depth_sensor.get_option_value_description(rs.option.visual_preset, i)
+            if desc.lower() == args.preset.lower():
+                depth_sensor.set_option(rs.option.visual_preset, i)
+                preset_applied = desc
+                break
+
+    # 후처리 필터: aligned depth frame 에 disparity→spatial→temporal→depth→hole-filling.
+    # decimation 은 해상도가 바뀌어 color align 과 어긋나므로 제외.
+    filters = []
+    if not args.no_filters:
+        spat = rs.spatial_filter()
+        spat.set_option(rs.option.filter_magnitude, 2)
+        spat.set_option(rs.option.filter_smooth_alpha, 0.5)
+        spat.set_option(rs.option.filter_smooth_delta, 20)
+        temp = rs.temporal_filter()
+        temp.set_option(rs.option.filter_smooth_alpha, 0.4)
+        temp.set_option(rs.option.filter_smooth_delta, 20)
+        filters = [rs.disparity_transform(True), spat, temp,
+                   rs.disparity_transform(False)]
+        if args.hole_fill:
+            filters.append(rs.hole_filling_filter(1))  # 1 = farthest-from-around
+
+    def apply_filters(depth_frame):
+        f = depth_frame
+        for flt in filters:
+            f = flt.process(f)
+        return f.as_depth_frame()
+
+    if args.no_filters:
+        filt_note = "off"
+    else:
+        filt_note = "disparity+spatial+temporal" + ("+hole_filling" if args.hole_fill else "")
+
     dev = profile.get_device()
     print(f"[capture] {dev.get_info(rs.camera_info.name)} "
           f"sn={dev.get_info(rs.camera_info.serial_number)} depth_scale={depth_scale:.6f}")
+    print(f"[capture] res={args.cam_w}x{args.cam_h}  preset={preset_applied}  filters={filt_note}")
 
     saved = 0
     auto = args.auto_n > 0
@@ -90,6 +142,8 @@ def main():
             cf = frames.get_color_frame()
             if not df or not cf:
                 continue
+            if filters:
+                df = apply_filters(df)
 
             color = np.asanyarray(cf.get_data())               # (H,W,3) bgr8
             depth_raw = np.asanyarray(df.get_data())            # (H,W) uint16
@@ -128,6 +182,8 @@ def main():
                     cam_wh=np.array([args.cam_w, args.cam_h]),
                     timestamp=time.time(),
                     note=datetime.now().isoformat(),
+                    preset=preset_applied,
+                    filters=filt_note,
                 )
                 cv2.imwrite(str(stem) + "_color.png", color)
                 cv2.imwrite(str(stem) + "_depthviz.png", depth_to_viz(depth_m))
