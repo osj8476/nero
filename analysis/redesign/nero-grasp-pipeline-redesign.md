@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 6ba50bd9-f824-411e-816c-7dcb14f08a0e
-  modified: 2026-09-04T12:03:11.425Z
+  modified: 2026-09-04T12:20:06.481Z
 ---
 
 # NERO pick&place 재설계 — 진단 및 참고 논문
@@ -478,7 +478,8 @@ random pose + **RealSense 노이즈 모델**(depth_noise 측정값에 맞춤) + 
 |---|---|---|
 | 2a | ✅ **완료 (2026-09-04, 이 PC RTX 3080Ti)**. `elchun/contact_graspnet_pytorch` clone `~/grasp/contact_graspnet_pytorch` (pretrained `model.pt` 포함, **pointnet2 순수 pytorch = CUDA 컴파일 불필요**). venv `~/grasp/cgn_venv` (uv `--system-site-packages`, torch 2.5.1+cu121 재사용). deps: trimesh/pyquaternion/addict/configargparse/pyrender/opencv-headless. 러너 `tools/cgn_prototype/run_cgn.py` (commit `1813f1b`) — viz import 우회, `.ply/.npz` → `predict_scene_grasps` → `.npz`. 번들 test scene 326 grasp OK. **VRAM: 로드+추론 시 ~1~3GB, 12GB 중 → Isaac Sim 공존 가능** |
 | 2b | **`tools/cgn_prototype/cgn_prototype.py` — commit `83c2b3a`.** `ContactGraspNetBackend` 스캐폴딩: 정규화(mean centering) → predict() → 공식 변환(Gram-Schmidt Eq6, `R_g=[b,a×b,a]`, `t_g=c+(w/2)b+d·a`) → w≤w_max/s≥thr 필터 → 180° twin → 그리퍼 와이어프레임 `.ply`/RViz MarkerArray. `_run_model()`만 2a 대기, 그 전엔 `--fallback`. HDD box .ply로 스모크테스트 통과 | ✅ 나 |
-| 2c | **예비 결과 (2026-09-04)**: pretrained CGN 을 NERO box masked .ply 4개에 돌림. **marginal** — grasp 나오지만 max score ~0.19(낮음, 번들 test scene 은 0.29), 한 코너에 클러스터(표면 전체 분포 X), opening 0.9~4cm (21cm box 에 과소 = 얇은 edge grasp), bottle → 0개. **원인 후보**: (a) **masked object 만 입력** — CGN 은 full scene + segmap 전제(README), local 3D 이웃 context 없어서 저조 (b) 도메인 갭(real RealSense 노이즈/구멍/비스듬 vs sim). (a) 테스트 = full-scene depth+K+segmap .npz 필요 → **재촬영 or 원본 .npz 확보 필요** (HDD 엔 masked .ply 만). 임계값 낮춤(`--arg-configs TEST.second_thres`)·forward-passes 6 도 효과 미미 | 예비 완료 |
+| 2c | **예비 결과 (2026-09-04)**: pretrained CGN(pytorch 포트) → NERO box masked .ply. **marginal**: max score ~0.19~0.22, 번들 test scene 은 0.29(포트 자체가 TF 원본보다 약함 — README "results may vary"). uniq 위치 69개(코너 클러스터는 top-score 만), opening 2.5~2.8cm(21cm box 에 과소=edge grasp), **approach 는 대략 top-down**(광학계 y+ mean 0.82), bottle/thin → 0개. **원인 미확정** — 후보 (a) masked object 만 입력(scene context 없음) (b) 도메인 갭. **시도한 것, 효과 없음**: gripper_width 0.08→0.10(0.19→0.22), 임계값 낮춤, forward-passes 6, 합성 테이블면 붙이기(F_edge 소폭↑ / A_box 0 grasp — 합성 평면이 너무 인공적, 결론 안 남). **진짜 scene-context 테스트 = Thor 원본 depth+K+segmap npz 필요 (지금 못 가져옴).** | 예비 완료 |
+| 2c-next | **막힘 없는 다음: Isaac Sim 렌더 씬 테스트.** NERO box 를 Isaac Sim 테이블에 놓고 clean depth+K+segmap 렌더 → CGN. clean sim depth 에서 score 갭 닫히면 → 도메인 갭 확정, 노이즈 fine-tune. clean 에서도 ~0.2 면 → 포트가 약함 (TF 원본 / AnyGrasp / fine-tune 고려). **+ 이게 fine-tune 데이터 생성 파이프라인 1단계** | 다음 |
 | 2d | grasp → base_link TF (`_cam_to_base`, canonical observation 자세에서만) | 2c 후 |
 
 **CONFIG 확정 (URDF/코드)**: `d = 0.1358 m` (`planning_node.TOP_TCP_OFFSET`, flange→fingertip
