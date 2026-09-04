@@ -78,10 +78,16 @@ def main():
     # ── 입력 로드 ──
     inp = Path(args.inp).expanduser()
     pc_segments = {}
+    pc_colors = None
+    segmap = None
     if inp.suffix == ".ply":
         pc_full = _load_ply_xyz(inp)
-        pc_colors = None
-        segmap = None
+    elif inp.suffix in (".npz", ".npy") and "xyz" in getattr(np.load(str(inp), allow_pickle=True), "files", []):
+        # 포트의 load_available_input_data 는 bare xyz 에서 cam_K UnboundLocalError → 직접 처리
+        _d = np.load(str(inp), allow_pickle=True)
+        pc_full = np.asarray(_d["xyz"]).reshape(-1, 3).astype(np.float32)
+        if "xyz_color" in _d.files:
+            pc_colors = _d["xyz_color"]
     else:
         segmap, rgb, depth, cam_K, pc_full, pc_colors = load_available_input_data(str(inp))
         if pc_full is None:
