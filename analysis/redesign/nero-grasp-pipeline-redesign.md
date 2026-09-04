@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 6ba50bd9-f824-411e-816c-7dcb14f08a0e
-  modified: 2026-09-04T11:52:18.779Z
+  modified: 2026-09-04T12:03:11.425Z
 ---
 
 # NERO pick&place 재설계 — 진단 및 참고 논문
@@ -476,9 +476,9 @@ random pose + **RealSense 노이즈 모델**(depth_noise 측정값에 맞춤) + 
 
 | # | 과제 | 상태 |
 |---|---|---|
-| 2a | Contact-GraspNet 런타임 — `contact_graspnet_pytorch` 포트, PyTorch+CUDA env, pretrained ckpt. **이 PC에서** (Isaac Sim VRAM 공존 `nvidia-smi` 확인). 단독 테스트 후 `cgn_prototype._run_model()` 연결 (같은 env import or 별도 프로세스 HTTP) | 사용자 착수 |
+| 2a | ✅ **완료 (2026-09-04, 이 PC RTX 3080Ti)**. `elchun/contact_graspnet_pytorch` clone `~/grasp/contact_graspnet_pytorch` (pretrained `model.pt` 포함, **pointnet2 순수 pytorch = CUDA 컴파일 불필요**). venv `~/grasp/cgn_venv` (uv `--system-site-packages`, torch 2.5.1+cu121 재사용). deps: trimesh/pyquaternion/addict/configargparse/pyrender/opencv-headless. 러너 `tools/cgn_prototype/run_cgn.py` (commit `1813f1b`) — viz import 우회, `.ply/.npz` → `predict_scene_grasps` → `.npz`. 번들 test scene 326 grasp OK. **VRAM: 로드+추론 시 ~1~3GB, 12GB 중 → Isaac Sim 공존 가능** |
 | 2b | **`tools/cgn_prototype/cgn_prototype.py` — commit `83c2b3a`.** `ContactGraspNetBackend` 스캐폴딩: 정규화(mean centering) → predict() → 공식 변환(Gram-Schmidt Eq6, `R_g=[b,a×b,a]`, `t_g=c+(w/2)b+d·a`) → w≤w_max/s≥thr 필터 → 180° twin → 그리퍼 와이어프레임 `.ply`/RViz MarkerArray. `_run_model()`만 2a 대기, 그 전엔 `--fallback`. HDD box .ply로 스모크테스트 통과 | ✅ 나 |
-| 2c | box masked .ply 9개 → grasp 후보 → **RViz `/cgn_grasps` MarkerArray** (또는 그리퍼 와이어프레임 .ply → MeshLab/Isaac Sim). **판정: box에 top-down/side grasp이 말 되게 나오면 pretrained OK** (재설계 최대 미지수 B1 답) | 2a 후 |
+| 2c | **예비 결과 (2026-09-04)**: pretrained CGN 을 NERO box masked .ply 4개에 돌림. **marginal** — grasp 나오지만 max score ~0.19(낮음, 번들 test scene 은 0.29), 한 코너에 클러스터(표면 전체 분포 X), opening 0.9~4cm (21cm box 에 과소 = 얇은 edge grasp), bottle → 0개. **원인 후보**: (a) **masked object 만 입력** — CGN 은 full scene + segmap 전제(README), local 3D 이웃 context 없어서 저조 (b) 도메인 갭(real RealSense 노이즈/구멍/비스듬 vs sim). (a) 테스트 = full-scene depth+K+segmap .npz 필요 → **재촬영 or 원본 .npz 확보 필요** (HDD 엔 masked .ply 만). 임계값 낮춤(`--arg-configs TEST.second_thres`)·forward-passes 6 도 효과 미미 | 예비 완료 |
 | 2d | grasp → base_link TF (`_cam_to_base`, canonical observation 자세에서만) | 2c 후 |
 
 **CONFIG 확정 (URDF/코드)**: `d = 0.1358 m` (`planning_node.TOP_TCP_OFFSET`, flange→fingertip
