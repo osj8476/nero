@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 6ba50bd9-f824-411e-816c-7dcb14f08a0e
-  modified: 2026-09-04T09:28:09.819Z
+  modified: 2026-09-04T11:39:43.152Z
 ---
 
 # NERO pick&place 재설계 — 진단 및 참고 논문
@@ -168,12 +168,36 @@ Isaac Sim RViz 시각화 → 성공률 보고 재학습 판단. 처음부터 학
 `sj_pickplace/segmentation_backend.py` `SamSegmentation` 은 배선만 됨/미검증
 ([[vlm_capability_tiers]]). 검증되면 `learned_grasp_backend.py` 에 Contact-GraspNet 클래스.
 
+### YOLO / SAM / point cloud — 관계와 흐름 (2026-09-04)
+**전부 붙여서 씀. 택1 아님.** YOLO·SAM은 2D RGB에서만 작동, depth는 별도 스트림,
+마스크가 "어느 depth 픽셀이 물체인지" 잇는 다리.
+
+| | 정체 | 입력 | 출력 | 아는 것 |
+|---|---|---|---|---|
+| YOLO | detector | RGB | bbox + 라벨 + conf | "어느 게 컵" (의미) |
+| SAM | promptable segmenter | RGB + **prompt(bbox)** | 픽셀 마스크 | 경계만. 뭘 가리켰는지 모름 (class-agnostic) |
+| 역투영 | — | 마스크 + **depth** + intrinsics | PC (N,3) | — |
+| Contact-GraspNet | — | PC | 6-DoF grasp 후보 | — |
+
+흐름: `RGB → YOLO → {"cup", bbox} → SAM(bbox=prompt) → 마스크 → point_cloud.py 역투영
+→ masked PC → _cam_to_base TF → Contact-GraspNet`
+
+| 단계 | 걸러지는 것 |
+|---|---|
+| YOLO 후 | 다른 물체, 화면 대부분 (bbox 사각형만) |
+| **SAM 후** | **사각형 안 테이블도 제외 = spike bimodality 문제 해결점** |
+| 역투영 후 | depth 구멍 픽셀 (occlusion/검은면/금속 — SAM이 못 고침) |
+
+하나 빼면: YOLO 빼면 SAM이 뭘 자를지 모름 / SAM 빼면 bbox 사각형에 테이블 섞임 (spike
+실패) / depth 빼면 2D 마스크뿐, 3D grasp 불가.
+
+NERO 코드 매핑: YOLO=`vlm_boxyolo.py`(운영중) / SAM=`segmentation_backend.py`
+`SamSegmentation`(배선됨, 벤치로 모델 확정) / 역투영=`point_cloud.py`
+`mask_depth_to_pointcloud()`(구현됨) / intrinsics=`camera_calibration.py` / TF=`_cam_to_base`
+(joint1≈0에서만) / CGN=`learned_grasp_backend.py` `LearnedGraspBackend` ABC(클래스 미구현).
+
 ### segmentation 접근 결정 (2026-09-04)
-- **YOLO(bbox)만으로는 안 됨** — point cloud crop 하려면 **픽셀 마스크가 필수**.
-  bbox crop 하면 물체 주변 테이블 픽셀이 딸려와서 spike 의 bimodality 문제 재현.
-- YOLO 와 SAM 은 택1 아님. **YOLO = 의미(어느 게 컵), SAM = 경계(정확한 픽셀).**
-  SAM 은 prompt 필요 → YOLO bbox 가 그 prompt. `SamSegmentation` 이 이미 `bbox`/
-  `point_hint_px` prompt 받게 배선됨.
+- YOLO 와 SAM 은 택1 아님. **YOLO = 의미, SAM = 경계.** SAM prompt = YOLO bbox.
 - **벤치마킹할 2안**:
   - (2) **YOLO bbox → SAM(또는 MobileSAM/SAM2/HQ-SAM) 마스크** — 경계 정밀, 모델 2개,
     class-agnostic
@@ -274,6 +298,87 @@ generator가 내는 실제 grasp 후보 N개로 IK 성공률 pick_ik vs KDL 측�
 - 현재 divergence 원인: sim 은 MoveIt2 경유, 실물은 `move_p`(펌웨어 자체 IK+궤적). 고치려면
   pyAgxArm 을 ros2_control 로 래핑 → 실물도 MoveIt2 궤적 받아 실행만
 - planning_node(또는 BT 실행기)는 궤적을 **직접 계산 안 함** — MoveIt2 plan API 호출만
+
+## 차용 공식 (Contact-GraspNet + 6-DOF GraspNet + OK-Robot) — 2026-09-04
+
+### A. Grasp pose 재구성 — Contact-GraspNet Eq (1)(2)
+```
+t_g = c + (w/2)·b + d·a
+R_g = [ b │ a×b │ a ]        (열벡터, 회전행렬)
+```
+c=contact point(PC 실측 점), a=approach 단위벡터, b=baseline(손끝 닫히는 축), w=폭,
+d=그리퍼 baseline→base 거리(하드웨어 상수, AGX≈0.19~0.20m). R_g→쿼터니언(xyzw)→
+`GraspCandidate.quaternion`. **`d·a` 항이 TCP offset 통일** — TOP/SIDE offset "합치지 마라"
+문제 소멸.
+
+### B. a,b 직교정규화 — Contact-GraspNet Eq (6)
+```
+b̂ = z1/‖z1‖
+â = (z2 − ⟨b̂,z2⟩·b̂) / ‖z2 − ⟨b̂,z2⟩·b̂‖
+```
+raw 벡터에서 유효한 a⊥b. 직접 grasp 만들/refine 시 이걸로 정규화 → R_g 항상 valid
+rotation, roll/pitch/yaw axis-flip 버그 회피.
+
+### C. Grasp 간 거리 / refinement — CGN Eq (7)(8) / 6DGN Eq (3)(6)
+```
+v_i(g) = v·R_g^T + t_g                  v = 그리퍼 위 미리정의 점 5개(control points)
+L(g,ĝ) = (1/n) Σ_u min_u ‖v_u(g) − v_u(ĝ)‖      min_u = 그리퍼 180° 대칭 고려
+```
+용도: 후보 중복제거(L<ε), 180° twin 생성(둘 다 pick_ik → reachability 2배).
+**near-miss refinement (6DGN Eq 6 차용)**: `Δg = η·(∂S/∂T)·(∂T/∂g)`, η로 병진 스텝 ≤1cm.
+NERO 변형: evaluator 망 없음 → S="pick_ik reachable+collision-free?" (미분 불가) →
+**국소 탐색**: near-miss 후보 주변 ≤1cm 병진 + 소각도 회전 볼에서 perturb → IK 재확인.
+
+### D. 전처리 정규화 — 6-DOF GraspNet §3
+```
+origin = X̄ = mean(관찰 point cloud),  axes ∥ camera frame
+```
+CGN backend: masked PC mean 빼고 넣기, 출력 grasp에 mean 다시 더하기.
+
+### E. 후보 랭킹 cost field — OK-Robot §II-A 패턴 (수식 자체는 폐기, 구조 차용)
+```
+s(x) = s1 + 8·s2 + 8·s3
+  s1 = ‖x−x_o‖                            거리
+  s2 = 40 − min(‖x−x_o‖, 40)              standoff 여유(너무 가까우면 페널티)
+  s3 = 1/‖x−x_obs‖ (근접 시), else 0       장애물 역거리
+```
+NERO 대응:
+- 관찰 자세 선택: `score = w1·중심정렬오차 + w2·bbox잘림 + w3·occlusion + w4·unreachable` 최소화
+- Grasp 랭킹(Phase 3c): `score = graspness(ŝ) − w1·θ⁴ − w2·IK margin부족 − w3·collision clearance부족`
+  θ=grasp normal과 바닥 normal 각도, **θ⁴ 페널티 = top-down 선호** (OK-Robot Part B `S − θ⁴/10`,
+  calibration 오차에 강함). s2류 standoff 항, s3류 장애물 역거리 항 차용.
+
+### F. Placement 기하 — OK-Robot Part C
+```
+정렬: X=로봇정면, Y=좌우, Z∥바닥normal / 정규화: 로봇(x,y)=(0,0), 바닥 z=0
+(x_m, y_m) = segment된 컨테이너 클라우드 median (x,y)          ← 떨굴 위치
+z_max = buffer + max{z │ 0≤x≤x_m, |y−y_m|<0.1}                ← 떨굴 높이 (테두리 + 버퍼)
+"A on B" = "A near B": A_pt = argmin over (A top-10, B top-50) ‖A−B‖
+```
+`container_p20` depth 휴리스틱 대체. buffer = 그리퍼 길이 + 물체 늘어진 길이(OK-Robot은 0.2m).
+
+## 학습 판단 — pretrained vs 파인튜닝 (2026-09-04)
+**"Net"이 pretrained 배포하면 내가 학습 안 함** (YOLO/SAM 처럼). Contact-GraspNet은
+ACRONYM(ShapeNet 8872메시, grasp 17.7M) + 렌더 tabletop 10k씬, **Franka 그리퍼**로 학습.
+
+**Config ≠ 학습**: `d`, `w_max`, 그리퍼 collision 메시, intrinsics, workspace crop, depth 범위,
+입력 점 수 = 그냥 설정 (`d` 0.1034→0.19 는 상수 하나 고치는 것, 학습 아님).
+**학습/파인튜닝** = s/a/b/w 예측 head 가중치.
+
+도메인 갭(pretrained 성능 깎을 수 있는 것): ① depth 센서 갭(렌더≠RealSense, 제일 큼)
+② 그리퍼 갭(Franka 8cm/d=0.10 vs AGX 10cm/d=0.19) ③ 관측각(top-down vs 비스듬)
+④ 물체 분포(무지 골판지 box).
+
+**순서**: pretrained 돌림 → NERO 실물 masked PC(box .ply)에 먹여 RViz 시각화 → box에 grasp
+말 되면 학습 불필요 진행 / 체계적으로 나쁘면(방향 틀림, 위치 cm 어긋남, 명백한 표면에 후보 0개)
+파인튜닝.
+
+**파인튜닝 = from scratch 재학습 아님**: pretrained 이어서, Isaac Sim에서 NERO 물체 메시 +
+random pose + **RealSense 노이즈 모델**(depth_noise 측정값에 맞춤) + **AGX 그리퍼 기하로**
+(a,b,w) 라벨 생성 → 몇 천 iter (~하루). s(노이즈 적응)/w(10cm 재보정)/a·b(NERO 그리퍼 자세) 이동.
+
+**폴백 사다리**: pretrained CGN → 파인튜닝 CGN → (파인튜닝 고통스러우면) VGN from scratch
+학습(작은 망, 시뮬 학습이라 Isaac Sim 데이터 생성 쉬움).
 
 ## 우선순위 논문 / 문서 (2026-09-03 갱신 — cuRobo 빠짐)
 1. **OK-Robot** (Liu et al., 2024) — 목적지 지도. VLM+detector+learned grasp 통합, "통합에서
