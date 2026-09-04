@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 6ba50bd9-f824-411e-816c-7dcb14f08a0e
-  modified: 2026-09-04T11:39:43.152Z
+  modified: 2026-09-04T11:52:18.779Z
 ---
 
 # NERO pick&place 재설계 — 진단 및 참고 논문
@@ -471,13 +471,21 @@ random pose + **RealSense 노이즈 모델**(depth_noise 측정값에 맞춤) + 
 `pc_spike_report.py` extent 지표는 seg_bench PCA extent 로 대체(주석 추가).
 커밋 `4a86555` (스파이크 3파일 + 이번 4파일만, 사용자 미커밋 작업 안 건드림). push 는 사용자.
 
-### Phase 2 — Grasp 층 (프로토타입, 기존 코드 안 건드림)
-| # | 과제 |
-|---|---|
-| 2a | Contact-GraspNet 런타임 — PyTorch 포트(`contact_graspnet_pytorch`) + Docker + 별도 서비스. 컴퓨트: PC 3080Ti(Isaac Sim VRAM 공존 확인) 우선, 안 되면 Thor |
-| 2b | `learned_grasp_backend.py`에 `ContactGraspNetBackend`. 입력=1c masked PC(`--local_regions`), mean centering. 출력→`LearnedGraspOutput`. **width=예측값 대신 masked PC b방향 단면 폭 기하측정.** d=AGX 상수 |
-| 2c | **첫 마일스톤: 저장 masked PC → grasp 후보 → RViz 마커.** s threshold, 그리퍼 180° twin. 로봇/MoveIt 분리 |
-| 2d | grasp → base_link TF (`_cam_to_base`, canonical observation 자세에서만) |
+### Phase 2 — Grasp 층 (프로토타입, 기존 코드 안 건드림) — 2026-09-04 착수
+**box 기준으로 진행** (cup/thin/clutter는 재촬영 후). Thor 접근 불가 → 이 PC에서.
+
+| # | 과제 | 상태 |
+|---|---|---|
+| 2a | Contact-GraspNet 런타임 — `contact_graspnet_pytorch` 포트, PyTorch+CUDA env, pretrained ckpt. **이 PC에서** (Isaac Sim VRAM 공존 `nvidia-smi` 확인). 단독 테스트 후 `cgn_prototype._run_model()` 연결 (같은 env import or 별도 프로세스 HTTP) | 사용자 착수 |
+| 2b | **`tools/cgn_prototype/cgn_prototype.py` — commit `83c2b3a`.** `ContactGraspNetBackend` 스캐폴딩: 정규화(mean centering) → predict() → 공식 변환(Gram-Schmidt Eq6, `R_g=[b,a×b,a]`, `t_g=c+(w/2)b+d·a`) → w≤w_max/s≥thr 필터 → 180° twin → 그리퍼 와이어프레임 `.ply`/RViz MarkerArray. `_run_model()`만 2a 대기, 그 전엔 `--fallback`. HDD box .ply로 스모크테스트 통과 | ✅ 나 |
+| 2c | box masked .ply 9개 → grasp 후보 → **RViz `/cgn_grasps` MarkerArray** (또는 그리퍼 와이어프레임 .ply → MeshLab/Isaac Sim). **판정: box에 top-down/side grasp이 말 되게 나오면 pretrained OK** (재설계 최대 미지수 B1 답) | 2a 후 |
+| 2d | grasp → base_link TF (`_cam_to_base`, canonical observation 자세에서만) | 2c 후 |
+
+**CONFIG 확정 (URDF/코드)**: `d = 0.1358 m` (`planning_node.TOP_TCP_OFFSET`, flange→fingertip
+2026-07 실측), `w_max = 0.10 m` (URDF `gripper_joint1/2` prismatic 0.05×2).
+**AGX 그리퍼 = 위치제어** `move_gripper_m(w_m, force_N)` → 예측 w 직접 명령 가능.
+
+병렬 (지금): Isaac Sim 그리퍼 물리(close+attach) 동작 확인 (Phase 4 정량평가 전제).
 
 ### Phase 3 — Grasp→모션 통합 (프로토타입 브랜치/플래그)
 | # | 과제 |
