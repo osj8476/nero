@@ -13,8 +13,9 @@ pc_spike_capture.py 가 남긴 .npz(depth_m + color + K) 를 읽어서:
     후보를 거의 못 냄.
   - depth p05/p50/p95 (ROI)       : 작업 거리. 스펙(0.3~1.0m)에 있나.
   - near-cluster extent            : ROI 에서 최근접 depth 대역(±0.12m) 점들의
-    bbox 크기. 실제 물체(~10~20cm)보다 훨씬 크면 배경(테이블)이 섞인 것
-    (grasp_geometry_pipeline.md 의 "extents 0.27~0.44m" 증상과 동일).
+    bbox 크기. [주의 — top-down 가정이라 얕은 관측각에서 작업면 평면을 슬라이스해
+    부풀려짐(PC_SPIKE_RESULT.md). 물체 실제 크기 측정은 seg_bench.py 의 PCA extent
+    (마스크 내부 점 기준)를 쓸 것. 이 지표는 "배경 섞임"의 거친 신호로만.]
   - bimodality                     : ROI depth 히스토그램이 물체/테이블 두
     봉우리로 갈리나. 안 갈리고 뭉개지면 물체를 depth 로 분리 불가 →
     segmentation(SAM) 의존도가 높아짐.
