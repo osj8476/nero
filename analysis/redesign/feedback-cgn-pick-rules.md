@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: feedback
   originSessionId: 6ba50bd9-f824-411e-816c-7dcb14f08a0e
-  modified: 2026-09-08T12:18:39.345Z
+  modified: 2026-09-08T12:23:33.815Z
 ---
 
 "pick using CGN" 작업에서 반드시 따를 것 (사용자 지시, 2026-09-08):
@@ -74,6 +74,18 @@ Thor(젯슨) `ssh thor` = hostname `bpdl` 163.239.19.132. DDS 데스크탑↔Tho
   반복 outlier 제거. cyl axis = 카메라→물체 방향 depth-bias 보정 (radius × 0.35).
 - **run_pipeline**: reachable grasp 없으면 stale side_grasp.json 로 step6 안 돌리고 exit 2.
 - **compact 물체**: 실제 CGN grasp 랭킹 (bbox top-down 합성은 폴백).
+
+## 커밋 (2026-09-08, push 는 사용자)
+
+- **PC** `nero_sj_pickplace` master `68d02a6` — start_nero_isaac_all.sh, yolo/vlm_boxyolo.py,
+  tools/phase_c/* (capture/cgn_server/exec_pick/step6_base/two_cgn/two_pick_plan_fast/control_stack/).
+  사용자 WIP(CLAUDE.md, mcp_robot_server.py, perception_node_sim.py, planning_node.py,
+  visualize_3d_bpdl.py) 는 안 건드림.
+- **Thor** `~/grasp` = **새 git repo** `5209098` (remote 없음, 로컬). 스크립트(.py/.sh/.md)만 추적,
+  cgn_venv/contact_graspnet_pytorch/*.pt/*.npz/생성json/logs 는 .gitignore.
+- **처음부터 세팅 명령**: `tools/phase_c/control_stack/SETUP_FROM_SCRATCH.md`
+  (T1 `ssh thor; ~/grasp/thor_all.sh up` → T2 `~/nero/start_nero_isaac_all.sh` + ▶재생 →
+   T3 `~/ros2_ws/mcp/nero_pc_control.sh up` → Claude `/mcp`).
 
 ## 남은 것
 
