@@ -13,13 +13,19 @@
 #   3. ros2_control_node (topic_based_ros2_control, Isaac Sim과 브릿지)
 #   4. spawn_controllers (1회 실행, arm/gripper/joint_state_broadcaster)
 #   5. move_group
-#   6. moveit_rviz (RViz)
-#   7. 카메라 정적 TF (gripper_base -> camera_color_optical_frame)
+#   6. rqt_joint_trajectory_controller (조인트 슬라이더 UI, ENABLE_RQT_JTC=true 일 때)
+#
+# 기본 off (2026-09-08, CGN 재설계 이후 — 구 비전 파지 경로에만 필요):
+#   - 카메라 정적 TF          ENABLE_CAMERA_TF=true 로 켬
+#   - visualize_3d_bpdl        ENABLE_VISUALIZE=true 로 켬
+#   - perception_node_sim      ENABLE_PERCEPTION=true 로 켬 (8002 서버도 필요)
+#   - RViz(moveit_rviz)        여전히 주석
 #
 # 이 스크립트가 켜지 않는 것 (직접 별도 터미널에서 실행):
-#   - Claude Code CLI (claude mcp add로 등록된 mcp_robot_server는 CLI가 알아서 실행)
-#   - perception_node_sim / planning_node / 박스 서버 / mcp_robot_server
-#     (원하면 아래 "선택 사항" 섹션 주석 해제해서 포함 가능)
+#   - Claude Code CLI
+#   - planning_node + mcp_robot_server(:9000)
+#       -> ~/ros2_ws/mcp/nero_pc_control.sh up   (nero-robot MCP 자연어 조인트 제어)
+#   - CGN pick 파이프라인은 이 스택 불필요 (Thor + Isaac execute_script)
 #
 # 종료: 이 스크립트가 실행 중인 터미널에서 Ctrl+C 한 번
 #       -> trap이 모든 백그라운드 프로세스(Isaac Sim 포함)를 정리함
@@ -54,13 +60,38 @@ CAM_X=0.073089; CAM_Y=0.026438; CAM_Z=0.038050
 CAM_ROLL=-0.350796; CAM_PITCH=-0.000000; CAM_YAW=1.569204
 CAM_PARENT="gripper_base"; CAM_CHILD="camera_color_optical_frame"
 
+# YOLO 추론 서버가 도는 Jetson Thor 주소 (perception_node_sim 이 여기로 프레임 POST)
+# ~/.ssh/config 의 Host thor = 163.239.19.132.  ~/grasp/yolo_server.sh 로 Thor 에서 기동.
+THOR_YOLO_HOST="${THOR_YOLO_HOST:-163.239.19.132}"
+
+# ── 조인트 슬라이더 UI (rqt_joint_trajectory_controller) ──────────────────
+# UI 슬라이더로 arm_controller / gripper_controller에 직접 궤적을 넣어
+# Isaac Sim 로봇을 수동 제어. move_group(충돌회피)을 안 거치므로 주의.
+# 패키지: sudo apt install ros-humble-rqt-joint-trajectory-controller
+#
+# ⚠️ [2026-09-08] 기본 false 로 바꿈. rqt_jtc 는 전원 버튼을 켜면
+#    /arm_controller/joint_trajectory 로 10Hz 로 "현재 슬라이더값 유지" 궤적을
+#    계속 발행하는데, 이게 move_group/nero-robot MCP 가 보내는 모든
+#    FollowJointTrajectory 액션 goal 을 매 100ms 마다 선점(preempt)해서
+#    로봇이 안 움직이고 STATUS_ABORTED / TIMED_OUT 난다 (실측 확인).
+#    MCP/move_group 제어와 공존 불가. 수동 슬라이더가 꼭 필요하면 이 스크립트
+#    밖에서 따로 띄우고, MCP 제어 전에 전원 버튼을 끄거나 창을 닫아라.
+ENABLE_RQT_JTC=false
+
+# ── 선택 노드 토글 (2026-09-08, CGN 재설계 이후 정리) ────────────────────
+# [2026-09-08] CGN pick 은 flange 카메라 → YOLO(Thor) bbox → Thor CGN 이므로
+# camera TF + perception 이 다시 필요. visualize 만 선택.
+ENABLE_CAMERA_TF=true       # gripper_base -> camera_color_optical_frame 정적 TF (PC 카메라 뷰 3D화)
+ENABLE_VISUALIZE=true       # visualize_3d_bpdl (YOLO bbox + cam/base XYZ 오버레이 창, q 로 종료)
+ENABLE_PERCEPTION=true      # perception_node_sim (YOLO 박스 검출; YOLO 서버는 Thor :8002)
+
 # ── 박스 위치 랜덤화 설정 (2026-07 추가) ──────────────────────────────────
 # 실행할 때마다 TestBox/TestBox1/TestBox2를 안전 영역 내 새 랜덤 위치로
 # 재배치. auto_stack_demo.py와 짝을 이뤄서 "매번 다른 배치에서도 되는지"
 # 자동 반복 검증할 때 씀. 순수 usd 파일 수정이라 Isaac Sim을 (재)여는
 # 시점에만 반영됨 -- 그래서 safety map 갱신과 마찬가지로 Isaac Sim 열기
 # "직전"에 실행해야 함.
-RANDOMIZE_BOXES=true   # 매번 랜덤 배치로 검증하고 싶으면 true로
+RANDOMIZE_BOXES=false   # 매번 랜덤 배치로 검증하고 싶으면 true로 (CGN 원통 작업 중엔 씬 흔들림 방지로 false)
 RANDOMIZE_SCRIPT="/home/bpdl/nero/randomize_box_positions.py"
 RANDOMIZE_SEED=""       # 비워두면 매번 다른 랜덤, 재현하려면 숫자 지정 (예: 42)
 
@@ -91,7 +122,7 @@ else
     SAFETY_MAP_CSV_PATTERN="*mismatch_summary_*.csv"
 fi
 
-ENABLE_SAFETY_MAP=true   # 지도 자동 갱신을 끄고 싶으면 false로
+ENABLE_SAFETY_MAP=false   # 지도 자동 갱신 (CGN 원통 작업 중엔 USD 레이어 재생성 불필요로 false)
 
 # 공통 source 커맨드
 SRC_CMD="source ${ROS_DISTRO_SETUP} && source ${WS_SETUP}"
@@ -186,15 +217,31 @@ sleep 10
 #sleep 3
 
 
-echo "6) 카메라 정적 TF"
-run_bg "7_camera_tf" "${SRC_CMD} && ros2 run tf2_ros static_transform_publisher \
-    --x ${CAM_X} --y ${CAM_Y} --z ${CAM_Z} \
-    --roll ${CAM_ROLL} --pitch ${CAM_PITCH} --yaw ${CAM_YAW} \
-    --frame-id ${CAM_PARENT} --child-frame-id ${CAM_CHILD}"
-    
-echo "7) 시각화 (visualize_3d_bpdl)"
-run_bg "8_visualize" "${SRC_CMD} && python3 ~/nero/visualize_3d_bpdl.py"
-sleep 2
+if [ "$ENABLE_CAMERA_TF" = true ]; then
+    echo "6) 카메라 정적 TF"
+    run_bg "7_camera_tf" "${SRC_CMD} && ros2 run tf2_ros static_transform_publisher \
+        --x ${CAM_X} --y ${CAM_Y} --z ${CAM_Z} \
+        --roll ${CAM_ROLL} --pitch ${CAM_PITCH} --yaw ${CAM_YAW} \
+        --frame-id ${CAM_PARENT} --child-frame-id ${CAM_CHILD}"
+else
+    echo "6) 카메라 정적 TF — 건너뜀 (ENABLE_CAMERA_TF=false)"
+fi
+
+if [ "$ENABLE_VISUALIZE" = true ]; then
+    echo "7) 시각화 (visualize_3d_bpdl)"
+    run_bg "8_visualize" "${SRC_CMD} && python3 ~/nero/visualize_3d_bpdl.py"
+    sleep 2
+else
+    echo "7) 시각화 (visualize_3d_bpdl) — 건너뜀 (ENABLE_VISUALIZE=false)"
+fi
+
+if [ "$ENABLE_RQT_JTC" = true ]; then
+    echo "8) 조인트 슬라이더 UI (rqt_joint_trajectory_controller)"
+    run_bg "8b_rqt_jtc" "${SRC_CMD} && ros2 run rqt_joint_trajectory_controller rqt_joint_trajectory_controller"
+    echo "   창에서 controller manager ns=/controller_manager, controller=arm_controller 선택 후"
+    echo "   빨간 전원 버튼을 눌러 활성화하면 슬라이더로 로봇 제어 가능."
+    sleep 2
+fi
 
 # ── 선택 사항: perception/planning까지 여기서 같이 켜고 싶으면 주석 해제 ──
 # [2026-08-31] 박스 YOLO 서버(vlm_boxyolo.py)는 이제 이 데스크탑이 아니라
@@ -213,9 +260,13 @@ sleep 2
 #       --model ~/nero/yolo/best.pt --model-coco yolov8n.pt \
 #       --conf-box 0.75 --conf-coco 0.25
 
-echo "9) perception_node_sim (박스 서버: Jetson Thor 163.239.19.67:8002)"
-run_bg "9_perception" "export BOX_SERVER_URL=http://163.239.19.67:8002/detect BOX_HEALTH_URL=http://163.239.19.67:8002/health && ${SRC_CMD} && ros2 run sj_pickplace perception_node_sim"
-sleep 3
+if [ "$ENABLE_PERCEPTION" = true ]; then
+    echo "9) perception_node_sim (YOLO 서버: Jetson Thor ${THOR_YOLO_HOST}:8002)"
+    run_bg "9_perception" "export BOX_SERVER_URL=http://${THOR_YOLO_HOST}:8002/detect BOX_HEALTH_URL=http://${THOR_YOLO_HOST}:8002/health && ${SRC_CMD} && ros2 run sj_pickplace perception_node_sim"
+    sleep 3
+else
+    echo "9) perception_node_sim — 건너뜀 (ENABLE_PERCEPTION=false)"
+fi
 
 #echo "10) planning_node"
 #run_bg "10_planning" "${SRC_CMD} && ros2 run sj_pickplace planning_node --ros-args -p use_moveit2:=true"
@@ -227,7 +278,8 @@ echo "   ros2 node list"
 echo "   ros2 topic list | grep -E 'joint_states|controller|camera'"
 echo "   tail -f ${LOG_DIR}/5_move_group.log   # move_group 로그 실시간 확인"
 echo ""
-echo "Claude Code와 planning node 는 별도 터미널에서 직접 실행하세요."
+echo "nero-robot MCP(자연어 조인트 제어)가 필요하면 다른 터미널에서:"
+echo "   ~/ros2_ws/mcp/nero_pc_control.sh up"
 echo "종료: 이 터미널에서 Ctrl+C"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 

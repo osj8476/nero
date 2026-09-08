@@ -14,6 +14,21 @@ pcf,pcs,_=est.extract_point_clouds(depth,K,segmap=seg,z_range=[0.2,1.2])
 with torch.no_grad():
     g,s,c,o=est.predict_scene_grasps(pcf,pc_segments=pcs,local_regions=True,filter_grasps=True)
 G=np.asarray(g[1]).reshape(-1,4,4); S=np.asarray(s[1]).reshape(-1); O=np.asarray(o[1]).reshape(-1)
+sp_cam=np.asarray(pcs[1])
+flip0=np.diag([1.,-1.,-1.,1.]); WT0=W_T_cam@flip0
+sp_w=(WT0[:3,:3]@sp_cam.T).T + WT0[:3,3]          # segment in world/base_link
+zext=float(sp_w[:,2].max()-sp_w[:,2].min())        # height (world up)
+xyext=float(max(sp_w[:,0].max()-sp_w[:,0].min(), sp_w[:,1].max()-sp_w[:,1].min()))
+aspect_w=float(zext/max(xyext,1e-3))
+com_w=sp_w.mean(0)
+# for a standing object, true centroid is at half the height above the table (base ~ table)
+base_z=float(sp_w[:,2].min()); top_z=float(sp_w[:,2].max())
+com_w_est=np.array([com_w[0], com_w[1], 0.5*(base_z+top_z)])
+pca_out=dict(zext=zext, xyext=xyext, aspect_w=aspect_w,
+             centroid_world=[float(x) for x in com_w],
+             centroid_est=[float(x) for x in com_w_est],
+             major_axis=[0.0,0.0,1.0] if aspect_w>1.4 else [1.0,0.0,0.0])
+
 print(len(G),"grasps  score %.3f-%.3f"%(S.min(),S.max()))
 flip=np.diag([1.,-1.,-1.,1.]); WT=W_T_cam@flip
 def R2q(R):
@@ -30,6 +45,6 @@ for i in range(len(G)):
         position_xyz=[round(float(x),4) for x in gw[:3,3]],
         quat_xyzw=[round(x,5) for x in R2q(gw[:3,:3])],
         approach=[round(float(x),3) for x in gw[:3,2]]))
-json.dump(dict(frame="base_link",box_world=obj.tolist(),grasps=out),
+json.dump(dict(frame="base_link",box_world=obj.tolist(),seg_pc_pca=pca_out,grasps=out),
           open(os.path.expanduser("~/grasp/bottle_grasps_all.json"),"w"),indent=1)
 print("wrote",len(out),"-> bottle_grasps_all.json")

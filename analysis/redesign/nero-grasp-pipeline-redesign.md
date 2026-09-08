@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 6ba50bd9-f824-411e-816c-7dcb14f08a0e
-  modified: 2026-09-07T09:20:07.505Z
+  modified: 2026-09-08T09:56:53.982Z
 ---
 
 # NERO pick&place 재설계 — 진단 및 참고 논문
@@ -328,6 +328,41 @@ generator가 내는 실제 grasp 후보 N개로 IK 성공률 pick_ik vs KDL 측�
 **현재 상태**: pick_ik ✅ / CGN backend 프로토타입 ✅(미배선) / STOMP ⬜(아직 OMPL) / BT 실행기 ⬜(Phase 5) /
 Cartesian = Pilz LIN config 있음. **오늘 로봇 돌리면 아직 이전 룰기반 경로.** 새 경로는 조각별로 만들어
 Phase 4에서 일괄 통합·이전 코드 삭제 (사용자 지시).
+
+**머신 (2026-09-08 확인 — 이전 메모 IP 혼동 정정):**
+- **데스크탑** = hostname `bpdl-desktop`, **163.239.19.67** — Claude 세션 여기서 돎, repo, Isaac Sim,
+  베이스 ROS(Humble), YOLO/VLM 서버(8002/8003). CLAUDE.md가 "Thor 163.239.19.67"이라 부르던 건 착오, 이게 데스크탑.
+- **Thor**(젯슨) = `ssh thor`, hostname `bpdl`, **163.239.19.132** — move_group(Jazzy)+pick_ik+STOMP, CGN. 128GB.
+- 사용자는 보통 **Thor 셸에서 직접** 작업 (ssh 들어가서).
+
+**제어 스택 런처 (2026-09-08) — 사용자가 직접 띄움. 두 스택 독립 (DDS 데스크탑↔Thor 안 통함).**
+- **Thor plan-only** (CGN 궤적 계산용):
+  - Thor 셸에서: `~/grasp/thor_stack.sh {up|down|restart|status|log}` ← 기본. **tmux 아님** —
+    `setsid` 로 자체 프로세스 그룹 만들어 백그라운드, PGID 를 `~/grasp/.thor_stack.pgid` 에 저장,
+    `down` 이 `kill -- -PGID` 로 그룹 전체(launch+rsp+jsp+static_tf+move_group) 정리. tmux 시절
+    orphan 문제 해결. `up` 은 /move_group 뜰 때까지 기다린 뒤 종료(터미널 안 잡음). 로그 `~/grasp/logs/move_group.log`.
+  - 데스크탑에서: `tools/phase_c/control_stack/thor_planning.sh {up|down|restart|status|log}`
+    = `ssh thor "~/grasp/thor_stack.sh …"` 얇은 래퍼.
+  - `headless_plan_test.launch.py` = rsp+jsp+static_tf(world→base_link)+move_group, 로봇/ros2_control 없음.
+    (이 launch 는 `~` 나 `~/ros2_ws` cwd 에서도 정상 — 이전 "tuple ()" 에러는 재현 안 됨, 무해한
+    "load_yaml deprecated" 경고뿐. thor_stack 은 안전하게 cwd 를 /tmp 로 고정.)
+- **`~/grasp/run_pipeline.sh <npz> [obj]`** — A(two_cgn, `cgn_venv/bin/python3`) + B(two_pick_plan_fast,
+  system py3+ROS) + C(step6_base) 한 방. `set -u` 금지 (ROS setup.bash 가 unbound var 참조).
+  two_cgn 를 ROS py3 로 돌리면 `No module named torch` — venv 필수.
+- **step6_base.py 재시도 루프 (2026-09-08)**: STOMP-to-pose + Cartesian 은 확률적(pick_ik 브랜치 랜덤,
+  같은 포즈가 fraction 1.0/0.1 왔다갔다) → 후보당 3회 재시도, best fraction 채택. ≥0.9 면 조기 종료.
+- **PC 자연어 제어** (이전 MCP 경로 부활): `start_nero_isaac_all.sh` (베이스: Isaac+rsp+ros2_control+
+  move_group Humble) → `~/ros2_ws/mcp/nero_pc_control.sh up` (planning_node + MCP HTTP :9000, tmux `nero_pc`).
+  체인: Claude ─http→ nero-robot(:9000) ─/arm_command→ planning_node → move_group → ros2_control → Isaac.
+- **nero-robot MCP = HTTP transport** (`~/.claude.json` `/home/bpdl` 항목: `type:http, url:127.0.0.1:9000/mcp`).
+  Claude Code가 자식 실행 안 함, 붙기만 함 → 사용자가 `run_mcp_robot_server_http.sh`로 직접 띄워야 함
+  (`MCP_TRANSPORT=streamable-http MCP_PORT=9000`, mcp 1.27.2 지원 확인). stdio 방식 = 기존 `run_mcp_robot_server.sh`.
+- 자연어 예: "옵저베이션 자세로 이동해"→`go_home` (저장포즈 `observation` = obs 조인트,
+  `~/.local/share/nero_robot/saved_poses.json`), "joint1을 0.5로"→`move_joints(j1=0.5)`, "컵 집어"→`pick_object`.
+- **sim pick 파이프라인 실행(step6)은 이 경로 안 씀** — MCP `execute_script`로 articulation 직접 제어.
+  nero_pc_control 경로는 수동 자세 제어·이전 pick_object 툴용.
+- 3개 새 런처만 추가 (기존 `mcp_robot_server.py`/`planning_node.py`/`start_nero_isaac_all.sh` 안 건드림).
+  상세: `tools/phase_c/control_stack/README.md`.
 
 ## 차용 공식 (Contact-GraspNet + 6-DOF GraspNet + OK-Robot) — 2026-09-04
 
@@ -770,9 +805,100 @@ CGN→프레임→twin/rank→pick_ik→STOMP→Cartesian 전 구간 계획 검�
 
 ### 속도 최적화 + CoM 랭킹 (3c 확장) — 2026-09-07
 
-**bottle pick 전체 파이프라인 실행 → sim 파지 DROPPED** (box와 동일 caging 실패 —
-손끝 10cm/물체 5cm, 1cm 센터링 오차로 한 손가락 먼저 접촉→물체 밀어냄. **해법 = fixed-joint
-attach, Phase 4**). 파이프라인 로직은 전 구간 OK.
+**bottle pick 전체 파이프라인 실행 → 마찰만으론 DROPPED, fixed-joint attach로 HELD ✅ (2026-09-08)**
+- 마찰 파지 실패 = caging 실패 (손끝 10cm/물체 5cm, 1cm 센터링 오차로 한 손가락 먼저 접촉→물체 밀어냄).
+- **fixed-joint attach 검증**: 그리퍼 close 후 `UsdPhysics.FixedJoint`(gripper_link1 ↔ bottle,
+  현재 상대 pose) 생성 → **팔 36cm 들어올림 + joint1 sweep 통과, 병 유지** (손끝-병 거리 4.4→4.2cm).
+  release = FixedJoint 삭제 + 그리퍼 open. **이게 Phase 4 실용 파지 메커니즘.**
+- 전체 루프: `CGN(200 grasp 전부 0.294) → 프레임 → rank3(score−0.5θ⁴−1.2·d_com, ~2s) →
+  STOMP+Cartesian → smooth 50-wp 재생 → slow 대칭 close → attach → lift+sweep → HELD → place`.
+  스크립트 `~/grasp/bp_*.py` / scratchpad.
+- 파이프라인 로직 전 구간 검증 완료. Phase 4 = SAM→CGN→rank3→STOMP를 상주 서비스로 + attach 유틸.
+
+### 사용자 지적 3건 + 대응 (2026-09-08)
+사용자: fixed-joint은 hack (순수 물리로 잡혀야) / 그리퍼 삐딱 (원통은 side 그립이 맞음) /
+pick 시퀀스 부실 (approach→전진→close→후퇴 단계 필요) / Isaac Sim 물리 재점검.
+
+**1. Isaac Sim 물리 버그 발견·수정 (실제 버그)**:
+- 손끝 충돌체 `approx: "none"` = **삼각메시 콜라이더** — PhysX는 **동적 body에 convex만 허용**
+  (삼각메시는 static/kinematic 전용). → 손가락이 물체와 제대로 접촉 안 함. **→ `convexHull` 로 변경.**
+- physxScene `pos_iter 1→16, vel_iter 0→4`, 손끝/팔 per-body 32/8, 그리퍼 drive maxForce 10→25.
+- ⚠️ physics API 수정 후 articulation stale → `timeline.stop()/play()` 로 re-parse 필요.
+- **런타임 적용만 — USD 저장 안 함. Phase 4에서 `nero_simul.usd`에 영구 반영.**
+
+**2. rank4.py — 물체형상 인식 랭킹 (신규)**:
+- seg PC 를 **world 프레임**으로 변환 → `aspect_w = zext/xyext` (병: 4.06 = 서 있는 세장형).
+  `bottle_all.py` 가 `seg_pc_pca`(aspect_w, centroid_est) dump. (⚠️ camera 프레임 aspect 는
+  틸트 때문에 1.0~1.25로 안 나옴 — 반드시 world 변환 후.)
+- `aspect_w > 1.6` → **SIDE 그립 모드**: `cost = score − 1.5·|a·ẑ| − 0.8·|b·ẑ| − 1.5·d_com`
+  (approach·closing축이 수직축에 수직, contact 는 mid-height). 병에서 **θ_to_axis=86° (거의
+  수평 side), d_com 3.5cm, opening 5.7cm** 선택. `aspect_w ≤ 1.6` → 기존 top-down(θ⁴).
+- **CGN는 서 있는 병에 side grasp 이미 냄** (approach θ 중앙값 77°, 142/200 이 θ>55°). rank3 의
+  `θ≤35°` prefilter 가 그걸 다 버렸던 것.
+
+**3. step5.py — 단계형 pick 시퀀스 (신규)**:
+`STOMP(seed→pre-grasp) + Cartesian(pre→grasp, +a 전진) + [close] + Cartesian(grasp→pre, −a 후퇴) + [lift]`.
+Cartesian 이 한 config 유지 (관절보간은 elbow flip). advance/retreat fraction 1.0.
+
+**4. 실린더 피팅 + side pick — ✅ 순수 물리 파지 성공 (2026-09-08)**
+근본 버그 **2개** 찾아 수정 → 원통 side pick 이 fixed-joint 없이 성립:
+
+- **버그 A (프레임)**: CGN grasp 행렬 → gripper_flange 자세 변환이 틀렸음. URDF
+  `gripper_flange_joint` `rpy=(-π/2, 0, -π/2)` → **gripper_flange 로컬 +Z = approach,
+  ±Y = 그리퍼 닫힘축**. CGN `R_g = [b | a×b | a]` 을 그대로 IK에 보내면 닫힘축이 approach
+  자리에 감 → 그리퍼가 approach 방향으로 닫히며 물체를 **갈아냄** (이번 세션 내내 모든 sim
+  파지 실패의 진짜 원인). **수정: `R_flange = [−(a×b) | b | a]`.**
+- **버그 B (실린더 중심)**: side 그립은 그리퍼 중심이 **원통 중심축**에 가야 하는데
+  CGN contact / 가시점 centroid 는 **가시 표면**(축에서 반경만큼 편향). **수정: `cyl_side_grasp.py`
+  Taubin 원 피팅** — seg PC 를 world 프레임 xy 투영 → 원 피팅 → **축을 실제값서 4mm 이내로
+  추정** (부분 arc만 보고도). 반경 = median 점-축 거리. grasp 중심 = 축 mid-height.
+- **버그 C (IK config 불일치)**: pre_sol / grasp_sol 개별 IK 가 elbow flip → Cartesian 깨짐.
+  **수정: `step6.py`** — STOMP 를 grasp **pose** 로 (한 config) → 그 config 서 Cartesian retreat
+  (grasp→pre) → advance = retreat 역순. 한 config 유지 보장.
+- **결과** (`ci_run.py`): approach 중 원통 **안 밀림** (fmid-원통축 1cm, 높이 4mm),
+  대칭 close (gj 2.5/2.3cm, geff 21N), retreat+lift **원통 19cm 들림, 유지**. **verdict HELD.**
+  스크린샷: 팔이 원통을 수평 side grip 으로 집어 든 상태.
+- physics: convexHull colliders + pos_iter 16 + maxForce 25 (런타임 — Phase 4서 USD 영구화).
+
+**Phase C 최종: 인지→CGN→(실린더 피팅/물체형상 랭킹)→pick_ik→STOMP→Cartesian 단계형→
+순수물리 파지 전 구간 sim 검증 완료.** Phase 4 = 상주 서비스 + USD physics 영구화 + 실물.
+스크립트: `~/grasp/{rank4,step6,cyl_side_grasp,bottle_all}.py` + `ci_run.py` (+ `tools/phase_c/`).
+
+### 원통(side) + 박스(top) 동시 파이프라인 (2026-09-08)
+`two_cgn.py`(2물체 GT seg → CGN, gripper_flange 규약으로 변환 + 실린더/bbox 피팅) +
+`two_pick_plan.py`(형상별 랭킹: 세장형→CGN side grasp을 피팅 축에 재타깃 / compact→bbox top-down
+yaw 스윕) + `step6.py`(planning-scene CollisionObject 추가 → STOMP transit이 물체 회피).
+- **CGN 추정 ✅**: 원통 200 grasp (θ 중앙값 77° = side 위주), 박스 161 grasp (θ~10° = top). 둘 다 계획됨.
+- **실린더 피팅 ✅**: 축을 실제값서 3~4mm, 반경 정확.
+- **sim 실행 — 임의 위치 일반화 ✅ (2026-09-08)**: 원통을 새 위치 (-0.44, 0.070)에 세우고
+  CGN→피팅→side-pick **HELD** (13cm 리프트, geff -22.9N). 3번 실패 후 성공. 성공 조건 4가지:
+  1. **Full physics 세팅을 실행 스크립트에 매번 적용**: pos_iter 16 + gripper collider `convexHull`
+     (+`/visuals` collision off) + drive maxForce 25 + 물체 MassAPI 0.4 + BoxHighFriction 바인딩.
+     이거 빠지면 무조건 DROPPED (마찰·솔버 부족).
+  2. **스폰 위치**: `timeline.stop()/play()` 는 물체를 authored transform((-0.5,0))로 되돌림 →
+     play 후 `SingleRigidPrim("/World/Cyl").set_world_pose(position=...)` + zero velocity + settle.
+  3. **planning-scene obstacle 는 transit plan 에만**: `step6_base.py`에 `_scene("add"/"remove")`
+     헬퍼 — grasp-pose STOMP + Cartesian 전엔 `remove`(도달해야 함), transit STOMP 전엔 `add`
+     (target box 7cm 각, `~/grasp/scene_objects.json`). 안 그러면 transit 이 원통 쓸어서 넘어뜨림.
+  4. **standoff 0.10** (side): 0.05는 advance 가 너무 짧아 정렬 실패. `side_grasp.json` standoff 필드.
+- 스크립트: `~/grasp/{two_cgn,two_pick_plan,step6_base}.py`, `/tmp/newpick_run2.py` (실행, full physics 포함).
+
+**fast IK 이식 (2026-09-08) — two_pick_plan 15s → 2s, 동일 task HELD 재현**
+- **교훈: `/compute_ik` 는 이 팔의 feasibility oracle 로 부적합.** (a) `avoid_collisions=True` →
+  seed(obs)서 self-colliding 브랜치로 수렴 후 -31 반환, 재시도 안 함. move_group goal-planning
+  은 같은 포즈 쉽게 도달. (b) 해가 있으면 5~9ms 즉답, 없으면 ~83ms 즉실패 — timeout 무의미.
+- **새 역할 분담**: `two_pick_plan` = 기하 + 랭킹 + **collision-free IK 체(sieve)** 1회/후보
+  (명백히 unreachable 만 제거). `step6` = 상위 8후보를 **STOMP-to-pose + Cartesian retreat 로
+  순서대로 검증**, `fraction ≥ 0.9` 첫 후보 채택. 실제 feasibility gate 는 모션 플래너에 있음.
+- **원통 후보 생성 = azimuth 스윕** (`range(0,360,15)`): CGN 은 "둥근 물체·graspable·opening"
+  확인만, side grasp 은 피팅 축+높이+반경으로 해석적 결정, 남는 자유도(접근 azimuth)만 스윕.
+  cost = CGN score(중앙값) + 0.6·(로봇쪽 정렬) − 0.5·(CGN 우세 azimuth 편차). ← 해석적 회귀
+  아님: grasp 는 CGN 확인, azimuth 는 도달성 결정.
+- **grasp 높이**: 균일 원통은 몸통 내 높이가 grasp 품질 무관, 팔 도달성만 영향 → `mid + 10%span`
+  고정 (실측: 수평 Cartesian retreat 이 이 높이서 fraction 1.0 유지, 7mm 낮추면 0.0).
+- 결과: two_pick_plan **2.1s** (9~12 IK, 각 5ms), step6 candidate-loop **11.7s**, 플래닝 총 **~19s**
+  (기존 ~31s). 동일 새 위치 (-0.44,0.070) **HELD** (rose +11.7cm, geff 21.9N, fmid_cyl 1.6mm).
+- 스크립트: `tools/phase_c/{two_pick_plan_fast,step6_base}.py`.
 
 **병목**: rank2가 400 후보 × 2 IK = 800 `/compute_ik` 호출 (각 timeout 0.5s) = **~10분**.
 
