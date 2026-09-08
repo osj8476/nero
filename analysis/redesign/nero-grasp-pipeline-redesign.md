@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 6ba50bd9-f824-411e-816c-7dcb14f08a0e
-  modified: 2026-09-04T12:20:06.481Z
+  modified: 2026-09-07T09:20:07.505Z
 ---
 
 # NERO pick&place 재설계 — 진단 및 참고 논문
@@ -299,6 +299,36 @@ generator가 내는 실제 grasp 후보 N개로 IK 성공률 pick_ik vs KDL 측�
   pyAgxArm 을 ros2_control 로 래핑 → 실물도 MoveIt2 궤적 받아 실행만
 - planning_node(또는 BT 실행기)는 궤적을 **직접 계산 안 함** — MoveIt2 plan API 호출만
 
+### 로봇 제어 방식 — 이전(룰기반) vs 재설계 (2026-09-07 정리)
+
+**이전**: Claude ↔ MCP(`mcp_robot_server`) → `planning_node.py` 룰기반.
+`pick_object(grasp_dir='side', side_approach_deg=…)` 처럼 **Claude가 grasp 모드/각도를 골라서** 넘김
+→ planning_node가 `infer_grasp`(VLM) → `grasp_kinematics.py` 하드코딩 쿼터니언 + approach 스윕
+→ `resolve_grasp_quat()` pose 1개 → OMPL plan → 실행. **Claude가 inner loop 안**(CLAUDE.md 변환표
+매 호출 적용), LLM 지연이 임계경로. /brutal이 뜯어내라고 한 것.
+
+**재설계 (3층, Thor에서 구동)**:
+1. **태스크 층 (Claude)** — "컵을 바구니에" → 태스크 그래프 `[컵 위치, 바구니 위치, pick(컵), place(바구니)]`.
+   태스크당 2~3회, 모션당 아님. 실패 시에만 재계획.
+2. **결정론적 BT skill 실행기** (LLM 왕복 없음):
+   - `perceive`: RealSense → YOLO(bbox) → SAM(mask) → local-region point cloud
+   - `grasp_gen`: PC → **Contact-GraspNet** → 6-DoF 후보 + 180° twin  ← `ContactGraspNetBackend`(2c-tool 완료)
+   - `filter/rank`: 후보별 pick_ik reachability + collision 체크 → `graspness − w1·θ⁴ − w2·IK margin − w3·clearance`
+     로 랭킹 (+ 선택적 VLM 시맨틱 re-rank). **argmax 금지**
+   - `plan`: MoveIt2 STOMP → JointTrajectory + Cartesian 마지막 구간(`p−k·a`)
+   - `execute`: `FollowJointTrajectory` → sim `arm_controller` / 실물 `pyAgxArm`(ros2_control `move_j`).
+     그리퍼: sim `gripper_controller`→`/isaac_joint_command`→AG (물리 파지 OK 확인) / 실물 `move_gripper_m(w, force)` 폐루프
+   - `verify`: 파지 성공? placement 검증
+3. **VLM** — 씬당 1회 시맨틱 그라운딩, 캐시
+
+**MCP 역할 축소**: `pick_object(target='cup')` 수준 (grasp_dir/side_approach_deg/angle 파라미터 삭제 — Phase 4).
+"grasp 자세를 어떻게" 책임이 planning_node 밖 **별도 grasp 서비스**(SAM→CGN→필터→랭킹)로. planning_node는
+"이 후보 실행"하는 얇은 노드 → Phase 5에서 BT 실행기가 더 대체.
+
+**현재 상태**: pick_ik ✅ / CGN backend 프로토타입 ✅(미배선) / STOMP ⬜(아직 OMPL) / BT 실행기 ⬜(Phase 5) /
+Cartesian = Pilz LIN config 있음. **오늘 로봇 돌리면 아직 이전 룰기반 경로.** 새 경로는 조각별로 만들어
+Phase 4에서 일괄 통합·이전 코드 삭제 (사용자 지시).
+
 ## 차용 공식 (Contact-GraspNet + 6-DOF GraspNet + OK-Robot) — 2026-09-04
 
 ### A. Grasp pose 재구성 — Contact-GraspNet Eq (1)(2)
@@ -356,6 +386,115 @@ z_max = buffer + max{z │ 0≤x≤x_m, |y−y_m|<0.1}                ← 떨굴
 "A on B" = "A near B": A_pt = argmin over (A top-10, B top-50) ‖A−B‖
 ```
 `container_p20` depth 휴리스틱 대체. buffer = 그리퍼 길이 + 물체 늘어진 길이(OK-Robot은 0.2m).
+
+## 컴퓨트 분담 — Thor = 두뇌, PC = 시뮬레이터 (2026-09-06)
+
+### 하드웨어 제약
+- **메인 PC**: RTX 3080Ti(12GB VRAM, Ampere) + **시스템 RAM 16GB (← 병목)**. Isaac Sim
+  하나로 빠듯. x86. 사용자 연구실 책상에 있음.
+- **Jetson Thor**: Blackwell GPU, arm64, **128GB 통합 메모리(CPU·GPU 공유 LPDDR5X)**.
+  헤드리스 서버(선반, 로봇셀 연결). 고성능 추론기. 통합 메모리 = VRAM 한계 없음 +
+  host↔device 복사 없음(zero-copy).
+
+### 최적화 기준 (프로젝트 설계 원칙)
+**"Thor 128GB 통합 메모리를 최대한 채워서 성능을 산다"가 컴퓨트 설계의 기준.**
+PC의 16GB RAM에 뭘 올릴지 고민하지 말고, PC는 Isaac Sim 전용으로 비우고
+학습모델·큰 데이터는 전부 Thor. 모델 크기 선택 시 "메모리에 맞나"가 아니라
+"품질 최선"으로 고르고 Thor 메모리로 감당.
+
+### 역할 분담 (명확히)
+
+| 구분 | 어디 | 무엇 |
+|---|---|---|
+| **워크스테이션** | 당신 PC | 코드 편집(VS Code), git push, RViz/rqt/plotjuggler(Thor ROS 그래프 구독), `ssh thor`. **여기 앉아서 작업** |
+| **시뮬레이터** | 당신 PC | **Isaac Sim만** (렌더·물리, PC여야만 하는 유일한 것) + Isaac Sim ROS2 브리지 |
+| **컴퓨트 서버** | Thor (헤드리스) | 인지(YOLO·SAM2) · grasp 생성(CGN + checkpoint 2개 + learned evaluator) · VLM(Qwen3-VL-8B) · 시맨틱 맵(VoxelMap+CLIP) · **MoveIt2/pick_ik/STOMP** · (되면)cuRobo · fine-tune 학습 |
+| **실행 대상** | PC의 Isaac Sim / 실물 팔 | Thor가 계산한 JointTrajectory 를 받아 실행만. 실물이면 PC 안 거침(Thor→관절 명령) |
+
+**Thor는 sim·실물 공통 두뇌** → Sim2Real 통일 자연스러움 (JointTrajectory 는 하드웨어 무관).
+
+### 개발 워크플로우 (Thor 앞에 앉을 일 없음)
+```
+PC에서 개발 → git push → Thor pull
+Thor: 스택을 서비스로 상시 구동 (start_nero_isaac_all.sh 를 Thor용으로 분리)
+PC: Isaac Sim + RViz 띄우고 관찰·조작 (grasp 마커 = Thor 계산 결과)
+Thor 노드 이터레이션·GPU 확인 = PC 터미널에서 ssh (여전히 책상에서)
+랩 네트워크 ROS2 DDS — 이미 있음 (Thor 가 지금도 YOLO/VLM 을 PC 에 서빙, Tailscale)
+```
+
+### 128GB가 푸는 것 (우선순위)
+1. 모델을 "맞추려고"가 아니라 "품질"로 크게 — VLM 3B→**Qwen3-VL-8B/Thinking**
+   (`jetson_thor_vlm_upgrade_task.txt` 근거 생김), SAM MobileSAM→**SAM2**,
+   **CGN 체크포인트 2개 상주**(sigma_001+0025, 노이즈별 선택), CGN + **learned evaluator**(6DGN식) 동시
+2. **전부 warm, lazy load 폐지** — 시작 시 전부 로드, 첫 호출 지연 제거
+3. **멀티뷰 스캔 배치** — joint1/joint7 스윕 N프레임 → 융합 PC 하나 → SAM+CGN 통째 (occlusion 완화)
+4. 시맨틱 맵(OK-Robot VoxelMap, voxel별 CLIP) 상주 — GB급, 즉시 쿼리
+5. zero-copy — depth→PC→마스크→CGN 텐서를 통합 메모리 한 공간에
+6. **fine-tune도 Thor** — 데이터 생성(Isaac Sim)은 PC, 학습은 Thor(큰 배치)
+
+### 주의
+- **nvmap 누수**(Tegra 통합 메모리, 프로세스 多 → CUDA 컨텍스트 파편화) → **프로세스 수
+  최소화, 모델 in-process 로드, 메모리 모니터**
+- Thor CPU 바운드 확인 (MoveIt2+브리지+인지 동시)
+- 개발툴(RViz 등)은 PC에서 Thor ROS 가리키게
+
+### 지금은
+월요일 npz 테스트는 PC 그대로 (Isaac Sim 렌더가 PC, CGN도 PC 셋업됨).
+**Thor 전 스택 이관 = Phase 4 인프라 결정.** 그것도 "Thor에 노드 배포"지 "Thor에서 작업" 아님.
+
+### Thor 접근 시 수정 우선순위 체크리스트 (2026-09-07)
+**원칙**: 큰 결정을 여는 순서. RealSense·실물 팔은 Thor 쪽(스파이크가 Thor D435i) →
+depth 실측·재촬영은 Thor 앞에서만. **기존 코드 삭제/교체는 여기 없음 — Phase 4 (검증 후 일괄).**
+
+**SSH 확정 (2026-09-07)**: `ssh thor` (= `bpdl@163.239.19.132`, 랩 LAN, ed25519 키
+`~/.ssh/id_ed25519`, `~/.ssh/config` 등록). Thor sshd 활성화함. Tailscale 미설치(랩 LAN이면 불필요).
+Thor: JetPack7 / L4T R38.4.0 / Ubuntu 24.04 / CUDA 13.0 / kernel 6.8.12-tegra / 14코어 /
+**122GB RAM** / NVMe 937G(774 여유) / ROS **jazzy** (PC MoveIt config는 humble — Phase 4 주의) /
+py3.12 / venv `~/phase1/pc_spike_venv`(torch 2.12+cu130) + `~/vllm-venv`.
+**도는 서비스 없음** (VLM/YOLO/box 서버 다 내려가 있음, 재구성 필요).
+
+**Tier 0 — ✅ 완료 (2026-09-07)**
+- [x] Thor `~/pc_spike/` 19 npz + ply + seg + bbox.json → `~/grasp/pc_spike_thor/` (215MB rsync).
+  키 = `depth_m`+`K`+`color` (segmap 없음). Thor docs → `~/grasp/thor_phase1_docs/`
+- [x] 시스템 스냅샷 (위 SSH 확정 참조)
+- [x] 서비스 확인 — 없음
+- [x] **2c 해결** (위 Phase 2 표 2c-★): segonly→region 방식 오류였음. cup/bottle/clutter OK
+- [ ] 실물 팔(pyAgxArm CAN)이 Thor에 물려있는지 — 미확인
+
+**Tier 1 — depth 품질 실측 (재촬영 여부 판단)**
+- [ ] `python3 tools/depth_noise.py --distances 0.5 0.65 0.8 --frames 30` (평면 정면)
+  → 국소 노이즈 p50/p90 vs **5mm**(CGN contact 반경). `PHASE1_RESULT.md`에 기록.
+  p90<5mm OK / >8mm 필터·평균 강화
+- [ ] observation 자세 관측각 측정 (`tools/check_view_angle.py` — RANSAC 평면 normal ↔ 카메라 z)
+  → **45~70° 하향인지** (1c 탈락 원인이 grazing 31~41°였음)
+- [ ] grazing이면 `saved_poses.json` observation `joint7`을 45~60° 하향으로 재저장
+
+**Tier 2 — 재촬영 (Tier 1 나쁘거나 cup/thin/clutter 필요)**
+- [ ] `pc_spike_capture.py` 재촬영 — **`.npz`에 depth+K+segmap 저장** (CGN full-scene 입력).
+  `PHASE1_VISION.md` 프로토콜: 관측각 45~70°, 거리 0.6~0.8m, box 단독 2~3 / cup 2 /
+  bottle(불투명) 2 / 얇은 2 / 클러터 2 / 가장자리 2. 원통은 측면에서 더 내려보거나 2뷰
+- [ ] `seg_bench.py --label` → `--models mobile_sam,fastsam,sam2.1_t --ply-out` 재실행
+  **+ point prompt 비교** (클러터 bbox 안 다물체). mobile_sam vs fastsam 최종 결정
+- [ ] `run_cgn.py <재촬영.npz> --local-regions --filter-grasps` → masked-only 대비 score/분포
+  개선되는지 → **scene-context 가설 판정** (Tier 0 원본 npz로 먼저 해봤으면 크로스체크)
+- [ ] D_thin = depth-grasp 경로 밖 확정, 별도 트랙 문서화
+
+**Tier 3 — 그리퍼 스펙 확정 (팔이 Thor에 연결돼 있으면)**
+- [ ] `get_gripper_teaching_pendant_param()` CAN 쿼리 → `max_range_config` **0.07 vs 0.10** 확정
+  (지금 URDF 값 0.10 추정)
+- [ ] `move_gripper_m(0.05, 1.0)` 테스트 (팔 정지, 그리퍼만) — 위치제어·force 피드백 동작
+- [ ] `d`(fingertip→flange) 물리 측정 or 그리퍼 STL → URDF `0.1358` 검증/보정
+
+**Tier 4 — Thor 배포 조사 (Phase 4 인프라용, 나중)**
+- [ ] Thor JetPack용 PyTorch 휠 → `contact_graspnet_pytorch` 돌아가나 (`env.sh`에 torch
+  2.12.0+cu130 흔적 있음 — 재확인)
+- [ ] `ultralytics` SAM2/MobileSAM Thor arm64
+- [ ] cuRobo / Isaac ROS cuMotion Blackwell+JetPack 지원 매트릭스 (§"cuRobo 재검토 조건")
+- [ ] Thor↔PC ROS2 DDS 통신 확인 (이미 되고 있어야 함 — Tailscale)
+- [ ] `start_nero_isaac_all.sh` → Thor용(인지·grasp·MoveIt2) / PC용(Isaac Sim·RViz) 분리 계획
+
+**막힘 없음 (Thor 없이 지금)**: Isaac Sim 렌더 씬 CGN 테스트(2c-next), `cgn_prototype.py`
+정제, Isaac Sim 그리퍼 물리(close+attach) 확인
 
 ## 학습 판단 — pretrained vs 파인튜닝 (2026-09-04)
 **"Net"이 pretrained 배포하면 내가 학습 안 함** (YOLO/SAM 처럼). Contact-GraspNet은
@@ -479,14 +618,56 @@ random pose + **RealSense 노이즈 모델**(depth_noise 측정값에 맞춤) + 
 | 2a | ✅ **완료 (2026-09-04, 이 PC RTX 3080Ti)**. `elchun/contact_graspnet_pytorch` clone `~/grasp/contact_graspnet_pytorch` (pretrained `model.pt` 포함, **pointnet2 순수 pytorch = CUDA 컴파일 불필요**). venv `~/grasp/cgn_venv` (uv `--system-site-packages`, torch 2.5.1+cu121 재사용). deps: trimesh/pyquaternion/addict/configargparse/pyrender/opencv-headless. 러너 `tools/cgn_prototype/run_cgn.py` (commit `1813f1b`) — viz import 우회, `.ply/.npz` → `predict_scene_grasps` → `.npz`. 번들 test scene 326 grasp OK. **VRAM: 로드+추론 시 ~1~3GB, 12GB 중 → Isaac Sim 공존 가능** |
 | 2b | **`tools/cgn_prototype/cgn_prototype.py` — commit `83c2b3a`.** `ContactGraspNetBackend` 스캐폴딩: 정규화(mean centering) → predict() → 공식 변환(Gram-Schmidt Eq6, `R_g=[b,a×b,a]`, `t_g=c+(w/2)b+d·a`) → w≤w_max/s≥thr 필터 → 180° twin → 그리퍼 와이어프레임 `.ply`/RViz MarkerArray. `_run_model()`만 2a 대기, 그 전엔 `--fallback`. HDD box .ply로 스모크테스트 통과 | ✅ 나 |
 | 2c | **예비 결과 (2026-09-04)**: pretrained CGN(pytorch 포트) → NERO box masked .ply. **marginal**: max score ~0.19~0.22, 번들 test scene 은 0.29(포트 자체가 TF 원본보다 약함 — README "results may vary"). uniq 위치 69개(코너 클러스터는 top-score 만), opening 2.5~2.8cm(21cm box 에 과소=edge grasp), **approach 는 대략 top-down**(광학계 y+ mean 0.82), bottle/thin → 0개. **원인 미확정** — 후보 (a) masked object 만 입력(scene context 없음) (b) 도메인 갭. **시도한 것, 효과 없음**: gripper_width 0.08→0.10(0.19→0.22), 임계값 낮춤, forward-passes 6, 합성 테이블면 붙이기(F_edge 소폭↑ / A_box 0 grasp — 합성 평면이 너무 인공적, 결론 안 남). **진짜 scene-context 테스트 = Thor 원본 depth+K+segmap npz 필요 (지금 못 가져옴).** | 예비 완료 |
-| 2c-next | **막힘 없는 다음: Isaac Sim 렌더 씬 테스트.** NERO box 를 Isaac Sim 테이블에 놓고 clean depth+K+segmap 렌더 → CGN. clean sim depth 에서 score 갭 닫히면 → 도메인 갭 확정, 노이즈 fine-tune. clean 에서도 ~0.2 면 → 포트가 약함 (TF 원본 / AnyGrasp / fine-tune 고려). **+ 이게 fine-tune 데이터 생성 파이프라인 1단계** | 다음 |
+| 2c-★ | **해결 (2026-09-07, SSH로 Thor `~/pc_spike/` 19 npz 회수 → `~/grasp/pc_spike_thor/`).** npz 키 = `depth_m`+`K`+`color` (segmap 없음, bbox.json 라벨 있음). 새 툴 `tools/cgn_prototype/run_cgn_scene.py`: bbox→MobileSAM→segmap → `extract_point_clouds` → 3방식 비교. **판정: 2c 예비의 "marginal"은 도메인 갭이 아니라 입력 방식 오류.** `run_cgn.py`가 masked `.ply`(=`segonly`)를 먹였는데, 이건 CGN이 필요로 하는 국소 씬 컨텍스트(물체 주변 테이블면)를 다 버림. **올바른 방식 = `local_regions=True`** (NVIDIA README `--local_regions --filter_grasps`): segment 주변 큐브를 크롭해 넣음. 결과: cup `segonly` 0.18~0.22 → `region` **0.25~0.29**, bottle/thin `segonly` **0 grasp** → `region` **0.29** (opening 4.9cm 정상), clutter 물체들 `region` 0.29 (med 0.28). 전부 포트 자체 번들 test scene(0.29) **동급**. → **pretrained CGN(약한 pytorch 포트조차) cup/bottle/clutter 는 파인튜닝 없이 충분. 진행.** | ✅ 해결 |
+| 2c-box | **box(A_box)만 여전히 안 됨** — `region` 에서도 max ~0.17~0.19. 원인: 21×12cm 풋프린트 vs 그리퍼 8cm(포트가 그리퍼폭 config 무시, Franka 가중치에 박힘. `DATA.gripper_width` 0.10/0.12 → 변화 없음 확인). + grazing 각도라 윗면만 보임 → 12/21cm 스팬만. **해결책: 45~70° 재촬영으로 측면(5~7cm 높이) 노출** + (Phase 4) 필요시 AGX 폭으로 파인튜닝. box 는 프로덕션 타겟이지만 CGN 입장에선 최악 케이스. | box 재촬영 대기 |
+| 2c-viz | `run_cgn_scene.py --ply-out` → 씬 점(회색)+grasp 와이어(초록, 밝기=score). `~/grasp/cgn_scene_viz/*.ply` + HDD `phase1_thor_run/`. MeshLab 육안 확인용 | 나 |
+| 2c-tool | ✅ **완료 (2026-09-07, 서브에이전트)**. `cgn_prototype.py` `segonly`→`local_regions` 리팩터. **인터페이스: `predict(pc_full, pc_segment)`** — 두 `(N,3)` 배열(camera frame), SAM·역투영은 드라이버. `_run_model()` = `GraspEstimator` lazy-load 1회 → `predict_scene_grasps(local_regions=True, filter_grasps=True)`. **TCP 재계산 검증**: CGN Franka 깊이 버리고 `build_grasp(c,b,a,w,s,d=0.1358)` 재구성 → approach 축 성분 정확히 +13.6cm=d. `S_THRESHOLD` 0.30→0.15. 테스트: `pc_spike6/A_box_001` 56 grasp max 0.293 opening 5.7cm ✓. `run_cgn.py` deprecation 배너. `sj_pickplace/` 안 건드림, 미커밋. Phase-4 `LearnedGraspBackend.predict()` 매핑은 docstring/README에. | ✅ |
 | 2d | grasp → base_link TF (`_cam_to_base`, canonical observation 자세에서만) | 2c 후 |
+
+### Thor CGN 이관 (Phase A) — ✅ 완료 (2026-09-07)
+- `~/grasp/contact_graspnet_pytorch` (rsync, .git 제외), `~/grasp/cgn_prototype/`, SAM 모델, pc_spike6 → Thor
+- **fresh venv `~/grasp/cgn_venv`**: `python3 -m venv` (system-site-packages 안 씀 — pc_spike_venv는
+  venv-numpy2 vs system-scipy1 ABI 충돌로 폐기). torch **2.12.0+cu130 aarch64**
+  (`download.pytorch.org/whl/cu130`), numpy 2.5.3, ultralytics/trimesh/pyrender/tqdm/scipy/sklearn/cv2.
+- **CGN 레포 패치 2곳** (torch 2.12 / numpy 2.x): `checkpoints.py:65` `torch.load(..., weights_only=False)`,
+  `contact_grasp_estimator.py:341` `np.in1d`→`np.isin`
+- 스모크: `A_box_001` region+filter → max **0.294** opening **5.7cm** 100% on-target = PC와 동일.
+  **device cuda:0 (Thor GPU), ~1.2s/씬.**
+
+### Isaac Sim → CGN 6-DoF 검사 (Phase B) — ✅ 검증됨 (2026-09-07)
+**결론: 렌더 → point cloud → CGN → 6-DoF grasp pose 파이프라인 작동.**
+- Isaac Sim: 팔 관측자세(`saved_poses.json`), 5cm TestBox를 카메라 시야(-0.5,0,0.03)에 배치.
+  flange 카메라(`/World/agx_arm/link7/gripper_flange/Camera`)에서 replicator 애너테이터로
+  RGB+depth+**GT semantic seg**(id 3='box', 2='floor')+K 렌더 → npz. **depth 100% valid (sim은 깨끗).**
+  ⚠️ `rep.orchestrator.step()`은 재생 중 데드락 — `omni.kit.app.get_app().update()` 루프로 렌더.
+  ⚠️ USD 카메라 vert aperture가 4:3용 → `fx=fy=f/ha·W` (square px) 로 K 보정 필요.
+- Thor CGN (GT segmap): **190 grasp, score max 0.283, opening 5.7cm** (5cm 큐브 몸통 감쌈).
+  world 프레임 변환(`world_T_optical = camT.T @ diag(1,-1,-1,1)`): 상위 grasp 위치가
+  **박스 위 x,y ±1cm, approach ≈ (0,0,-1) 클린 top-down.** z는 flange 기준 약간 낮음(Phase C에서 조정).
+- sim score(0.25~0.28) < 실물 재촬영(0.29): 작은 큐브·완벽 평면(ACRONYM 메시엔 디테일 있음) 추정.
+  파이프라인 검증엔 무관.
+
+**⚠️ SAM 마스크 bg_leak 확인됨**: `run_cgn_scene` seg pc bbox 가 cup 에서 z-extent 0.20m, bottle 0.41m
+(grazing 각도 → 마스크가 테이블면 슬라이스 포함). `region` 모드는 큐브 크롭이라 영향 적지만
+`filter_grasps`/on-target 지표는 부정확. 재촬영 시 45~70° + point prompt 로 개선 (Tier 2).
 
 **CONFIG 확정 (URDF/코드)**: `d = 0.1358 m` (`planning_node.TOP_TCP_OFFSET`, flange→fingertip
 2026-07 실측), `w_max = 0.10 m` (URDF `gripper_joint1/2` prismatic 0.05×2).
 **AGX 그리퍼 = 위치제어** `move_gripper_m(w_m, force_N)` → 예측 w 직접 명령 가능.
 
-병렬 (지금): Isaac Sim 그리퍼 물리(close+attach) 동작 확인 (Phase 4 정량평가 전제).
+### Isaac Sim 그리퍼 물리 — ✅ 작동 확인 (2026-09-07, MCP execute_script)
+**결론: 순수 마찰로 파지 성립. fixed-joint attach 불필요** (5cm/0.2kg 박스 기준).
+- 씬: `/World/agx_arm` articulation (9 DOF: joint1~7 + gripper_joint1/2 prismatic), `/World/TestBox*`
+  5cm 큐브 0.2kg 마찰 **1.5**(`BoxHighFriction`, 이미 튜닝됨). 손끝 개폐축 = **world Y**, 최대 gap **10cm**.
+- **막고 있던 것**: ActionGraph `/World/ActionGraph/articulation_controller`(`IsaacArticulationController`)
+  가 매 틱 관절을 `/isaac_joint_command`(ROS) 값으로 강제 → ROS 스택 없으면 0으로 홀드.
+  MCP `apply_action`이 안 먹던 이유. **테스트하려면 이 노드 `set_disabled(True)` 후 복원.**
+- **physx solver iteration 1→16** (`art.set_solver_position_iteration_count(16)`, 파지 안정성).
+  ⚠️ 런타임만 — USD `physicsScene`/articulation prim 에 영구 반영 필요.
+- 테스트: 5cm 박스 손끝 사이 배치 → close → 중력 하 유지(3mm 슬립) → 팔 arc 이동
+  (joint1→0.5, joint2→-0.6, joint4→0.8) → **박스 계속 유지**, 손끝중점-박스 거리 5.9mm.
+- **남은 것**: solver_iter USD 영구화 / ROS 경로 검증(`gripper_controller`→`/isaac_joint_command`→AG)
+  / 큰·무거운 물체 한계 / 실제 approach→close 시퀀스 (지금은 텔레포트로 시작).
 
 ### Phase 3 — Grasp→모션 통합 (프로토타입 브랜치/플래그)
 | # | 과제 |
@@ -495,6 +676,174 @@ random pose + **RealSense 노이즈 모델**(depth_noise 측정값에 맞춤) + 
 | 3b | near-miss refinement (6DGN) — pick_ik 실패 후보를 ≤1cm SE(3) 볼에서 perturb 재확인 |
 | 3c | 랭킹 `graspness − w1·θ⁴(top-down) − w2·IK margin − w3·collision clearance` + VLM 시맨틱 re-rank. **argmax(s) 금지** |
 | 3d | STOMP 경로 + Cartesian 마지막 구간(`p−k·a`) + closed-loop 그리퍼. 플래그 뒤, 기존 경로 폴백 |
+
+### Phase C — Thor MoveIt/pick_ik/STOMP + 실행 검증 (2026-09-07)
+
+**MoveIt 스택은 PC(Humble) 아니라 Thor(Jazzy)에.** STOMP MoveIt 플러그인이 Jazzy부터 정식
+(`ros-jazzy-moveit-planners-stomp`), Humble엔 apt 패키지 없음. PC↔Thor **ROS2 DDS 안 됨**
+(demo talker 안 보임 — Humble/Jazzy + 캠퍼스 스위치). 실행 브리지는 Phase 4.
+
+**C1 ✅ Thor Jazzy 빌드**: `agx_arm_sim` + `nero_sj_pickplace` → `~/ros2_ws/src/` rsync.
+`sudo apt install ros-jazzy-pick-ik`. `colcon build` 클린 (포팅 이슈 없음).
+config 3개 Jazzy 포맷으로 교체 (Humble→Jazzy): `stomp_planning.yaml`·`pilz_..._planning.yaml`
+= `planning_plugin`(str) → `planning_plugins`(list), `request_adapters` folded-str → list.
+jazzy 기본값(`/opt/ros/jazzy/share/moveit_configs_utils/default_configs/`) 복사가 정답.
+`kinematics.yaml`은 이미 pick_ik (Phase 0). `move_group.launch.py`에 stomp 파이프라인 추가,
+default=stomp. 헤드리스 런치 `headless_plan_test.launch.py` (rsp+jsp+static tf+move_group,
+ros2_control 없이). → **OMPL/STOMP/Pilz 3개 다 로드, "You can start planning now!"**
+
+**C2 ✅ pick_ik reachability**: Isaac Sim 렌더 box CGN grasp 5개 → `/compute_ik` (group=arm,
+seed=관측자세). **1/5 reachable** (4개 NO_IK_SOLUTION — 5cm 박스가 베이스에 가깝고 grasp이
+거의 바닥). 필터가 목적대로 동작.
+
+**C3 ✅ STOMP plan**: reachable grasp → `/move_action` (plan_only, pipeline_id=stomp,
+joint goal). **error_code=1, 25 waypoints, 2.30s 궤적** → `c3_trajectory.json` 덤프.
+
+**C4 ⚠️ Isaac Sim 실행 (프레임 수정 후 재검증, 2026-09-07)**:
+- **프레임 변환 확정·검증**: `world_T_optical = W_T_cam @ diag(1,-1,-1,1)`,
+  `W_T_cam = np.array(UsdGeom.XformCache().GetLocalToWorldTransform(cam_prim)).T`
+  (USD Gf.Matrix4d = row-vector → `.T` = col-vector world_T_cam. USD 카메라 -Z fwd/+Y up →
+  optical +Z fwd/+Y down 는 `diag(1,-1,-1)`). **검증**: 박스 world → 픽셀 투영이 GT seg 중심과
+  1px 이내, depth 0.775m 일치. **손가락-박스 XY 오차 34mm → 4.6mm.**
+- **CGN grasp 행렬 z-col = approach = 물체를 향함(닫는 방향).** flange `t_g = c − d·z_col`,
+  fingertip = `flange + d·approach`. (내 초기 fingertip 계산 부호 반대여서 헷갈렸음 — pose 자체는 정상)
+- **재실행**: 궤적 → Isaac Sim apply_action. 팔이 grasp 자세 도달, **손끝중점-박스 XY 4.6mm**.
+  BUT close 시 **비대칭**(한 손가락 0.025, 다른 손가락 -0.047=거의 열림) → 박스 안 잡힘.
+  원인: **grasp이 너무 낮음** (fingertip z≈0.014, 바닥 근처) → 한 손가락이 바닥/박스에 끼임.
+- **reachability 1/8** (pick_ik attempts 25, timeout 0.5 로 올려도). tilted approach(수직서 15°) +
+  기구학 경계. standoff 2cm 주면 8/8 전부 IK 실패. → **Phase 3b(near-miss refine)·3c(θ⁴ top-down
+  랭킹)·180° twin 필요.** 5cm 큐브 top-down 뷰 = 어려운 케이스 (Phase 2c 실물 7cm box는 깨끗).
+
+**결론: 루프 전 구간 동작 (CGN→프레임변환[✅검증]→pick_ik→STOMP→실행→그리퍼). 남은 격차:
+grasp 품질/reachability = Phase 3 (twin·refine·top-down 랭킹·standoff). 프레임은 해결.**
+Thor move_group는 tmux `planmg` 세션 구동 중. kinematics.yaml attempts 4→25, timeout 0.2→0.5.
+
+### Phase 3a+3c 검증 — twin + θ⁴ 랭킹 (2026-09-07)
+**IK 진단**: pick_ik는 박스 위치(-0.5,0,0.2)에서 **top-down 자세는 넓게 도달** (yaw 0/45/135,
+z 0.10~0.30, x -0.4~-0.55 전부 IK=1). CGN grasp이 IK 실패한 건 **CGN 자세가 수직서 15~40°
+기울어서** — 도달 자세 밖. → θ⁴ 페널티가 정확히 이걸 해결.
+
+**`rank_grasps.py`** (Thor `~/grasp/`): CGN grasp 전체(top-N 아님) + **180° twin**
+(`R @ diag(-1,-1,1)`) → 각각 `/compute_ik` → 통과분을 `cost = score − w·θ⁴`
+(θ=approach의 수직 편차, w=0.6) 로 랭킹. Isaac Sim 7×7×14cm 박스:
+- **118 grasp × 2 = 236 후보 → 132 reachable** (이전 0~1/8 에서 대폭). θ⁴ 랭킹 1위 =
+  θ=14°, 손끝 박스 몸통 중상단(z=0.093, 바닥 아님), d_box_xy 6mm, STOMP code=1.
+
+**C4 재실행 (랭킹된 grasp)**: 팔 자세 정확히 도달 (arm_now≈target). **그러나 그리퍼 close가
+여전히 비대칭** (한 손가락만 ~1cm 닫히고 stall, 박스 안 잡힘). 박스를 손끝 중점에 스냅해도,
+4cm로 줄여도 동일. **원인 = 프레임/센터링 아님** (스냅해도 실패). 추정:
+- CGN grasp 자세가 contorted arm config (`joint7=1.54` 등) → 힘 전달 나쁨 / 특이점 근처
+- θ=14° 기울기 → 중력 shear 성분을 마찰이 못 버팀 (task2의 home 자세 수직 grasp은 잘 됐음)
+- endpoint jump 실행 (전체 궤적 재생 아님) — 접근 운동학 무시
+
+### Step 4 검증 — Cartesian 마지막 접근 + 랭킹 v2 (2026-09-07)
+
+**closing-axis 진단**: rank v1 최고 grasp의 `b`(closing axis) = X-Y 대각선 → 7×7 박스를
+대각선(9.9cm)으로 물려 함 → 손가락이 모서리에 걸림. rank v1 grasp config도 contorted
+(`joint7=1.54, joint3=1.27`).
+
+**`rank2.py`**: v1 + **(a) pre-grasp(−5cm·a)도 reachable 체크 (b) box-axis 정렬 항**
+`cost = score − 0.5·θ⁴ − 0.15·(1−align)` (align = closing axis의 수평면 주축 정렬,
+1.0=면정렬 / 0.707=45° 대각). → **236 후보 중 118개가 grasp+pre-grasp 둘 다 reachable.**
+최고: θ=12°, **align=1.00** (면 정렬), **non-contorted** (`joint7=1.0, joint3=−0.06`).
+
+**`step4b.py`**: STOMP(seed→pre-grasp joint goal) `code=1, 25wp` + `/compute_cartesian_path`
+(pre→grasp 직선, `avoid_collisions=False`) **fraction=1.00, 5wp** → 30-pt 궤적 `c4_trajectory.json`.
+grasp config 깨끗, fingertip (−0.499, 0.013, 0.102) box (−0.5,0,0.07) — 몸통.
+
+**C4 재실행 (Cartesian + smooth 60-pt 리샘플 재생)**: 여전히 **파지 실패**. 접근 중 열린
+그리퍼(10cm)가 7cm 박스를 툭 침 → 박스가 joint2 손가락 쪽으로 밀림 → close 시 joint2
+손가락이 즉시 stall(−0.05 유지), joint1만 조금 → 박스 이탈. lift → DROPPED.
+씬 상태도 여러 조작으로 drift(박스 스케일/위치).
+
+**근본 원인 = 파이프라인 로직 아님.** sim 실행 충실도: (1) MCP apply_action 재생이
+`FollowJointTrajectory` 컨트롤러의 매끄러운 보간이 아님 (2) 7cm box / 10cm 그리퍼 tight
+클리어런스 (3) 센터링 ~1cm 오차 + fingertip 접촉면 모델 부정확. **task2(중앙정렬 박스,
+home 자세, 팔 이동 중 유지)에서 물리는 이미 검증됨** — 실행이 깨끗하면 됨.
+
+**→ 제대로 된 C4 = Phase 4의 실제 ROS 실행 경로** (`FollowJointTrajectory` → 컨트롤러 →
+보간 실행), MCP jump-replay 아님. Thor↔PC 브리지(Zenoh) 필요.
+
+**Step 1·2·4 성과**: reachability 병목 해결 (0/8 → 118/236, twin + θ⁴ + align + pre-grasp),
+CGN→프레임→twin/rank→pick_ik→STOMP→Cartesian 전 구간 계획 검증. 실행 충실도만 Phase 4.
+스크립트: `~/grasp/{rank_grasps,rank2,ik_probe,step4b}.py` (+ HDD `tools/phase_c/`).
+
+### 속도 최적화 + CoM 랭킹 (3c 확장) — 2026-09-07
+
+**bottle pick 전체 파이프라인 실행 → sim 파지 DROPPED** (box와 동일 caging 실패 —
+손끝 10cm/물체 5cm, 1cm 센터링 오차로 한 손가락 먼저 접촉→물체 밀어냄. **해법 = fixed-joint
+attach, Phase 4**). 파이프라인 로직은 전 구간 OK.
+
+**병목**: rank2가 400 후보 × 2 IK = 800 `/compute_ik` 호출 (각 timeout 0.5s) = **~10분**.
+
+**`rank3.py`** (새 표준, rank_grasps/rank2 대체):
+1. **기하 prefilter** (IK 0): θ≤35° from vertical, opening≤0.10, contact가 coarse workspace
+   box 안. 200×2 → ~100개, **5ms**.
+2. **CoM 항 추가** (사용자 요청): `cost = score − 0.5·θ⁴ − 1.2·d_com`
+   (d_com = contact ↔ object centroid 거리). bottle에서 grasp을 꼭대기→중간(d_com 4.4cm)으로 당김.
+3. **fast IK**: 상위 K=24만, `req.ik_request.timeout=120ms`, twin은 원본 실패 시만.
+   `kinematics.yaml` **timeout 0.5→0.08, attempts 25→4** (필터용).
+→ 12~23 IK 호출, **~2s**. STOMP+Cartesian **1.2s**.
+
+**전체 (warm)**: SAM 65ms + CGN 1.2s + rank3 ~2s + STOMP+Cart 1.2s ≈ **~5s** (이전 ~10분, **100배**).
+CGN 모델 로드 10s는 1회 — Phase 4에서 CGN 상주 노드로.
+스크립트 `~/grasp/rank3.py` (+ HDD `tools/phase_c/`).
+
+### 파이프라인 시각화 아티팩트 (2026-09-07)
+`https://claude.ai/code/artifact/2d19b714-4bb2-4994-b5c2-b74cd2de122e` — RGB→SAM→PC→CGN 후보→
+선택 grasp 4패널, **2물체 비교**. `tools/pipeline_figure/make_panels.py` (`<npz> <bbox.json> <label>`,
+npz에 GT seg 있으면 사용). 그리퍼 마커 = Π자 (palm 위, 손가락 아래, approach 화살표).
+- **box** (실물 `pc_spike6/A_box_001`): ~50 grasp, max 0.294, 선택 0.29 / 5.7cm / θ17°
+- **bottle** (Isaac Sim, Ø5cm×20cm 원통 `/World/WaterBottle`, `bottle` semantic): **200 grasp
+  전부 0.294 saturated** — CGN(ACRONYM=병·머그 다수)이 깨끗한 원형 단면에 포화. Phase 2c 실물 cup(~0.29)과 일치.
+  선택 grasp = 병 **윗부분** top-down 핀치 (θ19°, opening 4.9cm). CGN은 원통을 아무 높이서나 잡음 —
+  무게중심 쪽 선호 항(3c 확장) 여지.
+
+### Phase 4 — planning_node.py / grasp_kinematics.py 에서 사라지는 것 (2026-09-06 조사)
+
+**`grasp_kinematics.py` (633줄) — 거의 통삭제.**
+- 상수: `SIDE_TCP_OFFSET`, `SIDE_MIN_DIST`, `SIDE_PITCH_DEG`, `TOP_ANGLE_PITCH_DEG`,
+  하드코딩 쿼터니언 `QUAT_TOP_DOWN(_R/_L/_RR)`, `QUAT_SIDE_FRONT`
+- 테이블: `GRASP_DIR_MAP`, `LABEL_GRASP_HINT`, `SIDE_TAG`, `PINCH_TAG`
+- 함수: `top_down_angle_quat`, `sim_top_down_angle_quat`, `sim_box_aligned_quat`,
+  `side_quat_for`(+sim/pinch 변형 4개), `side_reachability_check`, `SIDE_BLIND_SWEEP_DEG`,
+  `side_face_candidates_deg`(+from_normal), `auto_grasp_quat`, **`resolve_grasp_quat`**,
+  `candidate_quat_for`(approach→quat, R_g=[b,a×b,a]로 대체), `YawCandidateSelector`
+- 생존: `SequenceRejected`(이동), `quat_angle_diff`(유틸)
+- ⚠️ `.claude/skills/grasp-kinematics-design/` 스킬이 이 파일 수정 시 필독 — **이번이 그 "의도된 통째 교체"**
+
+**`planning_node.py` (2945줄) 에서 삭제/대체:**
+- grasp 자세 결정 전체: `resolve_grasp_quat()` 호출(L465), `_top_down_quat_for`,
+  `_box_aligned_quat_for`, `_abs_angle_to_quat`, `_pick_best_yaw_candidate`
+- `TOP_TCP_OFFSET` 상수는 `d=0.1358`로 살지만 **`approach_z = pz + APPROACH_Z + TOP_TCP_OFFSET`
+  식의 top/side 분기 계산이 사라짐** → `t_g = c + (w/2)b + d·a` 하나
+- `is_side` 분기 전반 (approach_z/descend_z/lift_z를 top이냐 side냐로), `SIDE_APPROACH_STANDOFF_M`,
+  `SIDE_LIFT_APPROACH_Z`, `SIDE_MIN_DIST`
+- 접근각 후보 스윕: `_face_offset_candidates`, `_side_offset_candidates`, `blind_fallback`/
+  `face_aligned` 분기 → near-miss refinement(≤1cm)로
+- `_box_angle_deg` / `angle_base_deg` (Hough 2D 각도) 수신·사용 → CGN이 point cloud 기하에서
+- `BEARING_OFFSET_DEG=188.0` + pre-rotate bearing 계산 (일부; joint1 사전회전은 pick_ik+STOMP면 필요성↓)
+- `grasp_dir` 파라미터 (top/side/pinch), CLAUDE.md 변환표
+- `geometry_3d.py` (RANSAC+PCA, 이미 "신뢰 불가")
+
+**유지 (뼈대):**
+- `_do_pick`/`_pick_sequence` 실행 시퀀스(approach→descend→close→lift) — 단 quat/approach를 CGN 후보에서
+- `_scan_box_sequence`(joint 스윕) — 오히려 멀티뷰 배치로 강화
+- `_home_sequence`, observation 자세, safety 전체
+- `_sync_scene_collision_objects`(collision world — STOMP/pick_ik가 씀)
+- `_compute_ik_joints` — pick_ik 경유, **필터의 핵심으로 승격**
+- `_try_place_at` + placement 폐루프 검증, `_move_try_pilz`(Pilz LIN — Cartesian 접근에 씀), `_gripper`
+
+**축소:** `_move_try_ompl_safe`→STOMP · `DESCEND_TOL_ORI_FALLBACK` 3단계(Cartesian 직선이면 덜 필요) ·
+`on_command` pick 분기 대폭 슬림(grasp_dir/side_approach_deg/angle 처리 다 빠짐)
+
+**이미 있는 seam:** `cmd.get('grasp_candidate')` (planning_node L453) — CGN 후보를 받는 자리가
+**이미 있음**. redesign = 이 경로를 기본으로, else(`resolve_grasp_quat`) 삭제. `grasp_pose_generator.py`가
+그 후보를 채우는 프로토타입 → `learned_grasp_backend.ContactGraspNetBackend` 연결.
+
+**아키텍처 레벨:** planning_node가 "grasp 자세를 어떻게" 정하던 책임이 **별도 grasp 서비스**
+(SAM→CGN→필터→랭킹)로 나감. planning_node는 "이 후보를 실행"하는 얇은 노드로 →
+Phase 5에서 결정론적 BT skill 실행기로 더 대체 가능.
 
 ### Phase 4 — 검증 후 한 번에 반영 (사용자 지시)
 - Isaac Sim end-to-end pick 성공률 (**그리퍼 물리 close+attach 동작 확인 선행**) + 실물 검증

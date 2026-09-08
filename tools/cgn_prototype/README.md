@@ -1,15 +1,37 @@
 # Phase 2 — Grasp 층 프로토타입
 
-재설계 5-Phase 중 Phase 2. **box 기준으로 착수** (cup/thin/clutter + Phase 3 는 재촬영 후).
-**기존 `sj_pickplace/` 안 건드림** — 검증 완료 후 Phase 4 에서 이관.
+재설계 5-Phase 중 Phase 2. **기존 `sj_pickplace/` 안 건드림** — 검증 완료 후 Phase 4 에서 이관.
 
 ## 파일
 
-- `cgn_prototype.py` — Phase 2b. Contact-GraspNet backend 스캐폴딩:
-  masked PC(.ply) → 정규화 → `ContactGraspNetBackend.predict()` → 공식 변환
-  (`R_g=[b,a×b,a]`, `t_g=c+(w/2)b+d·a`, Gram-Schmidt, 180° twin) → 그리퍼
-  와이어프레임 `.ply` / RViz MarkerArray.
-  **`_run_model()` 딱 이 함수만 Phase 2a 대기.** 그 전엔 `--fallback`.
+- **`cgn_prototype.py`** — Phase 2b/2c 백엔드. scene depth+K (+SAM segmap) → `deproject`
+  → `ContactGraspNetBackend.predict(pc_full, pc_segment)` → CGN `predict_scene_grasps(
+  local_regions=True, filter_grasps=True)` → TCP 재계산 (`R_g=[b,a×b,a]`, `t_g=c+(w/2)b+d·a`,
+  Gram-Schmidt, d=0.1358) → `w≤w_max / s≥thr` 필터 → 180° twin → 그리퍼 와이어 `.ply` /
+  RViz MarkerArray. 모델 로드 실패/`--fallback` 이면 geometric 후보.
+- `run_cgn_scene.py` — Phase 2c 실험 기록: 같은 씬을 `full` / `region` / `segonly` 세 방식으로
+  돌려 score 분포 비교. 공유 헬퍼(`load_capture`/`load_bboxes`/`sam_masks`)는 `cgn_prototype`
+  에서 import.
+- `run_cgn.py` — ⚠️ DEPRECATED. masked `.ply` 입력 = "segonly" (아래 참조). depth+K+segmap
+  npz 는 아직 유효.
+
+## ★ Phase 2c 판정 (2026-09-07) — segonly 는 틀렸다
+
+masked 물체 점만 CGN 에 넣으면(`run_cgn.py <masked.ply>`, 옛 `cgn_prototype` predict) score
+~0.19, edge-pinch 만. **CGN 이 필요로 하는 국소 씬 컨텍스트(물체 주변 테이블면)를 버리기 때문.**
+
+**올바른 방식 = 전체 씬 PC + 물체 segment → `local_regions=True, filter_grasps=True`**
+(NVIDIA 릴리스의 `--local_regions --filter_grasps`). Thor `~/pc_spike*` 실측:
+
+| 물체 | segonly | **region (local_regions)** |
+|---|---|---|
+| cup / bottle / clutter | 0.18~0.22, 0 grasp 도 | **0.29, opening 물체 크기 일치** |
+| box (무광 스테이지, 45~70°, 단독) | 0.17 | **0.29, opening 5cm (몸통 감싸기)** |
+
+→ **pretrained CGN(약한 pytorch 포트) 로 NERO 전 물체 클래스 충분. 파인튜닝 불필요.**
+
+성공 조건: `local_regions` + 관측각 45~70° + 거리 0.5~0.7m + **무광 스테이지 + 물체 단독**
+(검은 테이블/광택 매트면 물체 옆면 depth dropout → rim-pinch 만).
 
 ## CONFIG (NERO AGX 그리퍼, 확정)
 
@@ -17,61 +39,44 @@
 |---|---|---|
 | `d` (flange→fingertip) | **0.1358 m** | `planning_node.TOP_TCP_OFFSET`, URDF `gripper_joint1` z, 2026-07 실측 확정 |
 | `w_max` (최대 개방폭) | **0.10 m** | URDF `gripper_joint1/2` prismatic limit 0.05 × 2 |
-| 프레임 | `camera_color_optical_frame` | 호출부에서 `_cam_to_base` 로 base_link (joint1≈0 에서만) |
+| `s_threshold` | 0.15 | CGN pytorch 포트 score 천장 ~0.29, config first/second_thres 0.15 |
+| 프레임 | `camera_color_optical_frame` (OpenCV) | 호출부에서 `_cam_to_base` 로 base_link (joint1≈0 에서만) |
 
-`get_gripper_teaching_pendant_param()` 로 실물에서 `max_range_config`(0.07/0.10) 크로스체크는
-로봇팔 생기면. 지금은 URDF 값.
+CGN 4x4 의 translation 은 **버리고** contact `c` + NERO `d` 로 다시 세움 (CGN 은 Franka
+baseline d≈0.10). 이게 CLAUDE.md "TOP/SIDE TCP offset 합치지 마라" 문제를 없앤다 —
+grasp 마다 자기 approach 축 하나로 offset 통일.
 
-## Phase 2a — Contact-GraspNet 런타임 (이 PC, Thor 접근 불가)
-
-1. `git clone https://github.com/elchun/contact_graspnet_pytorch` (또는 NVIDIA 공식 TF2)
-2. env: PyTorch + CUDA. Isaac Sim 과 VRAM 공유 → `nvidia-smi` 로 여유 확인
-   (Isaac Sim 안 띄운 상태에서 CGN 로드 시 VRAM, 둘 다 띄웠을 때 여유).
-   부족하면 Docker 로 격리하거나 CGN 을 별도 프로세스로.
-3. pretrained checkpoint 다운로드
-4. 단독 테스트: 저장된 PC → grasp 출력 (로봇/ROS 없이)
-5. `cgn_prototype.py::_run_model()` 에 연결:
-   - A) 같은 env 면 `import contact_graspnet_pytorch` 후 forward
-   - B) 별도 프로세스면 PC 를 HTTP/소켓으로 POST
-   릴리스 플래그: `--local_regions --filter_grasps --forward_passes N`
-
-## Phase 2b — 지금 (모델 없이 파이프 검증)
+## 실행
 
 ```bash
-# geometric fallback 으로 파이프 + 공식 + viz 검증
-python3 cgn_prototype.py <box_masked.ply> --fallback --ply-out /tmp/g
-```
-box masked .ply 는 `seg_bench.py --ply-out` 출력 (HDD `phase1_thor_run/seg_overlays_mobile_sam/`).
+source ~/grasp/cgn_venv/bin/activate
+export CGN_REPO=~/grasp/contact_graspnet_pytorch
 
-## Phase 2c — box .ply 9개 → grasp → 시각화
+# scene npz (+ 옆에 <name>.bbox.json: {"bboxes":[[x0,y0,x1,y1]]}) → CGN grasp
+python3 cgn_prototype.py ~/grasp/pc_spike6/A_box_001.npz --model --ply-out /tmp/g/
 
-**RViz** (ROS 워크스페이스 sourced):
-```bash
-python3 cgn_prototype.py <ply> --model --ros --frame camera_color_optical_frame
-# RViz: Fixed Frame = camera_color_optical_frame, Add → MarkerArray → /cgn_grasps
-# 물체 PC 도 같이 보려면 PointCloud2 로 발행하거나 .ply 를 RViz 에
-```
+# RViz (ROS 워크스페이스 sourced)
+python3 cgn_prototype.py <scene.npz> --model --ros --frame camera_color_optical_frame
+#   RViz: Fixed Frame = camera_color_optical_frame, Add → MarkerArray → /cgn_grasps
 
-**오프라인** (MeshLab / CloudCompare / Isaac Sim):
-```bash
-python3 cgn_prototype.py <ply> --model --ply-out /tmp/g
-# /tmp/g/<name>__grasps.ply (초록 그리퍼 와이어프레임) + 원본 물체 .ply 를 같이 로드
+# 모델 없이 파이프/viz (geometric fallback, masked .ply 도)
+python3 cgn_prototype.py <scene.npz|masked.ply> --fallback --ply-out /tmp/g/
 ```
 
-**Isaac Sim**: `.ply` 를 USD 로 import 하거나, MarkerArray 를 Isaac Sim ROS2 bridge 로.
+`--ply-out` → `<name>__grasps.ply` (씬 회색 점 + 초록 그리퍼 와이어, twin 은 짙은 초록).
+MeshLab / CloudCompare 로.
 
-### 판정 (box 기준, pretrained 충분한지)
+## Phase 4 매핑 (learned_grasp_backend.py — 여기서 안 건드림)
 
-- 윗면에 top-down grasp, 측면에 side grasp 이 **말이 되게** (위치가 물체 표면, approach 가
-  물체를 향함, 폭이 물체 크기와 맞음) → **pretrained OK, 파인튜닝 불필요, 진행**
-- 체계적으로 나쁨 (방향 뒤집힘, 위치 cm 어긋남, 명백한 표면에 후보 0개) → 파인튜닝 계획
-  (Isaac Sim + NERO 물체 메시 + RealSense 노이즈 모델, ~하루)
+```
+현재:    ContactGraspNetBackend.predict(pc_full, pc_segment)              -> List[GraspOut]
+Phase 4: LearnedGraspBackend.predict(point_cloud, geometry_features, grasp_intent) -> List[LearnedGraspOutput]
+  point_cloud = pc_full,  pc_segment 은 segmentation_backend 마스크에서 추가 인자로.
+  GraspOut ↔ LearnedGraspOutput 필드 동형 (position/approach_vector/grasp_axis/score/width).
+```
 
-이게 재설계 최대 미지수(Contact-GraspNet 나쁜소식 B1: sim→real 도메인 갭)를 **재촬영 없이**
-답한다.
+## 다음 (Phase 2d / 3)
 
-## 병렬 (지금 가능)
-
-- **Isaac Sim 그리퍼 물리**: sim 그리퍼가 물체를 실제로 close + attach 하나
-  (Phase 4 정량평가 전제)
-- `d`/`w_max`: URDF 값 확정 (위 표) — 실물 크로스체크는 추후
+- 2d: grasp(camera frame) → base_link TF (`_cam_to_base`, canonical observation 자세)
+- 3a: 후보 + 180° twin 둘 다 pick_ik 루프 → reachability 필터
+- Isaac Sim 그리퍼 물리(close+attach) — Phase 4 정량평가 전제

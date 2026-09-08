@@ -2,6 +2,13 @@
 """
 run_cgn.py  —  Contact-GraspNet (pytorch port) 최소 러너 (viz 없음, headless)
 
+⚠️ DEPRECATED (2026-09-07) — masked .ply / bare-xyz npz 입력 = "segonly" 경로.
+   Phase 2c 에서 이게 틀렸다고 판명: CGN 에 물체 점만 주면 국소 씬 컨텍스트가
+   없어 score ~0.19, edge-pinch 만 나옴. 올바른 경로는 전체 씬 PC + segment →
+   local_regions. → run_cgn_scene.py (실험/비교) 또는 cgn_prototype.py --model (프로토타입).
+   이 파일은 depth+K+segmap npz 를 load_available_input_data 로 처리하는 경우엔
+   아직 유효 (segmap 있으면 --local-regions 동작). masked .ply 만 폐기.
+
 Phase 2a: contact_graspnet_pytorch 를 감싸서 point cloud → grasp pose 를 낸다.
 inference.py 는 open3d/mayavi viz 를 top-level import 해서 headless 에서 무거움 —
 이건 GraspEstimator 만 직접 호출.

@@ -1,0 +1,32 @@
+# NERO arm IK — 2026-09-03: KDL → pick_ik 전환
+#
+# 배경: KDL(단일 시드 Newton-Raphson)이 관절한계·특이점 근처에서 자주 실패해
+#   kinematics_solver_attempts 를 50까지 올려 버티고 있었다(아래 이전 설정 참고).
+#   pick_ik 는 memetic(진화+국소) global solver 로 성공률이 크게 높고, MoveIt2
+#   레포에 포함돼 유지된다. "reach 불가" 오류 폭증의 1차 대응.
+#
+#   설치:   sudo apt install ros-$ROS_DISTRO-pick-ik
+#   반영:   colcon build 후 재실행 (kinematics.yaml 은 런타임 로드지만 install 공유폴더 갱신 필요)
+#   되돌리기: 아래 "이전 설정(KDL)" 블록을 arm: 으로 복원, pick_ik 블록 삭제
+#
+# 이전 설정 (KDL):
+#   arm:
+#     kinematics_solver: kdl_kinematics_plugin/KDLKinematicsPlugin
+#     kinematics_solver_search_resolution: 0.005
+#     kinematics_solver_timeout: 0.3
+#     kinematics_solver_attempts: 50
+#
+# (구 파일에 있던 'arm喔:' 항목은 인코딩 깨진 오타여서 제거함 — SRDF 그룹은 arm / gripper 뿐)
+
+arm:
+  kinematics_solver: pick_ik/PickIkPlugin
+  kinematics_solver_timeout: 0.08
+  kinematics_solver_attempts: 4
+  mode: global                    # global=memetic(견고) / local=gradient(빠름, seed 의존)
+  position_scale: 1.0
+  rotation_scale: 0.5
+  position_threshold: 0.001       # m
+  orientation_threshold: 0.01     # rad
+  cost_threshold: 0.001
+  minimal_displacement_weight: 0.0   # >0 이면 현재 관절각에 가까운 해 선호(경로 짧아짐, 성공률과 트레이드오프)
+  gd_step_size: 0.0001
