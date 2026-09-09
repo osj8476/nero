@@ -51,6 +51,7 @@ if ! ssh thor 'test -f ~/grasp/step6_pick.json' || \
   exit 2
 fi
 rsync -q thor:grasp/step6_pick.json "$HOME/grasp/step6_pick.json"
+rsync -q thor:grasp/viz_overlay.json "$HOME/grasp/viz_overlay.json" 2>/dev/null || true  # 라이브 뷰 오버레이
 
 if [ -n "$DRY" ]; then _lap "dry — exec 생략"; exit 0; fi
 
