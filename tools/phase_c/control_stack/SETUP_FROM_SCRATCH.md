@@ -114,18 +114,38 @@ T3  ~/ros2_ws/mcp/nero_pc_control.sh up            (planning_node + MCP :9000)
 source /opt/ros/humble/setup.bash && source ~/ros2_ws/install/setup.bash
 cd ~/ros2_ws/src/nero_sj_pickplace/tools/phase_c
 
-# 1) 현재 flange 뷰에서 물체 캡처 (SAM 마스크)
+# 1) 현재 flange 뷰에서 물체 캡처 (SAM 마스크 + RGB — RGB 는 VLM 시맨틱 패스용)
 python3 capture_flange_npz.py --label cup --sam --out ~/grasp/cuppick.npz
 
-# 2) Thor 파이프라인 (CGN→rank→STOMP)
-rsync -q ~/grasp/cuppick.npz thor:~/grasp/cuppick.npz
+# 2) Thor 파이프라인 (A' VLM 시맨틱 → A CGN → B rank → C STOMP).  npz + rgb.png 둘 다 rsync.
+rsync -q ~/grasp/cuppick.npz ~/grasp/cuppick.rgb.png thor:~/grasp/
 ssh thor '~/grasp/run_pipeline.sh ~/grasp/cuppick.npz bottle'
 rsync -q thor:~/grasp/step6_pick.json ~/grasp/step6_pick.json
 
-# 3) 실행 (verdict: grip_after_close > 0.020 = HELD)
+# 3) 실행 (verdict: grip_after_close > 0.020 = HELD). 끝에 <ts>.exec.json 을 Thor runs/ 로 올림.
 python3 exec_pick.py
 ```
 `--label` : `cup`/`bottle`/`box` 등. bottle-류는 원통(side), box 는 top.
+
+### VLM 시맨틱 패스 (Task 1~3, 선택)
+
+`~/grasp/vlm_server.sh up` (Thor, Qwen3-VL vLLM :8005, 기동 ~90s, GPU ~4GB+) 를 띄우면
+run_pipeline 이 매 사이클 RGB 를 VLM 에 보내 `{obj}_sem.json`(grasp_region / exclude /
+keep_upright / shape) 을 만들고, two_pick_plan_fast 가 **aspect_w 분기 대신 CGN raw grasp
+단일 랭킹** + 손잡이 제외 필터로 동작. vLLM down 이면 조용히 기하 전용으로 폴백.
+
+```bash
+ssh thor '~/grasp/vlm_server.sh up'      # 켤 때만
+ssh thor '~/grasp/vlm_server.sh down'    # GPU 회수
+```
+
+### 계측 로그 (Task 0)
+
+매 사이클 `~/grasp/runs/<ts>.json`(plan) + `<ts>.exec.json`(exec verdict, PC 가 rsync).
+
+```bash
+ssh thor 'python3 ~/grasp/runs/show.py 20'   # 최근 20 사이클 표 (cgn/reach/frac/j1/verdict/타이밍)
+```
 
 ---
 

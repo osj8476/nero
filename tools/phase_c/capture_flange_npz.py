@@ -22,7 +22,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, qos_profile_sensor_data
-from sensor_msgs.msg import Image, CameraInfo
+from sensor_msgs.msg import Image, CameraInfo, JointState
 from std_msgs.msg import String
 from tf2_ros import Buffer, TransformListener
 
@@ -117,20 +117,29 @@ def main():
         arr = np.frombuffer(m.data, np.uint8).reshape(m.height, m.width, -1)[..., :3]
         got["rgb"] = arr[..., ::-1].copy() if m.encoding.startswith("bgr") else arr.copy()
 
+    ARM_J = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint7"]
+
+    def on_js(m):
+        d = dict(zip(m.name, m.position))
+        if all(j in d for j in ARM_J):
+            got["arm_q"] = [float(d[j]) for j in ARM_J]
+
     be = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
                     history=HistoryPolicy.KEEP_LAST, depth=10)
     n.create_subscription(CameraInfo, "/camera/camera_info", on_info, qos_profile_sensor_data)
     n.create_subscription(Image, "/camera/depth/image_raw", on_depth, qos_profile_sensor_data)
     n.create_subscription(String, "/detected_objects", on_det, be)
-    if a.sam:
-        n.create_subscription(Image, "/camera/color/image_raw", on_rgb, qos_profile_sensor_data)
+    # RGB 는 항상 구독 (SAM 마스크용 + VLM 시맨틱 패스용 <out>.rgb.png). pre 조건엔 sam 일 때만 넣음.
+    n.create_subscription(Image, "/camera/color/image_raw", on_rgb, qos_profile_sensor_data)
+    # 팔 관절각 — Thor 계획 seed 로 npz 에 실음 (A 수정: 하드코딩 SEED 제거)
+    n.create_subscription(JointState, "/joint_states", on_js, qos_profile_sensor_data)
 
     if a.sam:
-        pre = ("K", "depth", "rgb")
+        pre = ("K", "depth", "rgb", "arm_q")
     elif a.world_aabb:
-        pre = ("K", "depth")
+        pre = ("K", "depth", "arm_q")
     else:
-        pre = ("K", "depth", "bbox")
+        pre = ("K", "depth", "bbox", "arm_q")
     t0 = time.time()
     while time.time() - t0 < a.timeout:
         rclpy.spin_once(n, timeout_sec=0.2)
@@ -140,9 +149,14 @@ def main():
                 break
             except Exception:
                 pass
-    for k in pre + ("tf",):
+    for k in tuple(x for x in pre if x != "arm_q") + ("tf",):
         if k not in got:
             print(f"[capture] 못 받음: {k}", file=sys.stderr); rclpy.shutdown(); sys.exit(1)
+    # arm_q 는 soft — 못 받았으면 잠깐 더 기다림 (75Hz 라 거의 항상 옴)
+    for _ in range(15):
+        if "arm_q" in got:
+            break
+        rclpy.spin_once(n, timeout_sec=0.1)
 
     K3 = got["K"]; fx, fy, cx, cy = K3[0, 0], K3[1, 1], K3[0, 2], K3[1, 2]
     depth = got["depth"]; H, W = depth.shape
@@ -208,11 +222,25 @@ def main():
     ids = dict(bottle_id=np.array([1]), box_id=np.array([-1])) if a.is_bottle \
         else dict(box_id=np.array([1]), bottle_id=np.array([-1]))
     wk = "cyl_world" if a.is_bottle else "box_world"
+    extra = {}
+    if "arm_q" in got:
+        extra["arm_q"] = np.array(got["arm_q"], dtype=np.float64)
+    else:
+        print("[capture] /joint_states 못 받음 — Thor 계획이 기본 SEED 사용", file=sys.stderr)
     np.savez(a.out, depth_m=zf.astype(np.float32), seg=seg,
              K=np.array([fx, fy, cx, cy], dtype=np.float64),
              W_T_cam=W_T_cam.astype(np.float64),
-             **{wk: obj_world.astype(np.float64)}, **ids)
-    print(json.dumps({"out": a.out, "label": a.label,
+             **{wk: obj_world.astype(np.float64)}, **ids, **extra)
+
+    rgb_png = None
+    if "rgb" in got:
+        try:
+            import cv2
+            rgb_png = a.out[:-4] + ".rgb.png" if a.out.endswith(".npz") else a.out + ".rgb.png"
+            cv2.imwrite(rgb_png, np.ascontiguousarray(got["rgb"][..., :3][..., ::-1]))
+        except Exception as e:
+            print(f"[capture] RGB 저장 실패: {e}", file=sys.stderr); rgb_png = None
+    print(json.dumps({"out": a.out, "label": a.label, "rgb_png": rgb_png,
                       "target": "bottle(side)" if a.is_bottle else "box(top)",
                       "mode": "yolo_sam" if a.sam else ("world_aabb" if a.world_aabb else "yolo_bbox"),
                       "seg_px": npx, "bbox_px": info_bbox,
