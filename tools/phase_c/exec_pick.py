@@ -87,7 +87,10 @@ def grip(pos, label, hold=2.0, settle=None):
 
 START_Q = [st.get(j, 0.0) for j in ARM]
 res = {"start": {j: round(x, 3) for j, x in zip(ARM, START_Q)}}
-GOPEN = [0.05, -0.05]; GCLOSE = [0.014, -0.014]
+GOPEN = [0.05, -0.05]
+_gc = float(D.get("grip_close", 0.014))            # 파트 반폭 기반 (얇은 손잡이면 자동 좁게)
+GCLOSE = [_gc, -_gc]
+print(f"[exec] grip_close = {_gc:.3f}/jaw")
 PLANS = D.get("plans", [D])
 
 grip(GOPEN, "grip-open", hold=3.0, settle=0.004)   # 0.014->0.05 이동에 시간 필요
@@ -139,10 +142,11 @@ res["final"] = {j: round(st.get(j, 0), 3) for j in ARM}
 gf1 = st.get("gripper_joint1", 0.0)
 res["grip_final"] = [round(gf1, 4), round(st.get("gripper_joint2", 0), 4)]
 gc1 = res["grip_after_close"][0]
-# 성공 판정: 그리퍼가 완전히 안 닫힘(= 손끝 사이에 물체) -> HELD. (씬 캡처 안 함)
-CLOSED = 0.020                       # 이 이하면 사실상 완전히 닫힘 = 허공
-held_close = bool(gc1 > CLOSED)
-held_final = bool(gf1 > 0.018)       # lift 후에도 유지됐나 (얇은 벽 핀치는 여기서 빠짐)
+# 성공 판정: 폐합 목표(_gc)보다 조가 유의미하게 덜 닫힘 = 손끝 사이에 물체. (씬 캡처 안 함)
+# 얇은 손잡이(_gc 작음)든 몸통(_gc 큼)이든 상대 기준.
+MARGIN = 0.004
+held_close = bool(gc1 > _gc + MARGIN)
+held_final = bool(gf1 > _gc + MARGIN - 0.002)   # lift 후에도 유지됐나 (얇은 핀치는 여기서 빠짐)
 res["held"] = held_close and held_final
 if held_close and held_final:
     res["verdict"] = "HELD"

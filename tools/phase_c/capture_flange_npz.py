@@ -63,7 +63,9 @@ def quat_to_R(x, y, z, w):
     ])
 
 
-BOTTLE_LABELS = {"bottle", "cup", "vase", "cylinder", "can", "wine glass", "banana"}
+BOTTLE_LABELS = {"bottle", "cup", "vase", "cylinder", "can", "wine glass", "banana",
+                 "pot", "kettle", "mug"}   # pot/kettle 몸통 = 넓은 원통 -> side/cyl 취급
+#  (pan 은 손잡이 달린 얕은 원반이라 box/top 으로 두되, 손잡이 grasp 은 --task 로)
 
 
 def main():
