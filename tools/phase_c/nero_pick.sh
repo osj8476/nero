@@ -36,7 +36,12 @@ t0=$EPOCHREALTIME
 _lap() { awk "BEGIN{printf \"  [%5.1fs] %s\n\", $EPOCHREALTIME-$t0, \"$1\"}"; }
 
 echo "══ 1. capture (label=$LABEL) ══"
-python3 capture_flange_npz.py --label "$LABEL" --sam --out "$NPZ" | grep -E 'seg_px|obj_world|arm_q|못 받음' || true
+rm -f "$NPZ" "${NPZ%.npz}.rgb.png"
+if ! python3 capture_flange_npz.py --label "$LABEL" --sam --out "$NPZ" > /tmp/nero_cap.out 2>&1 || [ ! -f "$NPZ" ]; then
+    echo "!! capture 실패 — stale 데이터로 진행하지 않고 중단:"; tail -4 /tmp/nero_cap.out | sed 's/^/   /'
+    exit 1
+fi
+grep -E 'seg_px|obj_world|arm_q|못 받음' /tmp/nero_cap.out || true
 _lap "capture 완료"
 
 echo "══ 2. → Thor  파이프라인 (obj=$OBJ${TASK:+, task=\"$TASK\"}) ══"
