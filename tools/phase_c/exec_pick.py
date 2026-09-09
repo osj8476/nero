@@ -88,9 +88,12 @@ def grip(pos, label, hold=2.0, settle=None):
 START_Q = [st.get(j, 0.0) for j in ARM]
 res = {"start": {j: round(x, 3) for j, x in zip(ARM, START_Q)}}
 GOPEN = [0.05, -0.05]
-_gc = float(D.get("grip_close", 0.014))            # 파트 반폭 기반 (얇은 손잡이면 자동 좁게)
+# grip_close(Thor) = "닿는" 반폭. 여기서 SQUEEZE 만큼 더 안쪽으로 명령 -> 위치제어기가
+# 물체에 계속 힘을 밀어넣음 (Isaac 그리퍼 물리엔 힘 파라미터 직접 제어 불가, 과폐합이 레버).
+SQUEEZE = 0.013
+_gc = float(max(0.008, D.get("grip_close", 0.014) - SQUEEZE))
 GCLOSE = [_gc, -_gc]
-print(f"[exec] grip_close = {_gc:.3f}/jaw")
+print(f"[exec] grip_close = {_gc:.3f}/jaw  (touch {D.get('grip_close', 0.014):.3f} - squeeze {SQUEEZE})")
 PLANS = D.get("plans", [D])
 
 grip(GOPEN, "grip-open", hold=3.0, settle=0.004)   # 0.014->0.05 이동에 시간 필요
@@ -132,11 +135,13 @@ if st.get("gripper_joint1", 0) > _g_before - 0.004:      # 안 움직임 -> goal
     print(f"[warn] 그리퍼가 안 닫힘 ({st.get('gripper_joint1',0):.3f}) — 재전송")
     grip(GCLOSE, "grip-close2", hold=2.5)
 res["grip_after_close"] = [round(st.get("gripper_joint1", 0), 4), round(st.get("gripper_joint2", 0), 4)]
+grip(GCLOSE, "grip-squeeze", hold=1.2)                  # retreat/lift 전 재-압박
 exec_traj(P["retreat"], dt=0.20, label="retreat")
+grip(GCLOSE, "grip-squeeze2", hold=0.8)
 cur = [st.get(j, 0.0) for j in ARM]
 lift = cur[:]; lift[1] -= 0.35; lift[3] -= 0.20
 exec_traj([lift], dt=2.0, label="lift")
-grip(GCLOSE, "grip-hold", hold=0.5)
+grip(GCLOSE, "grip-hold", hold=1.5)
 
 res["final"] = {j: round(st.get(j, 0), 3) for j in ARM}
 gf1 = st.get("gripper_joint1", 0.0)
