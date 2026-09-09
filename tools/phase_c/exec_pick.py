@@ -66,22 +66,40 @@ def reached(target, tol=0.12):
     return e, e < tol
 
 
-def grip(pos, label, hold=2.0, settle=None):
+def _grip_once(pos, hold, settle):
     jt = JointTrajectory(); jt.joint_names = list(GRIP)
     p = JointTrajectoryPoint(); p.positions = [float(x) for x in pos]
     p.time_from_start.sec = 1
     jt.points = [p]
     g = FollowJointTrajectory.Goal(); g.trajectory = jt
     fut = gc.send_goal_async(g); rclpy.spin_until_future_complete(n, fut, timeout_sec=5)
-    gh = fut.result(); rf = gh.get_result_async()
+    gh = fut.result()
+    if gh is None or not gh.accepted:
+        return False
+    rf = gh.get_result_async()
     t0 = time.time()
-    # settle: 목표 근처(±settle)에 실제 도달할 때까지 대기 (hold 는 하한/상한)
     while time.time() - t0 < hold:
         rclpy.spin_once(n, timeout_sec=0.1)
         if rf.done():
             break
         if settle is not None and abs(st.get("gripper_joint1", 0) - pos[0]) < settle and time.time() - t0 > 0.6:
             break
+    return True
+
+
+def grip(pos, label, hold=2.0, settle=None, tries=3):
+    """그리퍼 명령이 씹히는 경우가 있어(궤적 직후 컨트롤러 busy) 안 움직이면 재전송."""
+    g0 = st.get("gripper_joint1", 0.05)
+    for k in range(tries):
+        _grip_once(pos, hold if k == 0 else max(1.0, hold * 0.6), settle)
+        g1 = st.get("gripper_joint1", 0.05)
+        # 목표쪽으로 유의미하게 움직였거나 (닫힘: 감소 / 열림: 증가) 목표 근처면 OK
+        moved = abs(g1 - g0) > 0.006 or abs(g1 - pos[0]) < 0.006
+        if moved:
+            break
+        if k < tries - 1:
+            print(f"[{label}] 안 움직임 ({g1:.3f}) — 재전송 {k+2}/{tries}")
+            time.sleep(0.3)
     print(f"[{label}] grip=({st.get('gripper_joint1',0):.3f}, {st.get('gripper_joint2',0):.3f})")
 
 
@@ -129,15 +147,11 @@ if P is None:
     rclpy.shutdown(); raise SystemExit
 
 res["at_grasp"] = {j: round(st.get(j, 0), 3) for j in ARM}
-_g_before = st.get("gripper_joint1", 0.05)
-grip(GCLOSE, "grip-close", hold=2.5)
-if st.get("gripper_joint1", 0) > _g_before - 0.004:      # 안 움직임 -> goal 씹힘, 재전송
-    print(f"[warn] 그리퍼가 안 닫힘 ({st.get('gripper_joint1',0):.3f}) — 재전송")
-    grip(GCLOSE, "grip-close2", hold=2.5)
+time.sleep(0.4)                                          # 궤적 직후 컨트롤러 정착
+grip(GCLOSE, "grip-close", hold=2.5, tries=4)            # grip() 내부에서 안 움직이면 재전송
 res["grip_after_close"] = [round(st.get("gripper_joint1", 0), 4), round(st.get("gripper_joint2", 0), 4)]
 grip(GCLOSE, "grip-squeeze", hold=1.2)                  # retreat/lift 전 재-압박
 exec_traj(P["retreat"], dt=0.20, label="retreat")
-grip(GCLOSE, "grip-squeeze2", hold=0.8)
 cur = [st.get(j, 0.0) for j in ARM]
 lift = cur[:]; lift[1] -= 0.35; lift[3] -= 0.20
 exec_traj([lift], dt=2.0, label="lift")
