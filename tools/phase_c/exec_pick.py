@@ -105,16 +105,18 @@ def grip(pos, label, hold=2.0, settle=None, tries=3):
 
 START_Q = [st.get(j, 0.0) for j in ARM]
 res = {"start": {j: round(x, 3) for j, x in zip(ARM, START_Q)}}
-GOPEN = [0.05, -0.05]
-# grip_close(Thor) = "닿는" 반폭. 여기서 SQUEEZE 만큼 더 안쪽으로 명령 -> 위치제어기가
-# 물체에 계속 힘을 밀어넣음 (Isaac 그리퍼 물리엔 힘 파라미터 직접 제어 불가, 과폐합이 레버).
-SQUEEZE = 0.013
-_gc = float(max(0.008, D.get("grip_close", 0.014) - SQUEEZE))
-GCLOSE = [_gc, -_gc]
-print(f"[exec] grip_close = {_gc:.3f}/jaw  (touch {D.get('grip_close', 0.014):.3f} - squeeze {SQUEEZE})")
+# 그리퍼 하드코딩 (2026-09-10 사용자 지시): open=1, close=0.
+# ros2_control 이 관절 limit (joint1: 0~0.05, joint2: -0.05~0) 으로 클램프.
+# ★ 정확히 limit(0.0) 을 goal 로 주면 FollowJointTrajectory 컨트롤러가 goal 을 거부해
+#   (관절값이 안 움직임) → limit 에서 3mm 안쪽으로. 사실상 완전 폐합 + 물체 최대 압력.
+GOPEN  = [1.0, -1.0]
+GCLOSE = [0.003, -0.003]
+_gc = 0.0
+HELD_MIN = 0.006                                   # 손끝 사이 6mm 이상 = 파지됨 (close 0.003 기준)
+print("[exec] gripper 하드코딩: open=1(→0.05) / close≈0 (0.003, limit 회피)")
 PLANS = D.get("plans", [D])
 
-grip(GOPEN, "grip-open", hold=3.0, settle=0.004)   # 0.014->0.05 이동에 시간 필요
+grip(GOPEN, "grip-open", hold=3.0, settle=0.004)   # 완전 개방
 if st.get("gripper_joint1", 0) < 0.040:
     print(f"[warn] 그리퍼가 덜 열림 ({st.get('gripper_joint1',0):.3f}) — 재시도")
     grip(GOPEN, "grip-open2", hold=3.0, settle=0.004)
@@ -150,22 +152,30 @@ res["at_grasp"] = {j: round(st.get(j, 0), 3) for j in ARM}
 time.sleep(0.4)                                          # 궤적 직후 컨트롤러 정착
 grip(GCLOSE, "grip-close", hold=2.5, tries=4)            # grip() 내부에서 안 움직이면 재전송
 res["grip_after_close"] = [round(st.get("gripper_joint1", 0), 4), round(st.get("gripper_joint2", 0), 4)]
-grip(GCLOSE, "grip-squeeze", hold=1.2)                  # retreat/lift 전 재-압박
-exec_traj(P["retreat"], dt=0.20, label="retreat")
-cur = [st.get(j, 0.0) for j in ARM]
-lift = cur[:]; lift[1] -= 0.35; lift[3] -= 0.20
-exec_traj([lift], dt=2.0, label="lift")
+grip(GCLOSE, "grip-squeeze", hold=1.2)                  # 재-압박
+
+exec_traj(P["retreat"], dt=0.20, label="retreat")      # grasp -> pre (approach 축 반대로)
+
+# lift: step6 가 pre 에서 계산한 Cartesian 수직 상승. 관절델타(j2/j4) lift 폐기
+# (2026-09-10: 하드코딩 관절 lift 가 그리퍼를 기울여 물체 slide — 병 실측).
+if P.get("lift"):
+    exec_traj(P["lift"], dt=0.30, label="lift-z")
+else:
+    print("[lift] Cartesian lift 없음 -> 폴백 관절 lift")
+    cur = [st.get(j, 0.0) for j in ARM]
+    _lf = cur[:]; _lf[1] -= 0.35; _lf[3] -= 0.20
+    exec_traj([_lf], dt=2.0, label="lift-fallback")
 grip(GCLOSE, "grip-hold", hold=1.5)
 
 res["final"] = {j: round(st.get(j, 0), 3) for j in ARM}
 gf1 = st.get("gripper_joint1", 0.0)
 res["grip_final"] = [round(gf1, 4), round(st.get("gripper_joint2", 0), 4)]
 gc1 = res["grip_after_close"][0]
-# 성공 판정: 폐합 목표(_gc)보다 조가 유의미하게 덜 닫힘 = 손끝 사이에 물체. (씬 캡처 안 함)
-# 얇은 손잡이(_gc 작음)든 몸통(_gc 큼)이든 상대 기준.
-MARGIN = 0.004
-held_close = bool(gc1 > _gc + MARGIN)
-held_final = bool(gf1 > _gc + MARGIN - 0.002)   # lift 후에도 유지됐나 (얇은 핀치는 여기서 빠짐)
+# 성공 판정: close 를 명령했는데 조가 "완전 폐합도 완전 개방도 아닌" 중간에 멈춤 = 손끝 사이에 물체.
+# ★ 조가 완전 개방(≈0.05)이면 그리퍼가 놓아버린 것 -> held 아님 (이전 로직은 이걸 HELD 로 오판).
+OPEN_POS = 0.045
+held_close = bool(HELD_MIN < gc1 < OPEN_POS)
+held_final = bool(HELD_MIN - 0.002 < gf1 < OPEN_POS)   # lift 후에도 물체가 조 사이에 있나
 res["held"] = held_close and held_final
 if held_close and held_final:
     res["verdict"] = "HELD"

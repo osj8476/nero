@@ -25,8 +25,10 @@ while [ $# -gt 0 ]; do case "$1" in
   *) echo "무시: $1"; shift ;;
 esac; done
 # cup/bottle/cyl 류(pot/kettle/mug 포함)는 npz 가 bottle_id 로 → OBJ=bottle.
-# box·pan(얕은 원반) 은 box_id → OBJ=box.  (capture 의 BOTTLE_LABELS 와 일치시킬 것)
-[ -z "$OBJ" ] && { case "$LABEL" in box|pan|book|laptop|tray) OBJ=box ;; *) OBJ=bottle ;; esac; }
+# box·pan·bowl(얕은 원반/그릇) 은 box_id → OBJ=box.
+# ★ capture 의 BOTTLE_LABELS 와 반드시 일치시킬 것 — 불일치 시 stale {obj}_grasps.json 로
+#   계획되는 버그 (bowl 이 bottle 로 라우팅됐다가 이전 컵 데이터로 pick 된 사고, 2026-09-10).
+[ -z "$OBJ" ] && { case "$LABEL" in box|pan|bowl|tray|plate|dish|book|laptop) OBJ=box ;; *) OBJ=bottle ;; esac; }
 
 source /opt/ros/humble/setup.bash
 source "$HOME/ros2_ws/install/setup.bash"
@@ -46,7 +48,7 @@ _lap "capture 완료"
 
 echo "══ 2. → Thor  파이프라인 (obj=$OBJ${TASK:+, task=\"$TASK\"}) ══"
 rsync -q "$NPZ" "${NPZ%.npz}.rgb.png" thor:grasp/
-ssh thor "${SEMOFF:+NERO_SEM_OFF=1 }${NOCACHE:+NERO_SEM_NOCACHE=1 }~/grasp/run_pipeline.sh ~/grasp/pick.npz $OBJ $LABEL $(printf '%q' "$TASK")" 2>&1 \
+ssh thor "${SEMOFF:+NERO_SEM_OFF=1 }${NOCACHE:+NERO_SEM_NOCACHE=1 }~/grasp/run_pipeline.sh ~/grasp/pick.npz $OBJ $(printf '%q' "$LABEL") $(printf '%q' "$TASK")" 2>&1 \
   | grep -E 'seed\]|sem\]|regions\]|오탐|unified rank|reachable:|plan [0-9]|no reachable|중단|approach \[|Cartesian fraction|캐시 HIT' || true
 _lap "Thor 파이프라인 완료"
 
