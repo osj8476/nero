@@ -14,6 +14,7 @@
 #   4. spawn_controllers (1회 실행, arm/gripper/joint_state_broadcaster)
 #   5. move_group
 #   6. rqt_joint_trajectory_controller (조인트 슬라이더 UI, ENABLE_RQT_JTC=true 일 때)
+#   10. planning_node + nero-robot MCP(:9000)  (ENABLE_PC_CONTROL=true — nero_pc_control.sh up)
 #
 # 기본 off (2026-09-08, CGN 재설계 이후 — 구 비전 파지 경로에만 필요):
 #   - 카메라 정적 TF          ENABLE_CAMERA_TF=true 로 켬
@@ -23,9 +24,11 @@
 #
 # 이 스크립트가 켜지 않는 것 (직접 별도 터미널에서 실행):
 #   - Claude Code CLI
-#   - planning_node + mcp_robot_server(:9000)
-#       -> ~/ros2_ws/mcp/nero_pc_control.sh up   (nero-robot MCP 자연어 조인트 제어)
 #   - CGN pick 파이프라인은 이 스택 불필요 (Thor + Isaac execute_script)
+#
+# [2026-09-10] planning_node + nero-robot MCP(:9000) 도 이 스크립트가 같이 켠다
+#   (ENABLE_PC_CONTROL=true, 내부에서 nero_pc_control.sh up 호출).
+#   Ctrl+C 시 cleanup 이 nero_pc_control.sh down 도 같이 부른다.
 #
 # 종료: 이 스크립트가 실행 중인 터미널에서 Ctrl+C 한 번
 #       -> trap이 모든 백그라운드 프로세스(Isaac Sim 포함)를 정리함
@@ -84,6 +87,8 @@ ENABLE_RQT_JTC=false
 ENABLE_CAMERA_TF=true       # gripper_base -> camera_color_optical_frame 정적 TF (PC 카메라 뷰 3D화)
 ENABLE_VISUALIZE=true       # visualize_3d_bpdl (YOLO bbox + cam/base XYZ 오버레이 창, q 로 종료)
 ENABLE_PERCEPTION=true      # perception_node_sim (YOLO 박스 검출; YOLO 서버는 Thor :8002)
+ENABLE_PC_CONTROL=true      # planning_node + nero-robot MCP(:9000) 도 같이 (nero_pc_control.sh up/down)
+PC_CONTROL_SH="/home/bpdl/ros2_ws/mcp/nero_pc_control.sh"
 
 # ── 박스 위치 랜덤화 설정 (2026-07 추가) ──────────────────────────────────
 # 실행할 때마다 TestBox/TestBox1/TestBox2를 안전 영역 내 새 랜덤 위치로
@@ -132,9 +137,17 @@ LOG_DIR="/tmp/nero_isaac_logs"
 mkdir -p "$LOG_DIR"
 
 PIDS=()
+_cleaned=0
 cleanup() {
+    [ "$_cleaned" = 1 ] && return; _cleaned=1
     echo ""
-    echo "🛑 전체 종료 중... (${PIDS[*]})"
+    echo "🛑 전체 종료 중..."
+    # planning_node + nero-robot MCP 는 별도 tmux 세션(nero_pc)이라 PIDS 로 안 잡힘 → 따로 down
+    if [ "${ENABLE_PC_CONTROL:-false}" = true ] && [ -x "$PC_CONTROL_SH" ]; then
+        echo "  nero_pc_control.sh down (planning_node + MCP :9000)"
+        "$PC_CONTROL_SH" down 2>/dev/null || true
+    fi
+    echo "  백그라운드 프로세스: ${PIDS[*]}"
     kill "${PIDS[@]}" 2>/dev/null || true
     wait 2>/dev/null || true
     echo "✅ 정리 완료. 로그는 $LOG_DIR 에 남아있습니다."
@@ -268,8 +281,31 @@ else
     echo "9) perception_node_sim — 건너뜀 (ENABLE_PERCEPTION=false)"
 fi
 
-#echo "10) planning_node"
-#run_bg "10_planning" "${SRC_CMD} && ros2 run sj_pickplace planning_node --ros-args -p use_moveit2:=true"
+if [ "$ENABLE_PC_CONTROL" = true ]; then
+    echo "10) planning_node + nero-robot MCP(:9000)  —  nero_pc_control.sh up"
+    if [ -x "$PC_CONTROL_SH" ]; then
+        # move_group 가 실제로 뜬 뒤 호출 (nero_pc_control 의 prereq 체크 통과하도록 최대 30s 대기)
+        printf "   move_group 대기"
+        for i in $(seq 1 30); do
+            if bash -c "${SRC_CMD} && ros2 node list 2>/dev/null" | grep -qx /move_group; then
+                echo " — OK"; break
+            fi
+            printf "."; sleep 1
+            [ "$i" -eq 30 ] && echo " — 타임아웃 (그래도 시도)"
+        done
+        # set -e 상태라 실패해도 스크립트가 죽지 않게 if 로 감쌈
+        if "$PC_CONTROL_SH" up; then
+            echo "   -> planning_node + MCP :9000 기동 완료. Claude Code 에서 /mcp 로 확인."
+        else
+            echo "   ⚠️ nero_pc_control.sh up 실패 — planning/MCP 없이 계속."
+            echo "      수동 재시도: $PC_CONTROL_SH up"
+        fi
+    else
+        echo "   ⚠️ $PC_CONTROL_SH 없음/실행불가 — 건너뜀"
+    fi
+else
+    echo "10) planning_node + MCP — 건너뜀 (ENABLE_PC_CONTROL=false)"
+fi
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -277,10 +313,10 @@ echo "✅ 전체 기동 완료. 확인용 명령어:"
 echo "   ros2 node list"
 echo "   ros2 topic list | grep -E 'joint_states|controller|camera'"
 echo "   tail -f ${LOG_DIR}/5_move_group.log   # move_group 로그 실시간 확인"
+echo "   $PC_CONTROL_SH status                 # planning_node + MCP :9000 상태"
 echo ""
-echo "nero-robot MCP(자연어 조인트 제어)가 필요하면 다른 터미널에서:"
-echo "   ~/ros2_ws/mcp/nero_pc_control.sh up"
-echo "종료: 이 터미널에서 Ctrl+C"
+echo "Claude Code 에서:  /mcp  (nero-robot 이 connected 인지 확인)"
+echo "종료: 이 터미널에서 Ctrl+C  (Isaac Sim·ROS 스택 + planning_node + MCP 전부 정리)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 wait
